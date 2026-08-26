@@ -51,13 +51,14 @@ const NEXT_PHASES: Readonly<Record<Phase, readonly Phase[]>> = {
   'recovery-required': ['rolling-back'],
 }
 
-/** Immutable executable identities embedded in the operation opening event. */
+/** Immutable executable and Host-home identities embedded in the operation opening event. */
 export interface RecoveryExecutableBinding {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly executablePath: string
   readonly executableSha256: string
   readonly hostCliPath: string
   readonly hostCliSha256: string
+  readonly hostHome: string
   readonly packageVersion: string
   readonly platform: 'darwin' | 'linux' | 'win32'
   readonly arch: string
@@ -98,6 +99,15 @@ interface ProfileInventory {
   readonly active: GenerationSummary | null
   readonly staged: readonly GenerationSummary[]
   readonly recoverable: readonly GenerationSummary[]
+}
+
+interface RestoreReceipt {
+  readonly mutationId: string
+  readonly status: 'committed'
+  readonly operation: 'restore'
+  readonly before: ProfileSnapshot
+  readonly after: ProfileSnapshot
+  readonly restartRequired: true
 }
 
 interface HostResult {
@@ -369,20 +379,25 @@ function decodeRecoveryExecutable(value: unknown): RecoveryExecutableBinding {
     'executableSha256',
     'hostCliPath',
     'hostCliSha256',
+    'hostHome',
     'packageVersion',
     'platform',
     'arch',
   ], 'journal recoveryExecutable')
-  if (record.schemaVersion !== 1) failure('journal recoveryExecutable schemaVersion is unsupported')
+  if (record.schemaVersion !== 2) failure('journal recoveryExecutable schemaVersion is unsupported')
   const executablePath = boundedString(record.executablePath, 'journal recoveryExecutable.executablePath', 4_096)
   const hostCliPath = boundedString(record.hostCliPath, 'journal opening recoveryExecutable.hostCliPath', 4_096)
-  if (!isAbsolute(executablePath) || !isAbsolute(hostCliPath)) failure('recovery executable paths must be absolute')
+  const hostHome = boundedString(record.hostHome, 'journal opening recoveryExecutable.hostHome', 4_096)
+  if (!isAbsolute(executablePath) || !isAbsolute(hostCliPath) || !isAbsolute(hostHome)) {
+    failure('recovery executable paths and Host home must be absolute')
+  }
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     executablePath,
     executableSha256: digest(record.executableSha256, 'journal recoveryExecutable.executableSha256'),
     hostCliPath,
     hostCliSha256: digest(record.hostCliSha256, 'journal opening recoveryExecutable.hostCliSha256'),
+    hostHome,
     packageVersion: boundedString(record.packageVersion, 'journal recoveryExecutable.packageVersion', 128),
     platform: literal(record.platform, ['darwin', 'linux', 'win32'], 'journal recoveryExecutable.platform'),
     arch: boundedString(record.arch, 'journal recoveryExecutable.arch', 64),
@@ -501,7 +516,10 @@ function decodeEntry(value: unknown, context: Readonly<{
     const from = literal(record.from, PHASES, 'journal phase transition from')
     const to = literal(record.to, PHASES, 'journal phase transition to')
     if (from !== context.phase || !NEXT_PHASES[from].includes(to)) failure(`invalid journal transition from ${from} to ${to}`)
-    nullableDigest(record.evidenceDigest, 'journal phase transition evidenceDigest')
+    const evidenceDigest = nullableDigest(record.evidenceDigest, 'journal phase transition evidenceDigest')
+    if (!['committed', 'rolled-back', 'failed'].includes(to) && evidenceDigest !== null) {
+      failure('non-terminal journal transitions cannot publish final evidence')
+    }
     if (record.reason !== null
       && (typeof record.reason !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(record.reason))) {
       failure('journal phase transition reason is invalid')
@@ -571,6 +589,7 @@ async function verifyJournal(centerRoot: string, operationId: string): Promise<V
   if (eventCount !== eventEntries.length) failure('operation CURRENT does not anchor every durable event')
 
   let priorDigest: string | null = null
+  let priorAtMs = 0
   let phase: Phase | null = null
   let opening: Opening | null = null
   let receiptSeen = false
@@ -589,7 +608,8 @@ async function verifyJournal(centerRoot: string, operationId: string): Promise<V
       failure(`journal event ${String(sequence)} identity is invalid`)
     }
     if (event.previousDigest !== priorDigest) failure(`journal event ${String(sequence)} chain is invalid`)
-    safeInteger(event.atMs, `journal event ${String(sequence)} atMs`)
+    const atMs = safeInteger(event.atMs, `journal event ${String(sequence)} atMs`)
+    if (index > 0 && atMs < priorAtMs) failure(`journal time moved backwards at event ${String(sequence)}`)
     const eventDigest = digest(event.digest, `journal event ${String(sequence)} digest`)
     if (eventDigest !== `sha256:${match[2]}`) failure(`journal event ${String(sequence)} filename does not match its digest`)
     const unsigned = {
@@ -614,6 +634,7 @@ async function verifyJournal(centerRoot: string, operationId: string): Promise<V
     opening ??= decoded.opening
     receiptSeen = decoded.receiptSeen
     priorDigest = eventDigest
+    priorAtMs = atMs
   }
   if (priorDigest !== headDigest) failure('operation CURRENT headDigest does not match the journal head')
   if (opening === null || phase === null) failure('operation journal has no verified opening')
@@ -628,9 +649,18 @@ async function verifyExecutable(path: string, expectedDigest: string, label: str
   return pinnedRealpath
 }
 
-function hostEnvironment(): NodeJS.ProcessEnv {
-  const allowed = ['DSH_HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'WINDIR'] as const
-  const output: NodeJS.ProcessEnv = {}
+async function verifyHostHome(path: string): Promise<string> {
+  const pinnedRealpath = await realpath(path)
+  const state = await lstat(path)
+  if (pinnedRealpath !== path || !state.isDirectory() || state.isSymbolicLink()) {
+    failure('Host home path is not its canonical real directory')
+  }
+  return pinnedRealpath
+}
+
+function hostEnvironment(hostHome: string): NodeJS.ProcessEnv {
+  const allowed = ['LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'TMPDIR', 'TMP', 'TEMP', 'SYSTEMROOT', 'WINDIR'] as const
+  const output: NodeJS.ProcessEnv = { DSH_HOME: hostHome }
   for (const name of allowed) {
     const value = process.env[name]
     if (value !== undefined) output[name] = value
@@ -638,12 +668,28 @@ function hostEnvironment(): NodeJS.ProcessEnv {
   return output
 }
 
-function runHost(hostCliPath: string, profileId: string, operation: 'list' | 'restore'): Promise<HostResult> {
-  const args = [hostCliPath, 'plugin', '--profile', profileId, operation]
+function recoveryMutationId(operationId: string): string {
+  return `extension-center-recovery-${createHash('sha256').update(operationId).digest('hex')}`
+}
+
+function runHost(
+  hostCliPath: string,
+  hostHome: string,
+  profileId: string,
+  operation: 'list' | 'restore' | 'restore-receipt',
+  mutationId?: string,
+): Promise<HostResult> {
+  const args = [
+    hostCliPath,
+    'plugin', '--profile', profileId, operation,
+    ...operation === 'restore' || operation === 'restore-receipt'
+      ? ['--mutation-id', boundedString(mutationId, 'Host restore mutation id', 128)]
+      : [],
+  ]
   return new Promise((resolvePromise, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: '/',
-      env: hostEnvironment(),
+      env: hostEnvironment(hostHome),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -723,9 +769,8 @@ function parseHostJson(text: string, label: string): unknown {
   }
 }
 
-function decodeInventory(text: string, profileId: string): ProfileInventory {
-  const root = strictRecord(parseHostJson(text, 'Host CLI list'), ['snapshot', 'active', 'staged', 'recoverable'], 'Host Profile inventory')
-  const snapshotRecord = strictRecord(root.snapshot, [
+function decodeSnapshot(value: unknown, profileId: string, label: string): ProfileSnapshot {
+  const snapshotRecord = strictRecord(value, [
     'profile',
     'revision',
     'treeDigest',
@@ -734,20 +779,26 @@ function decodeInventory(text: string, profileId: string): ProfileInventory {
     'lastGoodGeneration',
     'rollbackGeneration',
     'bootStatus',
-  ], 'Host Profile snapshot')
+  ], label)
   const snapshot: ProfileSnapshot = Object.freeze({
-    profile: decodeProfileName(snapshotRecord.profile, 'Host Profile snapshot.profile'),
-    revision: safeInteger(snapshotRecord.revision, 'Host Profile snapshot.revision'),
-    treeDigest: digest(snapshotRecord.treeDigest, 'Host Profile snapshot.treeDigest'),
-    effectivePath: boundedString(snapshotRecord.effectivePath, 'Host Profile snapshot.effectivePath', 4_096),
-    activeGeneration: decodeGeneration(snapshotRecord.activeGeneration, 'Host Profile snapshot.activeGeneration'),
-    lastGoodGeneration: decodeGeneration(snapshotRecord.lastGoodGeneration, 'Host Profile snapshot.lastGoodGeneration'),
-    rollbackGeneration: decodeGeneration(snapshotRecord.rollbackGeneration, 'Host Profile snapshot.rollbackGeneration'),
-    bootStatus: literal(snapshotRecord.bootStatus, ['live', 'pending-restart', 'verified'], 'Host Profile snapshot.bootStatus'),
+    profile: decodeProfileName(snapshotRecord.profile, `${label}.profile`),
+    revision: safeInteger(snapshotRecord.revision, `${label}.revision`),
+    treeDigest: digest(snapshotRecord.treeDigest, `${label}.treeDigest`),
+    effectivePath: boundedString(snapshotRecord.effectivePath, `${label}.effectivePath`, 4_096),
+    activeGeneration: decodeGeneration(snapshotRecord.activeGeneration, `${label}.activeGeneration`),
+    lastGoodGeneration: decodeGeneration(snapshotRecord.lastGoodGeneration, `${label}.lastGoodGeneration`),
+    rollbackGeneration: decodeGeneration(snapshotRecord.rollbackGeneration, `${label}.rollbackGeneration`),
+    bootStatus: literal(snapshotRecord.bootStatus, ['live', 'pending-restart', 'verified'], `${label}.bootStatus`),
   })
   if (snapshot.profile !== profileId || !isAbsolute(snapshot.effectivePath)) {
-    failure('Host Profile inventory does not describe the journal Profile')
+    failure(`${label} does not describe the journal Profile`)
   }
+  return snapshot
+}
+
+function decodeInventory(text: string, profileId: string): ProfileInventory {
+  const root = strictRecord(parseHostJson(text, 'Host CLI list'), ['snapshot', 'active', 'staged', 'recoverable'], 'Host Profile inventory')
+  const snapshot = decodeSnapshot(root.snapshot, profileId, 'Host Profile snapshot')
   const active = root.active === null ? null : decodeSummary(root.active, 'Host Profile active generation')
   if ((snapshot.activeGeneration === null) !== (active === null)
     || active !== null && active.generation !== snapshot.activeGeneration
@@ -766,6 +817,42 @@ function decodeInventory(text: string, profileId: string): ProfileInventory {
   return Object.freeze({ snapshot, active, staged, recoverable })
 }
 
+function decodeRestoreReceipt(text: string, profileId: string, mutationId: string): RestoreReceipt | null {
+  const root = strictRecord(
+    parseHostJson(text, 'Host CLI restore-receipt'),
+    ['profile', 'mutationId', 'status', 'receipt'],
+    'Host Profile restore receipt result',
+  )
+  if (decodeProfileName(root.profile, 'Host Profile restore receipt result.profile') !== profileId
+    || boundedString(root.mutationId, 'Host Profile restore receipt result.mutationId', 128) !== mutationId) {
+    failure('Host Profile restore receipt result does not bind the requested mutation')
+  }
+  const status = literal(root.status, ['not-found', 'committed'], 'Host Profile restore receipt result.status')
+  if (status === 'not-found') {
+    if (root.receipt !== null) failure('Host Profile restore receipt result carries a receipt for not-found')
+    return null
+  }
+  const record = strictRecord(
+    root.receipt,
+    ['mutationId', 'status', 'operation', 'before', 'after', 'restartRequired'],
+    'Host Profile restore receipt',
+  )
+  if (boundedString(record.mutationId, 'Host Profile restore receipt.mutationId', 128) !== mutationId
+    || literal(record.status, ['committed'], 'Host Profile restore receipt.status') !== 'committed'
+    || literal(record.operation, ['restore'], 'Host Profile restore receipt.operation') !== 'restore'
+    || record.restartRequired !== true) {
+    failure('Host Profile restore receipt does not bind one committed restore')
+  }
+  return Object.freeze({
+    mutationId,
+    status: 'committed',
+    operation: 'restore',
+    before: decodeSnapshot(record.before, profileId, 'Host Profile restore receipt.before'),
+    after: decodeSnapshot(record.after, profileId, 'Host Profile restore receipt.after'),
+    restartRequired: true,
+  })
+}
+
 function recoveryTarget(inventory: ProfileInventory, pinned: GenerationSummary): GenerationSummary {
   const target = inventory.snapshot.activeGeneration !== inventory.snapshot.lastGoodGeneration
     ? inventory.snapshot.lastGoodGeneration
@@ -778,18 +865,50 @@ function recoveryTarget(inventory: ProfileInventory, pinned: GenerationSummary):
   return matches[0]!
 }
 
-function verifyRestored(before: ProfileInventory, after: ProfileInventory, target: GenerationSummary): void {
-  if (after.snapshot.revision !== before.snapshot.revision + 1
-    || after.snapshot.activeGeneration !== target.generation
-    || after.snapshot.treeDigest !== target.treeDigest
-    || after.active?.generation !== target.generation
-    || after.active.treeDigest !== target.treeDigest
-    || after.snapshot.lastGoodGeneration !== before.snapshot.lastGoodGeneration
-    || after.snapshot.rollbackGeneration !== before.snapshot.rollbackGeneration) {
+function verifyRestoreTransition(before: ProfileSnapshot, after: ProfileSnapshot, target: GenerationSummary): void {
+  if (after.revision !== before.revision + 1
+    || after.activeGeneration !== target.generation
+    || after.treeDigest !== target.treeDigest
+    || after.lastGoodGeneration !== before.lastGoodGeneration
+    || after.rollbackGeneration !== before.rollbackGeneration) {
     failure('Host Profile inventory does not prove the exact restored generation')
   }
-  const expectedStatus = target.generation === after.snapshot.lastGoodGeneration ? 'verified' : 'pending-restart'
-  if (after.snapshot.bootStatus !== expectedStatus) failure('Host Profile restored generation has an invalid boot status')
+  const expectedStatus = target.generation === after.lastGoodGeneration ? 'verified' : 'pending-restart'
+  if (after.bootStatus !== expectedStatus) failure('Host Profile restored generation has an invalid boot status')
+}
+
+function verifyRestored(before: ProfileInventory, after: ProfileInventory, target: GenerationSummary): void {
+  verifyRestoreTransition(before.snapshot, after.snapshot, target)
+  if (after.active?.generation !== target.generation || after.active.treeDigest !== target.treeDigest) {
+    failure('Host Profile inventory does not prove the exact restored generation')
+  }
+}
+
+function verifyCommittedRestore(
+  receipt: RestoreReceipt,
+  current: ProfileInventory,
+  pinned: GenerationSummary,
+): void {
+  const target = receipt.before.activeGeneration !== receipt.before.lastGoodGeneration
+    ? receipt.before.lastGoodGeneration
+    : receipt.before.rollbackGeneration
+  if (target !== pinned.generation) failure('Host Profile restore receipt does not bind the journal recovery generation')
+  verifyRestoreTransition(receipt.before, receipt.after, pinned)
+  const exactReceiptState = canonicalJson(current.snapshot) === canonicalJson(receipt.after)
+  const acknowledgedReceiptState = receipt.after.bootStatus === 'pending-restart'
+    && current.snapshot.profile === receipt.after.profile
+    && current.snapshot.revision === receipt.after.revision + 1
+    && current.snapshot.treeDigest === receipt.after.treeDigest
+    && current.snapshot.effectivePath === receipt.after.effectivePath
+    && current.snapshot.activeGeneration === receipt.after.activeGeneration
+    && current.snapshot.lastGoodGeneration === receipt.after.activeGeneration
+    && current.snapshot.rollbackGeneration === receipt.after.lastGoodGeneration
+    && current.snapshot.bootStatus === 'verified'
+  if ((!exactReceiptState && !acknowledgedReceiptState)
+    || current.active?.generation !== pinned.generation
+    || current.active.treeDigest !== pinned.treeDigest) {
+    failure('Host Profile current inventory diverged from the committed restore receipt')
+  }
 }
 
 /**
@@ -814,19 +933,49 @@ export async function recoverProfile(centerRoot: string, operationId: string, in
     failure('running recovery executable does not match the journal pin')
   }
   const hostCli = await verifyExecutable(pins.hostCliPath, pins.hostCliSha256, 'Host CLI')
+  const hostHome = await verifyHostHome(pins.hostHome)
 
-  const beforeResult = await runHost(hostCli, journal.opening.profileId, 'list')
+  const mutationId = recoveryMutationId(journal.operationId)
+  const receiptResult = await runHost(
+    hostCli,
+    hostHome,
+    journal.opening.profileId,
+    'restore-receipt',
+    mutationId,
+  )
+  if (receiptResult.exitCode !== 0 || receiptResult.stderr !== '') {
+    failure(`Host CLI restore-receipt probe failed with exit code ${String(receiptResult.exitCode)}`)
+  }
+  const receipt = decodeRestoreReceipt(receiptResult.stdout, journal.opening.profileId, mutationId)
+  if (receipt !== null) {
+    const currentResult = await runHost(hostCli, hostHome, journal.opening.profileId, 'list')
+    if (currentResult.exitCode !== 0 || currentResult.stderr !== '') {
+      failure(`Host CLI committed-restore list failed with exit code ${String(currentResult.exitCode)}`)
+    }
+    const current = decodeInventory(currentResult.stdout, journal.opening.profileId)
+    verifyCommittedRestore(receipt, current, journal.opening.recoveryTarget)
+    await verifyExecutable(pins.hostCliPath, pins.hostCliSha256, 'Host CLI after recovery')
+    return
+  }
+
+  const beforeResult = await runHost(hostCli, hostHome, journal.opening.profileId, 'list')
   if (beforeResult.exitCode !== 0 || beforeResult.stderr !== '') {
     failure(`Host CLI list probe failed with exit code ${String(beforeResult.exitCode)}`)
   }
   const before = decodeInventory(beforeResult.stdout, journal.opening.profileId)
   const target = recoveryTarget(before, journal.opening.recoveryTarget)
-  const restoreResult = await runHost(hostCli, journal.opening.profileId, 'restore')
+  const restoreResult = await runHost(
+    hostCli,
+    hostHome,
+    journal.opening.profileId,
+    'restore',
+    mutationId,
+  )
   if (restoreResult.exitCode !== 0 || restoreResult.stderr !== ''
     || restoreResult.stdout !== `dsh: restored generation ${target.generation}; restart required\n`) {
     failure(`Host CLI restore did not publish generation ${target.generation}`)
   }
-  const afterResult = await runHost(hostCli, journal.opening.profileId, 'list')
+  const afterResult = await runHost(hostCli, hostHome, journal.opening.profileId, 'list')
   if (afterResult.exitCode !== 0 || afterResult.stderr !== '') {
     failure(`Host CLI post-restore list failed with exit code ${String(afterResult.exitCode)}`)
   }

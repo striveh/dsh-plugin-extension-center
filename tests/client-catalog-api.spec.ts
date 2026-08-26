@@ -66,6 +66,11 @@ describe('catalog Client wire validation', () => {
     }
     expect(parseCatalogListResponse(enabled).hostCapabilities.acquisition).toBe(true)
 
+    const activating = structuredClone(enabled)
+    activating.hostCapabilities.acquisition = false
+    activating.hostCapabilities.reason = 'host-capability'
+    expect(parseCatalogListResponse(activating).hostCapabilities.acquisition).toBe(false)
+
     const missingRegistry = structuredClone(enabled)
     missingRegistry.hostCapabilities.skillRegistry = false
     missingRegistry.hostCapabilities.acquisition = false

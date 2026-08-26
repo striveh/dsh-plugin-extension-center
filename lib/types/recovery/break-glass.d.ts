@@ -5,13 +5,14 @@
  * This module imports only Node built-ins so an installed byte-for-byte pin can
  * run after the Center runtime or its dependency graph is unavailable.
  */
-/** Immutable executable identities embedded in the operation opening event. */
+/** Immutable executable and Host-home identities embedded in the operation opening event. */
 export interface RecoveryExecutableBinding {
-    readonly schemaVersion: 1;
+    readonly schemaVersion: 2;
     readonly executablePath: string;
     readonly executableSha256: string;
     readonly hostCliPath: string;
     readonly hostCliSha256: string;
+    readonly hostHome: string;
     readonly packageVersion: string;
     readonly platform: 'darwin' | 'linux' | 'win32';
     readonly arch: string;

@@ -4,7 +4,7 @@ import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { HostOwners, ManagedTargetRecord, ManagedVersion } from '../host/index.ts'
 import { CenterStateStore, hostCapabilities } from '../host/index.ts'
 import { createInventorySnapshot, type InventoryRow, type InventorySnapshot } from '../inventory/index.ts'
-import type { RpcJson } from './rpc-contract.ts'
+import type { HostCapabilityProjection, RpcJson } from './rpc-contract.ts'
 import { inspectSkillArtifact } from '../providers/skill-provider.ts'
 import type { McpManagedOwnerEvidence } from '../providers/mcp-provider.ts'
 
@@ -53,6 +53,7 @@ export class HostInventoryService {
     private readonly owners: HostOwners,
     private readonly catalog: () => VerifiedCatalog,
     private readonly inspectManagedMcp: ((version: ManagedVersion) => Promise<McpManagedOwnerEvidence>) | null = null,
+    private readonly capabilities: () => HostCapabilityProjection = () => hostCapabilities(owners),
   ) {}
 
   /** Observe one exact scope/profile without mutating desired state. */
@@ -62,7 +63,7 @@ export class HostInventoryService {
     for (const row of managed) rows.push(await this.centerRow(row))
     rows.push(...await this.externalRows(scopeKey, profileId, managed, projectRoot))
     const observedAtMs = rows.reduce((maximum, row) => Math.max(maximum, row.observedAtMs), 0)
-    const capabilities = hostCapabilities(this.owners)
+    const capabilities = this.capabilities()
     return createInventorySnapshot({
       scopeKey,
       profileId,

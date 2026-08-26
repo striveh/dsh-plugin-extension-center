@@ -13,6 +13,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 /** Inputs whose exact bytes become one durable recovery executable binding. */
 export interface InstallRecoveryExecutableInput {
   readonly root: string
+  readonly hostHome: string
   readonly packageVersion: string
   readonly cliPath: string
   readonly hostCliPath: string
@@ -137,8 +138,8 @@ async function installExclusive(path: string, bytes: Buffer): Promise<void> {
 }
 
 /**
- * Install one immutable private CLI copy and bind it to an exact Host CLI hash.
- * @param input Built standalone CLI, Host CLI, and Center-owned destination.
+ * Install one immutable private CLI copy and bind it to an exact Host CLI hash and Host home.
+ * @param input Built standalone CLI, Host CLI, Host home, and Center-owned destination.
  * @returns Exact opening-event recovery executable binding.
  */
 export async function installRecoveryExecutable(
@@ -146,6 +147,9 @@ export async function installRecoveryExecutable(
 ): Promise<RecoveryExecutableBinding> {
   const root = await realpath(resolve(input.root))
   if (!(await lstat(root)).isDirectory()) fail('recovery root must be a directory')
+  const hostHome = await realpath(resolve(input.hostHome))
+  const hostHomeState = await lstat(hostHome)
+  if (!hostHomeState.isDirectory() || hostHomeState.isSymbolicLink()) fail('Host home must be a canonical directory')
   const platformValue = input.platform ?? process.platform
   const arch = input.arch ?? process.arch
   if (platformValue !== 'darwin' && platformValue !== 'linux' && platformValue !== 'win32') {
@@ -163,11 +167,12 @@ export async function installRecoveryExecutable(
   const installedBytes = await readRegularNoFollow(path, 'installed recovery executable')
   if (((await lstat(path)).mode & 0o077) !== 0) fail('installed recovery executable is not private')
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     executablePath: path,
     executableSha256: sha256(installedBytes),
     hostCliPath: input.hostCliPath,
     hostCliSha256: sha256(hostCliBytes),
+    hostHome,
     packageVersion: input.packageVersion,
     platform,
     arch,
@@ -177,9 +182,13 @@ export async function installRecoveryExecutable(
 /**
  * Materialize the built package's standalone CLI and bind the exact DSH CLI that launched this Host.
  * @param root Center-owned durable root outside the installed Profile generation.
+ * @param hostHome Exact DSH home whose Profile owner the Host CLI must address.
  * @returns Exact executable binding embedded in every consumed operation.
  */
-export async function installPackagedRecoveryExecutable(root: string): Promise<RecoveryExecutableBinding> {
+export async function installPackagedRecoveryExecutable(
+  root: string,
+  hostHome: string,
+): Promise<RecoveryExecutableBinding> {
   const hostArgument = process.argv[1]
   if (hostArgument === undefined) fail('the launching DSH CLI path is unavailable')
   const manifest = await packageManifest()
@@ -187,6 +196,7 @@ export async function installPackagedRecoveryExecutable(root: string): Promise<R
   const hostCliPath = await realpath(resolve(hostArgument))
   return await installRecoveryExecutable({
     root,
+    hostHome,
     packageVersion: manifest.version,
     cliPath,
     hostCliPath,

@@ -64,6 +64,16 @@ describe('signed bootstrap catalog', () => {
       acquisition: true,
       reason: null,
     }).hostCapabilities.acquisition).toBe(true)
+    expect(catalogListResponse(catalog, {
+      profileTransaction: true,
+      dynamicMcpConnection: true,
+      durableContinuation: true,
+      skillRegistry: true,
+      toolRegistry: true,
+      loaderObservation: true,
+      acquisition: false,
+      reason: 'host-capability',
+    }).hostCapabilities.acquisition).toBe(false)
   })
 
   it('fails closed before indexing tampered, unsigned, moving, or expired snapshots', () => {
@@ -132,6 +142,7 @@ describe('loopback catalog RPC', () => {
       await apply({
         connection: { rpc: { handle } },
         get: () => undefined,
+        inject: () => ({ dispose: async () => {} }),
         effect: (effect: () => unknown) => effect(),
       } as unknown as Context, { root })
       expect(handle).toHaveBeenCalledOnce()

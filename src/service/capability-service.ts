@@ -1140,9 +1140,11 @@ export class CapabilityAcquisitionService {
   }
 
   /** Reconcile every approved task plan after Host restart without consuming it. */
-  async recoverApprovedPlans(): Promise<void> {
+  async recoverApprovedPlans(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
     await this.ensureTaskAttempts()
     for (const attempt of await this.taskAttempts.list()) {
+      signal?.throwIfAborted()
       if (attempt.trigger === 'retry-original'
         && attempt.outcome === 'use-existing'
         && attempt.result?.kind === 'use-existing') {
@@ -1150,6 +1152,7 @@ export class CapabilityAcquisitionService {
       }
     }
     for (const state of await this.plans.list()) {
+      signal?.throwIfAborted()
       if (state.plan.content.origin !== 'task') continue
       try {
         if (state.status === 'rejected') {
@@ -1163,7 +1166,8 @@ export class CapabilityAcquisitionService {
             await this.recordLifecycleResult(state.plan.hash, phase)
           }
         }
-      } catch {
+      } catch (error: unknown) {
+        if (signal?.aborted) throw signal.reason
         // A later trusted request retries exact plan/attempt reconciliation.
       }
     }

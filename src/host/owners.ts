@@ -24,6 +24,14 @@ export interface ProfileTransactionsOwner {
   commit(request: unknown): Promise<Readonly<{ before: unknown; after: unknown }>>
   abort(request: unknown): Promise<boolean>
   restoreLastGood(request: unknown): Promise<Readonly<{ before: unknown; after: unknown }>>
+  getRestoreReceipt(request: unknown): Promise<Readonly<{
+    mutationId: string
+    status: 'committed'
+    operation: 'restore'
+    before: unknown
+    after: unknown
+    restartRequired: true
+  }> | null>
   acknowledgeBoot(request: unknown): Promise<Readonly<{ before: unknown; after: unknown; restartRequired: boolean }>>
   list(profile: string): Promise<unknown>
 }
@@ -161,7 +169,7 @@ export function probeHostOwners(lookup: ServiceLookup, definitions: HostOwnerDef
   const tools = service(lookup, 'tools')
   const loader = service(lookup, 'loader')
   return Object.freeze({
-    profileTransactions: exactOwner(profile, definitions.profileTransactions, ['snapshot', 'stage', 'commit', 'abort', 'restoreLastGood', 'acknowledgeBoot', 'list'])
+    profileTransactions: exactOwner(profile, definitions.profileTransactions, ['snapshot', 'stage', 'commit', 'abort', 'restoreLastGood', 'getRestoreReceipt', 'acknowledgeBoot', 'list'])
       ? profile as ProfileTransactionsOwner
       : null,
     mcpConnections: exactOwner(mcp, definitions.mcpConnections, ['snapshot', 'get', 'getRemoved', 'configure', 'enable', 'disable', 'update', 'remove', 'restore', 'purge'])

@@ -345,13 +345,14 @@ export interface PlanDecisionRecord extends PlanDecisionInput {
   readonly decidedAtMs: number
 }
 
-/** Hash-pinned standalone recovery executable and exact public DSH CLI Consumer. */
+/** Hash-pinned standalone recovery executable, public DSH CLI, and Host home. */
 export interface RecoveryExecutableBinding {
-  readonly schemaVersion: 1
+  readonly schemaVersion: 2
   readonly executablePath: string
   readonly executableSha256: Sha256Digest
   readonly hostCliPath: string
   readonly hostCliSha256: Sha256Digest
+  readonly hostHome: string
   readonly packageVersion: string
   readonly platform: 'darwin' | 'linux' | 'win32'
   readonly arch: string

@@ -6,7 +6,7 @@ class McpDefinition {}
 class ContinuationDefinition {}
 
 const profileMethods = {
-  snapshot() {}, stage() {}, commit() {}, abort() {}, restoreLastGood() {}, acknowledgeBoot() {}, list() {},
+  snapshot() {}, stage() {}, commit() {}, abort() {}, restoreLastGood() {}, getRestoreReceipt() {}, acknowledgeBoot() {}, list() {},
 }
 const mcpMethods = {
   snapshot() {}, get() {}, getRemoved() {}, configure() {}, enable() {}, disable() {}, update() {}, remove() {}, restore() {}, purge() {},
@@ -22,6 +22,7 @@ class ProfileOwner extends ProfileDefinition {
   commit = profileMethods.commit
   abort = profileMethods.abort
   restoreLastGood = profileMethods.restoreLastGood
+  getRestoreReceipt = profileMethods.getRestoreReceipt
   acknowledgeBoot = profileMethods.acknowledgeBoot
   list = profileMethods.list
 }

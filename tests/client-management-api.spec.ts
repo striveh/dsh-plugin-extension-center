@@ -200,6 +200,12 @@ describe('management Client wire validation', () => {
     )
     await expect(client.verify('profile:web', 'web', 'skill:user/missing')).rejects.toThrow('request binding')
 
+    const activating = structuredClone(response)
+    activating.hostCapabilities.acquisition = false
+    activating.hostCapabilities.reason = 'host-capability'
+    await expect(parseInventoryListResponse(activating)).resolves.toMatchObject({
+      hostCapabilities: { acquisition: false, reason: 'host-capability' },
+    })
     await expect(parseInventoryListResponse({ ...response, injected: true })).rejects.toThrow('unexpected fields')
     const tampered = structuredClone(response)
     tampered.inventory.rows[0]!.effective = 'degraded'
@@ -287,6 +293,11 @@ describe('management Client wire validation', () => {
     const rawConfiguration = structuredClone(receipts) as unknown as { receipts: Array<{ receipt: { body: { planEvidence: Record<string, unknown> }; digest: string } }> }
     rawConfiguration.receipts[0]!.receipt.body.planEvidence.configuration = { secret: 'must-not-cross-wire' }
     await expect(parseOperationReceiptsResponse(rawConfiguration)).rejects.toThrow('unexpected fields')
+
+    const missingHostHome = structuredClone(receipts) as unknown as { receipts: Array<{ receipt: { body: { planEvidence: { recoveryExecutable: Record<string, unknown> } }; digest: string } }> }
+    delete missingHostHome.receipts[0]!.receipt.body.planEvidence.recoveryExecutable.hostHome
+    missingHostHome.receipts[0]!.receipt.digest = canonicalSha256(missingHostHome.receipts[0]!.receipt.body)
+    await expect(parseOperationReceiptsResponse(missingHostHome)).rejects.toThrow('unexpected fields')
 
     const lifecycleCall = vi.fn().mockResolvedValue({
       ok: true,

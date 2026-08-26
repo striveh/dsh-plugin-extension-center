@@ -25,14 +25,16 @@ const executablePath = regularFile(
   'fixture recovery executable',
 )
 const hostCliPath = regularFile(process.execPath, 'fixture Host CLI')
+const hostHome = realpathSync(process.cwd())
 
 /** Real, hash-pinned executable identities used by plan and journal tests. */
 export const TEST_RECOVERY_EXECUTABLE_BINDING: RecoveryExecutableBinding = Object.freeze({
-  schemaVersion: 1,
+  schemaVersion: 2,
   executablePath,
   executableSha256: digest(executablePath),
   hostCliPath,
   hostCliSha256: digest(hostCliPath),
+  hostHome,
   packageVersion: '0.0.0-test',
   platform: supportedPlatform(),
   arch: process.arch,

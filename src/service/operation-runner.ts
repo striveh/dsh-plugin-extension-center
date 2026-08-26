@@ -63,6 +63,7 @@ export class OperationRunner {
 
   /** Consume one approved plan once, then perform its provider operation. */
   async run(planHashValue: unknown, signal: AbortSignal): Promise<LifecycleResponse> {
+    signal.throwIfAborted()
     const planHash = readSha256Digest(planHashValue, 'lifecycle.planHash')
     const state = await this.plans.load(planHash)
     if (state?.status !== 'approved') throw new Error('lifecycle plan is absent or not approved')
@@ -155,32 +156,42 @@ export class OperationRunner {
 
   /** Retry an exact fenced rollback while retaining the target lock until owner state is reconciled. */
   async recoverOperation(operationId: string, signal: AbortSignal): Promise<LifecycleResponse> {
+    signal.throwIfAborted()
     const loaded = await this.operations.load(operationId)
+    signal.throwIfAborted()
     if (loaded === undefined || loaded.projection.phase !== 'recovery-required') {
       throw new Error('operation is not awaiting explicit recovery')
     }
     const state = await this.planForProjection(loaded.projection)
+    signal.throwIfAborted()
     const request = await this.providerRequest(state.plan, state.authorization, null, signal)
+    signal.throwIfAborted()
     const provider = this.providers[request.plan.extensionKind]
     const applied = await provider.recover(request)
+    signal.throwIfAborted()
     if (applied === null) throw new Error('provider recovery point is unavailable')
     let journal = await this.append(request, transitionOperation(loaded.journal, 'rolling-back', null, null, Date.now()))
+    signal.throwIfAborted()
     if (request.plan.extensionKind === 'plugin' && applied.rollbackRestart && applied.profileGeneration !== null) {
       return this.response(operationId, verifyOperationJournal(journal), null)
     }
     try {
       const restored = await provider.rollback(applied)
+      signal.throwIfAborted()
       if (request.plan.extensionKind === 'plugin') {
         const rollback = await provider.recover(request)
+        signal.throwIfAborted()
         if (rollback === null || !rollback.rollbackRestart || rollback.profileGeneration === null) {
           throw new Error('Plugin recovery did not publish an exact rollback generation')
         }
         return this.response(operationId, verifyOperationJournal(journal), null)
       }
       journal = await this.append(request, transitionOperation(journal, 'rolled-back', restored, null, Date.now()))
+      signal.throwIfAborted()
       const issued = await this.finishTerminal(request, journal)
       return this.response(operationId, verifyOperationJournal(issued.journal), issued.receipt)
-    } catch {
+    } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       journal = await this.append(request, transitionOperation(journal, 'recovery-required', null, 'rollback-failed', Date.now()))
       return this.response(operationId, verifyOperationJournal(journal), null)
     }
@@ -192,18 +203,25 @@ export class OperationRunner {
     profileId: string
     generation: string
   }>, signal: AbortSignal): Promise<LifecycleResponse> {
+    signal.throwIfAborted()
     const loaded = await this.operations.load(input.operationId)
+    signal.throwIfAborted()
     if (loaded === undefined || !['verifying', 'rolling-back'].includes(loaded.projection.phase)) {
       throw new Error('Plugin operation is not awaiting restart verification')
     }
     const state = await this.planForProjection(loaded.projection)
+    signal.throwIfAborted()
     const request = await this.providerRequest(state.plan, state.authorization, null, signal)
+    signal.throwIfAborted()
     if (request.plan.extensionKind !== 'plugin') throw new Error('operation is not a Plugin Profile mutation')
     const provider = this.providers.plugin as PluginLifecycleProvider
     const applied = await provider.recover(request)
+    signal.throwIfAborted()
     if (applied === null || applied.profileGeneration !== input.generation) throw new Error('Plugin operation has no exact pending generation')
     let journal = loaded.journal
-    if (!await provider.bootReady({ profileId: input.profileId, generation: input.generation })) {
+    const bootReady = await provider.bootReady({ profileId: input.profileId, generation: input.generation })
+    signal.throwIfAborted()
+    if (!bootReady) {
       throw new Error('Profile generation has no successful app-boot acknowledgement')
     }
     try {
@@ -213,18 +231,25 @@ export class OperationRunner {
         profileId: input.profileId,
         generation: input.generation,
       })
+      signal.throwIfAborted()
       const verification = await provider.verify(applied)
+      signal.throwIfAborted()
       if (verification === null) return this.response(input.operationId, loaded.projection, null)
       journal = await this.append(request, recordOperationVerification(journal, verification.digest, Date.now()))
+      signal.throwIfAborted()
       if (loaded.projection.phase === 'rolling-back') {
         journal = await this.append(request, transitionOperation(journal, 'rolled-back', applied.prepared.beforeDigest, null, Date.now()))
+        signal.throwIfAborted()
         await provider.finalizeRollback(applied)
+        signal.throwIfAborted()
       } else {
         journal = await this.append(request, transitionOperation(journal, 'committed', applied.afterDigest, null, Date.now()))
+        signal.throwIfAborted()
       }
       const issued = await this.finishTerminal(request, journal)
       return this.response(input.operationId, verifyOperationJournal(issued.journal), issued.receipt)
     } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       if (terminal(verifyOperationJournal(journal).phase)) throw error
       if (loaded.projection.phase === 'rolling-back') {
         journal = await this.append(request, transitionOperation(journal, 'recovery-required', null, 'rollback-verification-failed', Date.now()))
@@ -233,12 +258,15 @@ export class OperationRunner {
       journal = await this.append(request, transitionOperation(journal, 'rolling-back', null, null, Date.now()))
       try {
         await provider.rollback(applied)
+        signal.throwIfAborted()
         const rollback = await provider.recover(request)
+        signal.throwIfAborted()
         if (rollback === null || !rollback.rollbackRestart || rollback.profileGeneration === null) {
           throw new Error('Plugin rollback generation is unavailable')
         }
         return this.response(input.operationId, verifyOperationJournal(journal), null)
-      } catch {
+      } catch (rollbackError: unknown) {
+        if (signal.aborted) throw signal.reason
         journal = await this.append(request, transitionOperation(journal, 'recovery-required', null, 'rollback-failed', Date.now()))
         return this.response(input.operationId, verifyOperationJournal(journal), null)
       }
@@ -247,22 +275,29 @@ export class OperationRunner {
 
   /** Repair interrupted journals without replaying a consumed plan or a committed mutation. */
   async recover(signal: AbortSignal): Promise<void> {
-    await this.recoverReservations()
+    signal.throwIfAborted()
+    await this.recoverReservations(signal)
+    signal.throwIfAborted()
     const loadedOperations = await this.operations.list()
+    signal.throwIfAborted()
     const journalIds = new Set(loadedOperations.map(loaded => loaded.projection.operationId))
     const reservationIds = new Set((await this.operations.listReservations()).map(reservation => reservation.operationId))
     for (const held of await this.locks.list()) {
+      signal.throwIfAborted()
       if (journalIds.has(held.operationId) || reservationIds.has(held.operationId)) continue
       const consumed = (await this.plans.list()).find((state): state is Extract<PlanAuthorizationState, { status: 'consumed' }> => state.status === 'consumed'
         && state.authorization.operationId === held.operationId
         && state.plan.content.targetKey === held.targetKey)
       if (consumed !== undefined) continue
+      signal.throwIfAborted()
       await this.release(held.targetKey, held.operationId)
     }
     for (const loaded of await this.operations.list()) {
+      signal.throwIfAborted()
       try {
         await this.recoverLoaded(loaded, signal)
-      } catch {
+      } catch (error: unknown) {
+        if (signal.aborted) throw signal.reason
         // One corrupt or temporarily unavailable owner must not prevent other
         // durable operations from being recovered during Host startup.
       }
@@ -270,37 +305,48 @@ export class OperationRunner {
   }
 
   private async recoverLoaded(loaded: LoadedOperation, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
     const consumed = await this.planForProjection(loaded.projection)
+    signal.throwIfAborted()
     await this.indexPlan(consumed.plan, consumed.authorization, loaded.projection).catch(() => undefined)
+    signal.throwIfAborted()
     if (terminal(loaded.projection.phase)) {
       const request = await this.providerRequest(consumed.plan, consumed.authorization, null, signal)
+      signal.throwIfAborted()
       let journal = loaded.journal
       let receipt = loaded.projection.receipt
       if (loaded.projection.phase === 'rolled-back' && request.plan.extensionKind === 'plugin') {
         const managed = await this.state.getManaged(request.plan.targetKey)
+        signal.throwIfAborted()
         if (managed?.lastOperationId === request.authorization.operationId) {
           const provider = this.providers.plugin as PluginLifecycleProvider
           const applied = await provider.recover(request)
+          signal.throwIfAborted()
           if (applied === null || !applied.rollbackRestart) {
             throw new Error('terminal Plugin rollback has no exact recovery evidence')
           }
           await provider.finalizeRollback(applied)
+          signal.throwIfAborted()
         }
       }
       if (receipt === null) {
         const issued = issueOperationReceipt(journal, Date.now())
         journal = await this.append(request, issued.journal)
+        signal.throwIfAborted()
         receipt = issued.receipt
       }
       await this.persistTaskReceipt(request, receipt)
+      signal.throwIfAborted()
       await this.release(request.plan.targetKey, request.authorization.operationId)
       return
     }
     if (loaded.projection.phase === 'recovery-required') {
       if (consumed.plan.content.extensionKind !== 'plugin') return
       const request = await this.providerRequest(consumed.plan, consumed.authorization, null, signal)
+      signal.throwIfAborted()
       const plugin = this.providers.plugin as PluginLifecycleProvider
       const applied = await plugin.reconcileBreakGlassRestore(request, loaded.projection.beforeDigest)
+      signal.throwIfAborted()
       if (applied === null) return
       const journal = await this.append(request, transitionOperation(
         loaded.journal,
@@ -309,14 +355,17 @@ export class OperationRunner {
         null,
         Date.now(),
       ))
+      signal.throwIfAborted()
       await this.recoverRollback(request, journal, applied)
       return
     }
 
     const request = await this.providerRequest(consumed.plan, consumed.authorization, null, signal)
+    signal.throwIfAborted()
     let journal = loaded.journal
     let projection = verifyOperationJournal(journal)
     const snapshot = await this.state.getProviderSnapshot(request.authorization.operationId)
+    signal.throwIfAborted()
 
     if (projection.phase === 'authorized' || (projection.phase === 'staging' && snapshot === undefined)) {
       journal = await this.append(request, transitionOperation(
@@ -326,12 +375,14 @@ export class OperationRunner {
         'interrupted-before-mutation',
         Date.now(),
       ))
+      signal.throwIfAborted()
       await this.finishTerminal(request, journal)
       return
     }
 
     if (projection.phase === 'staging') {
       journal = await this.append(request, transitionOperation(journal, 'applying', null, null, Date.now()))
+      signal.throwIfAborted()
       projection = verifyOperationJournal(journal)
     }
 
@@ -349,7 +400,9 @@ export class OperationRunner {
     let applied: AppliedProviderOperation | null
     try {
       applied = await provider.recover(request)
-    } catch {
+      signal.throwIfAborted()
+    } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       await this.toRecoveryRequired(request, journal, 'mutation-recovery-failed')
       return
     }
@@ -359,9 +412,11 @@ export class OperationRunner {
     }
     if (projection.mutationDigests.length === 0) {
       journal = await this.append(request, recordOperationMutation(journal, applied.mutationDigest, Date.now()))
+      signal.throwIfAborted()
     }
     if (verifyOperationJournal(journal).phase === 'applying') {
       journal = await this.append(request, transitionOperation(journal, 'verifying', null, null, Date.now()))
+      signal.throwIfAborted()
     }
 
     if (request.plan.extensionKind === 'plugin' && applied.profileGeneration !== null) {
@@ -371,12 +426,14 @@ export class OperationRunner {
           profileId: request.plan.profileId,
           generation: applied.profileGeneration,
         })) return
+        signal.throwIfAborted()
         await this.acknowledgeProfileBoot({
           operationId: request.authorization.operationId,
           profileId: request.plan.profileId,
           generation: applied.profileGeneration,
         }, signal)
-      } catch {
+      } catch (error: unknown) {
+        if (signal.aborted) throw signal.reason
         // acknowledgeProfileBoot owns the rollback transition when Host boot or
         // Loader evidence rejects the candidate. A transient probe leaves the
         // operation verifying and the target lock held for the next recovery.
@@ -386,11 +443,15 @@ export class OperationRunner {
 
     try {
       const verification = await provider.verify(applied)
+      signal.throwIfAborted()
       if (verification === null) return
       journal = await this.append(request, recordOperationVerification(journal, verification.digest, Date.now()))
+      signal.throwIfAborted()
       journal = await this.append(request, transitionOperation(journal, 'committed', applied.afterDigest, null, Date.now()))
+      signal.throwIfAborted()
       await this.finishTerminal(request, journal)
-    } catch {
+    } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       journal = await this.append(request, transitionOperation(journal, 'rolling-back', null, null, Date.now()))
       await this.recoverRollback(request, journal, applied)
     }
@@ -401,12 +462,15 @@ export class OperationRunner {
     journal: OperationJournal,
     knownApplied?: AppliedProviderOperation,
   ): Promise<void> {
+    request.signal.throwIfAborted()
     const provider = this.providers[request.plan.extensionKind]
     let applied = knownApplied
     if (applied === undefined) {
       try {
         applied = await provider.recover(request) ?? undefined
-      } catch {
+        request.signal.throwIfAborted()
+      } catch (error: unknown) {
+        if (request.signal.aborted) throw request.signal.reason
         applied = undefined
       }
     }
@@ -419,12 +483,14 @@ export class OperationRunner {
       const plugin = provider as PluginLifecycleProvider
       try {
         if (!await plugin.bootReady({ profileId: request.plan.profileId, generation: applied.profileGeneration })) return
+        request.signal.throwIfAborted()
         await this.acknowledgeProfileBoot({
           operationId: request.authorization.operationId,
           profileId: request.plan.profileId,
           generation: applied.profileGeneration,
         }, request.signal)
-      } catch {
+      } catch (error: unknown) {
+        if (request.signal.aborted) throw request.signal.reason
         // Exact rollback generation remains pending and locked until either its
         // Host proof succeeds or acknowledgeProfileBoot fences explicit recovery.
       }
@@ -433,16 +499,20 @@ export class OperationRunner {
 
     try {
       const restored = await provider.rollback(applied)
+      request.signal.throwIfAborted()
       if (request.plan.extensionKind === 'plugin') {
         const rollback = await provider.recover(request)
+        request.signal.throwIfAborted()
         if (rollback === null || !rollback.rollbackRestart || rollback.profileGeneration === null) {
           throw new Error('Plugin recovery did not publish an exact rollback generation')
         }
         return
       }
       journal = await this.append(request, transitionOperation(journal, 'rolled-back', restored, null, Date.now()))
+      request.signal.throwIfAborted()
       await this.finishTerminal(request, journal)
-    } catch {
+    } catch (error: unknown) {
+      if (request.signal.aborted) throw request.signal.reason
       await this.toRecoveryRequired(request, journal, 'rollback-failed')
     }
   }
@@ -460,6 +530,7 @@ export class OperationRunner {
       await this.operations.persist(journal)
       await this.operations.deleteReservation(authorization.operationId)
       await this.indexPlan(plan, authorization, verifyOperationJournal(journal)).catch(() => undefined)
+      signal.throwIfAborted()
     } catch (error: unknown) {
       throw error
     }
@@ -467,6 +538,7 @@ export class OperationRunner {
     try {
       request = await this.providerRequest(plan, authorization, null, signal)
     } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       journal = transitionOperation(journal, 'failed', verifyOperationJournal(journal).beforeDigest, reason(error), Date.now())
       await this.operations.persist(journal)
       await this.indexPlan(plan, authorization, verifyOperationJournal(journal)).catch(() => undefined)
@@ -480,11 +552,15 @@ export class OperationRunner {
     let applied: AppliedProviderOperation | undefined
     try {
       journal = await this.append(request, transitionOperation(journal, 'staging', null, null, Date.now()))
+      signal.throwIfAborted()
       const artifact = this.needsArtifact(plan)
         ? await this.fetcher.fetch({ authorization, plan, catalog: this.catalog() }, signal)
         : null
+      signal.throwIfAborted()
       request = await this.providerRequest(plan, authorization, artifact?.path ?? null, signal)
+      signal.throwIfAborted()
       prepared = await provider.prepare(request)
+      signal.throwIfAborted()
       await this.state.putProviderSnapshot({
         schemaVersion: 1,
         operationId: authorization.operationId,
@@ -493,47 +569,75 @@ export class OperationRunner {
         beforeDigest: prepared.beforeDigest,
         recoveryPoint: provider.recoveryPoint(prepared),
       })
+      signal.throwIfAborted()
       journal = await this.append(request, transitionOperation(journal, 'applying', null, null, Date.now()))
+      signal.throwIfAborted()
       applied = await provider.apply(prepared)
+      signal.throwIfAborted()
       journal = await this.append(request, recordOperationMutation(journal, applied.mutationDigest, Date.now()))
+      signal.throwIfAborted()
       journal = await this.append(request, transitionOperation(journal, 'verifying', null, null, Date.now()))
+      signal.throwIfAborted()
       const verification = await provider.verify(applied)
+      signal.throwIfAborted()
       if (verification === null) {
         await provider.cleanup(prepared)
+        signal.throwIfAborted()
         return this.response(authorization.operationId, verifyOperationJournal(journal), null)
       }
       journal = await this.append(request, recordOperationVerification(journal, verification.digest, Date.now()))
+      signal.throwIfAborted()
       journal = await this.append(request, transitionOperation(journal, 'committed', applied.afterDigest, null, Date.now()))
+      signal.throwIfAborted()
       const receipt = await this.finishTerminal(request, journal)
+      signal.throwIfAborted()
       await provider.cleanup(prepared)
+      signal.throwIfAborted()
       return this.response(authorization.operationId, verifyOperationJournal(receipt.journal), receipt.receipt)
     } catch (error: unknown) {
+      if (signal.aborted) throw signal.reason
       if (prepared !== undefined) await provider.cleanup(prepared).catch(() => undefined)
-      if (applied === undefined) applied = await provider.recover(request).catch(() => null) ?? undefined
+      signal.throwIfAborted()
+      if (applied === undefined) {
+        try {
+          applied = await provider.recover(request) ?? undefined
+          signal.throwIfAborted()
+        } catch (recoveryError: unknown) {
+          if (signal.aborted) throw signal.reason
+          applied = undefined
+        }
+      }
       if (applied === undefined && verifyOperationJournal(journal).mutationDigests.length === 0) {
         journal = await this.append(request, transitionOperation(journal, 'failed', verifyOperationJournal(journal).beforeDigest, reason(error), Date.now()))
+        signal.throwIfAborted()
         const receipt = await this.finishTerminal(request, journal)
         return this.response(authorization.operationId, verifyOperationJournal(receipt.journal), receipt.receipt)
       }
       if (applied !== undefined && verifyOperationJournal(journal).mutationDigests.length === 0) {
         journal = await this.append(request, recordOperationMutation(journal, applied.mutationDigest, Date.now()))
+        signal.throwIfAborted()
       }
       const phase = verifyOperationJournal(journal).phase
       if (phase !== 'rolling-back') {
         journal = await this.append(request, transitionOperation(journal, 'rolling-back', null, null, Date.now()))
+        signal.throwIfAborted()
       }
       try {
         if (applied === undefined) throw new Error('mutation recovery unavailable')
         const restored = await provider.rollback(applied)
+        signal.throwIfAborted()
         if (request.plan.extensionKind === 'plugin') {
           const rollback = await provider.recover(request)
+          signal.throwIfAborted()
           if (rollback === null || !rollback.rollbackRestart || rollback.profileGeneration === null) {
             throw new Error('Plugin rollback generation is unavailable')
           }
           return this.response(authorization.operationId, verifyOperationJournal(journal), null)
         }
         journal = await this.append(request, transitionOperation(journal, 'rolled-back', restored, null, Date.now()))
-      } catch {
+        signal.throwIfAborted()
+      } catch (rollbackError: unknown) {
+        if (signal.aborted) throw signal.reason
         journal = await this.append(request, transitionOperation(journal, 'recovery-required', null, 'rollback-failed', Date.now()))
       }
       if (verifyOperationJournal(journal).phase === 'recovery-required') {
@@ -549,10 +653,13 @@ export class OperationRunner {
       && (plan.content.operationKind === 'install' || plan.content.operationKind === 'update')
   }
 
-  private async recoverReservations(): Promise<void> {
+  private async recoverReservations(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
     const locks = await this.locks.list()
+    signal.throwIfAborted()
     const plans = await this.plans.list()
     for (const reservation of await this.operations.listReservations()) {
+      signal.throwIfAborted()
       const held = locks.find(lock => lock.operationId === reservation.operationId)
       if (held === undefined || held.targetKey !== reservation.targetKey) {
         throw new Error(`operation reservation has no exact target lock: ${reservation.operationId}`)
@@ -564,12 +671,15 @@ export class OperationRunner {
           || loaded.projection.beforeDigest !== reservation.beforeDigest) {
           throw new Error(`operation reservation does not bind its journal: ${reservation.operationId}`)
         }
+        signal.throwIfAborted()
         await this.operations.deleteReservation(reservation.operationId)
         continue
       }
       const state = plans.find(candidate => candidate.plan.hash === reservation.planHash)
       if (state?.status === 'approved') {
+        signal.throwIfAborted()
         await this.operations.deleteReservation(reservation.operationId)
+        signal.throwIfAborted()
         await this.release(reservation.targetKey, reservation.operationId)
         continue
       }
@@ -579,8 +689,11 @@ export class OperationRunner {
         throw new Error(`operation reservation has no exact approved or consumed plan: ${reservation.operationId}`)
       }
       let journal = createOperationJournal(state.authorization, reservation.beforeDigest, Date.now())
+      signal.throwIfAborted()
       await this.operations.persist(journal)
+      signal.throwIfAborted()
       await this.operations.deleteReservation(reservation.operationId)
+      signal.throwIfAborted()
       await this.indexPlan(state.plan, state.authorization, verifyOperationJournal(journal)).catch(() => undefined)
       journal = transitionOperation(
         journal,
@@ -589,11 +702,16 @@ export class OperationRunner {
         'interrupted-before-mutation',
         Date.now(),
       )
+      signal.throwIfAborted()
       await this.operations.persist(journal)
+      signal.throwIfAborted()
       await this.indexPlan(state.plan, state.authorization, verifyOperationJournal(journal)).catch(() => undefined)
       const issued = issueOperationReceipt(journal, Date.now())
+      signal.throwIfAborted()
       await this.operations.persist(issued.journal)
+      signal.throwIfAborted()
       await this.indexPlan(state.plan, state.authorization, verifyOperationJournal(issued.journal)).catch(() => undefined)
+      signal.throwIfAborted()
       await this.release(reservation.targetKey, reservation.operationId)
     }
   }

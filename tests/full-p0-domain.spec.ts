@@ -12,6 +12,7 @@ import {
   createPlanAuthorizationState,
   decidePlan,
   decodeImmutablePlan,
+  decodeRecoveryExecutableBinding,
   type ImmutablePlan,
   type PlanAuthorizationState,
   type PlanContent,
@@ -127,6 +128,22 @@ function approvedState(plan: ImmutablePlan, context = useContext(plan)) {
 }
 
 describe('full P0 canonical plan kernel', () => {
+  it('requires the exact pinned Host home in recovery executable bindings', () => {
+    expect(decodeRecoveryExecutableBinding(TEST_RECOVERY_EXECUTABLE_BINDING))
+      .toEqual(TEST_RECOVERY_EXECUTABLE_BINDING)
+    expectDomainCode(
+      () => decodeRecoveryExecutableBinding({ ...TEST_RECOVERY_EXECUTABLE_BINDING, schemaVersion: 1 }),
+      'invalid-data',
+    )
+    const missing = { ...TEST_RECOVERY_EXECUTABLE_BINDING } as Record<string, unknown>
+    delete missing.hostHome
+    expectDomainCode(() => decodeRecoveryExecutableBinding(missing), 'invalid-data')
+    expectDomainCode(
+      () => decodeRecoveryExecutableBinding({ ...TEST_RECOVERY_EXECUTABLE_BINDING, hostHome: 'relative-home' }),
+      'invalid-data',
+    )
+  })
+
   it('hashes strict JSON deterministically without accepting non-JSON ambiguity', () => {
     const left = { z: [{ b: 2, a: 1 }], a: { y: true, x: null } }
     const right = { a: { x: null, y: true }, z: [{ a: 1, b: 2 }] }

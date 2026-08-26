@@ -458,7 +458,7 @@ function capabilities(value: unknown, subject: string): HostCapabilityProjection
     && skillRegistry
     && toolRegistry
     && loaderObservation
-  if (acquisition !== ownersAvailable || reason !== (ownersAvailable ? null : 'host-capability')) fail(subject)
+  if ((acquisition && !ownersAvailable) || reason !== (acquisition ? null : 'host-capability')) fail(subject)
   return input as unknown as HostCapabilityProjection
 }
 
@@ -1135,11 +1135,11 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
     string(fences[field], `${subject}.fences.${field}`)
   }
   const recovery = exactRecord(input.recoveryExecutable, `${subject}.recoveryExecutable`, [
-    'arch', 'executablePath', 'executableSha256', 'hostCliPath', 'hostCliSha256', 'packageVersion', 'platform', 'schemaVersion',
+    'arch', 'executablePath', 'executableSha256', 'hostCliPath', 'hostCliSha256', 'hostHome', 'packageVersion', 'platform', 'schemaVersion',
   ])
-  if (recovery.schemaVersion !== 1) fail(`${subject}.recoveryExecutable.schemaVersion`)
+  if (recovery.schemaVersion !== 2) fail(`${subject}.recoveryExecutable.schemaVersion`)
   literal(recovery.platform, new Set(['darwin', 'linux', 'win32'] as const), `${subject}.recoveryExecutable.platform`)
-  for (const field of ['executablePath', 'hostCliPath'] as const) {
+  for (const field of ['executablePath', 'hostCliPath', 'hostHome'] as const) {
     const path = string(recovery[field], `${subject}.recoveryExecutable.${field}`, 4_096)
     if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/u.test(path) && !path.startsWith('\\\\')) {
       fail(`${subject}.recoveryExecutable.${field}`)
