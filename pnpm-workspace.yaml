@@ -1,0 +1,9 @@
+autoInstallPeers: true
+
+allowBuilds:
+  # Match the reviewed build-script policy of the exact rc.2 Host release.
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  koffi: true
+  node-pty: true
+  protobufjs: false

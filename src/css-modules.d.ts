@@ -1,0 +1,6 @@
+declare module '*.module.css' {
+  const classes: Readonly<Record<string, string>>
+  export const cssText: string
+  export const styleTagId: string
+  export default classes
+}
