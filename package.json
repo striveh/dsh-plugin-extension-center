@@ -66,7 +66,7 @@
     "clean:client-build": "node scripts/clean-client-build.mjs",
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "build": "pnpm run clean && tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsdown && pnpm run clean:client-build && node scripts/normalize-build-newlines.mjs",
-    "test": "pnpm run build && vitest run && node --test acceptance/store-only/support.test.mjs acceptance/full-p0/support.test.mjs",
+    "test": "pnpm run build && vitest run && node --test acceptance/store-only/support.test.mjs acceptance/full-p0/support.test.mjs acceptance/full-p0/build-binding.test.mjs acceptance/full-p0/receipt-binding.test.mjs",
     "test:acceptance:store": "pnpm run build && node acceptance/store-only/run.mjs",
     "test:acceptance:host-negative": "pnpm run build && node acceptance/full-p0/verify-host-negative.mjs",
     "test:acceptance:local-head": "pnpm run build && node acceptance/full-p0/verify-local-head.mjs",

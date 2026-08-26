@@ -203,10 +203,10 @@ export function catalogListResponse(
     && hostCapabilities.toolRegistry
     && hostCapabilities.loaderObservation
   if (
-    hostCapabilities.acquisition !== ownersAvailable
-    || hostCapabilities.reason !== (ownersAvailable ? null : 'host-capability')
+    (hostCapabilities.acquisition && !ownersAvailable)
+    || hostCapabilities.reason !== (hostCapabilities.acquisition ? null : 'host-capability')
   ) {
-    throw new TypeError('Host acquisition claim must match all required owner capabilities')
+    throw new TypeError('Host acquisition claim requires all owners and a ready writable runtime')
   }
   return {
     protocolVersion: EXTENSION_CENTER_PROTOCOL_VERSION,

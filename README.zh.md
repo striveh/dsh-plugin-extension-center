@@ -9,7 +9,7 @@
 
 本项目不是 DeepSeek Harness 官方 Release。产品代码、目录政策、测试、兼容性声明和 Release 都归本仓库所有；DSH monorepo 只作为宿主，不承载产品实现。
 
-状态（2026-08-26）：独立项目已经实现签名离线商店、带未过期 last-good 缓存的可配置在线签名目录刷新、只产生线索的发现与 threshold-signing pipeline、归一化已安装 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与恢复、Plugin/MCP/Skill 类型化 provider、任务优先的本地 Capability RAG、受信 MCP 配置队列，以及绑定原任务的持久续行。界面把商店获取与已安装对象的生命周期动作分开，并准确展示目录新鲜度、connection 与 artifact 的 ownership、权限、验证、恢复和回执。Host/Client focused tests、确定性目录 fault tests 与 rc.2 packed 只读浏览器验收已通过。新的 operation evidence 会锁定 package 自带的独立恢复 executable；它不加载 Center runtime 就能请求准确 Profile 恢复。已发布 rc.2 没有 Profile transaction `list`/`restore` Consumer，因此这条路径会按设计 fail closed。已部署签名远端 revision 及其独立生成的准入 receipt、本地可写 Host 崩溃恢复、已发布 Release 安装、真实 provider 任务完成与普通用户可用性仍是独立发布门禁。
+状态（2026-08-26）：独立项目已经实现签名离线商店、带未过期 last-good 缓存的可配置在线签名目录刷新、只产生线索的发现与 threshold-signing pipeline、归一化已安装 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与恢复、Plugin/MCP/Skill 类型化 provider、任务优先的本地 Capability RAG、受信 MCP 配置队列，以及绑定原任务的持久续行。界面把商店获取与已安装对象的生命周期动作分开，并准确展示目录新鲜度、connection 与 artifact 的 ownership、权限、验证、恢复和回执。Host/Client focused tests、确定性目录 fault tests 与 rc.2 packed 只读浏览器验收已通过。新的 operation evidence 会锁定 package 自带的独立恢复 executable；它不加载 Center runtime 就能请求准确 Profile 恢复。已发布 rc.2 没有 Profile transaction `list`/`restore`/`restore-receipt` Consumer，因此这条路径会按设计 fail closed。已部署签名远端 revision 及其独立生成的准入 receipt、本地可写 Host 崩溃恢复、已发布 Release 安装、真实 provider 任务完成与普通用户可用性仍是独立发布门禁。
 
 公开的 `main` 分支是开发源码预览，不是稳定 Release 或 npm 发布。Manifest 有意保留 `private: true`，用于在可写兼容版本仍为 `TBD` 时阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码。只有已发布 Host 与下述外部 P0 门禁通过后，才能创建有效的 `v0.1.0` tag 或 Release。
 
@@ -55,9 +55,9 @@ pnpm run test:acceptance:host-negative
 
 ## Break-glass Profile 恢复
 
-Host 启动时会把构建后的无依赖恢复 CLI 原子复制到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。每个已消费 operation 都会记录该准确绝对路径与 SHA-256，以及公开 DSH CLI 的准确路径与 SHA-256。如果 Center 或 Web 无法加载，可运行 `node <pinned-break-glass.mjs> <center-root> <operation-id>`。它先验证自身 bytes、Host CLI bytes、canonical journal chain、`CURRENT` head、plan evidence 与任何已有 receipt，再要求 Host 列出并恢复唯一准确的可恢复 Profile generation。它不导入 Center runtime，也不直接写 Profile。成功只表示 `profile restored; Center journal reconciliation pending`；仍需在 Center 恢复启动后对保留 journal 做 reconciliation。
+Host 启动时会把构建后的无依赖恢复 CLI 原子复制到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。每个已消费 operation 都会记录该准确绝对路径与 SHA-256、公开 DSH CLI 的准确路径与 SHA-256，以及 canonical Host home。如果 Center 或 Web 无法加载，可运行 `node <pinned-break-glass.mjs> <center-root> <operation-id>`。它先验证自身 bytes、Host CLI bytes、canonical Host home、journal chain、`CURRENT` head、plan evidence 与任何已有 receipt。Host 调用只会在 scrubbed environment 中把锁定的 home 注入为 `DSH_HOME`；ambient `DSH_HOME` 不能选择另一个 Profile store。随后它以已验证 operation id 推导的确定性 mutation identity 查询 Host 的确切 Profile restore receipt。committed receipt 必须匹配 journal generation/tree pin，并且当前 inventory 必须是 receipt 的准确 after-snapshot，或从该 snapshot 产生的唯一合法 boot-acknowledgement transition；任何无关 drift 都会被拒绝。只有 `not-found` 才允许校验当前 selector 并调用新 restore。因此即使恢复后的 generation 已被 acknowledge，响应丢失或调用方被杀死后的重试也不会发布第二次 transition。它不导入 Center runtime，也不直接写 Profile。成功只表示 `profile restored; Center journal reconciliation pending`；仍需在 Center 恢复启动后对保留 journal 做 reconciliation。
 
-不可变 rc.2 Host 是负向 lane：其通用 `dsh plugin` 只转发 pnpm 参数，不实现准确 JSON `list` 与 generation `restore` 协议，因此恢复会 fail closed，且不会声称已恢复。完整恢复仍以未来已发布 DSH Release 提供该公开 Profile transaction Consumer，并通过 packed crash-path 验收为门禁。
+不可变 rc.2 Host 是负向 lane：其通用 `dsh plugin` 只转发 pnpm 参数，不实现准确 JSON `list`、generation `restore` 与 mutation-bound `restore-receipt` 协议，因此恢复会 fail closed，且不会声称已恢复。完整恢复仍以未来已发布 DSH Release 提供该公开 Profile transaction Consumer，并通过 packed crash-path 验收为门禁。
 
 ## 许可证
 

@@ -11,7 +11,12 @@ import type { CapabilityAcquisitionService } from './capability-service.ts'
 import { IntentPolicyDeniedError } from './intent-plan-service.ts'
 import type { HostInventoryService } from './inventory-service.ts'
 import type { OperationRunner } from './operation-runner.ts'
-import { HOST_RPC_PROTOCOL_VERSION, type IntentPreviewRequest, type RpcJson } from './rpc-contract.ts'
+import {
+  HOST_RPC_PROTOCOL_VERSION,
+  type HostCapabilityProjection,
+  type IntentPreviewRequest,
+  type RpcJson,
+} from './rpc-contract.ts'
 
 const OPERATIONS = new Set<OperationKind>([
   'install', 'configure', 'update', 'enable', 'disable', 'uninstall', 'restore', 'purge',
@@ -225,31 +230,51 @@ function internal() {
   return { ok: false as const, error: { code: 'internal' as const, message: 'Extension Center operation failed', details: {} } }
 }
 
+/** Services used by one coherent Host RPC runtime generation. */
+export interface HostRpcServices {
+  readonly owners: HostOwners
+  readonly capabilities?: HostCapabilityProjection
+  readonly generation?: HostRpcGeneration
+  readonly catalog: () => VerifiedCatalog
+  readonly catalogStatus?: () => CatalogAdmissionStatus
+  readonly refreshCatalog?: () => Promise<AdmittedCatalogSnapshot>
+  readonly inventory: HostInventoryService
+  readonly intentPlans: IntentPlanService
+  readonly plans: FilePlanStore
+  readonly operations: OperationRunner
+  readonly acquisition: CapabilityAcquisitionService | null
+}
+
+/** Generation owner that cancels and drains requests before its Host owners retire. */
+export interface HostRpcGeneration {
+  /** Run one request while this exact owner generation remains writable. */
+  run<T>(signal: AbortSignal, request: (signal: AbortSignal) => Promise<T>): Promise<T>
+}
+
+/** Resolve either one fixed runtime or the currently active dynamic runtime. */
+export type HostRpcServicesSource = HostRpcServices | (() => HostRpcServices)
+
+function currentCapabilities(input: HostRpcServices): HostCapabilityProjection {
+  return input.capabilities ?? hostCapabilities(input.owners)
+}
+
 /** Create the strict loopback-only management handler; carrier authority is not accepted from payloads. */
-export function createHostRpcHandler(input: Readonly<{
-  owners: HostOwners
-  catalog: () => VerifiedCatalog
-  catalogStatus?: () => CatalogAdmissionStatus
-  refreshCatalog?: () => Promise<AdmittedCatalogSnapshot>
-  inventory: HostInventoryService
-  intentPlans: IntentPlanService
-  plans: FilePlanStore
-  operations: OperationRunner
-  acquisition: CapabilityAcquisitionService | null
-}>): ConnectionRpcHandler {
-  return async (endpoint, payload, signal) => {
-    if (signal.aborted) return cancelled()
-    try {
-      if (['intent/preview', 'approval/configure', 'plan/decide', 'lifecycle/request', 'operation/recover', 'operation/ack-profile-boot'].includes(endpoint)
-        && !hostCapabilities(input.owners).acquisition) {
-        return badRequest('Extension Center writes are unavailable because a required Host capability is absent')
-      }
-      switch (endpoint) {
+export function createHostRpcHandler(source: HostRpcServicesSource): ConnectionRpcHandler {
+  return async (endpoint, payload, outerSignal) => {
+    const input = typeof source === 'function' ? source() : source
+    const execute = async (signal: AbortSignal): ReturnType<ConnectionRpcHandler> => {
+      if (signal.aborted) return cancelled()
+      try {
+        if (['intent/preview', 'approval/configure', 'plan/decide', 'lifecycle/request', 'operation/recover', 'operation/ack-profile-boot'].includes(endpoint)
+          && !currentCapabilities(input).acquisition) {
+          return badRequest('Extension Center writes are unavailable because a required Host capability is absent')
+        }
+        switch (endpoint) {
         case 'catalog/list':
           listRequest(payload)
           return {
             ok: true,
-            value: catalogListResponse(input.catalog(), hostCapabilities(input.owners), input.catalogStatus?.()),
+            value: catalogListResponse(input.catalog(), currentCapabilities(input), input.catalogStatus?.()),
           }
         case 'catalog/refresh': {
           listRequest(payload)
@@ -257,14 +282,14 @@ export function createHostRpcHandler(input: Readonly<{
           const snapshot = await input.refreshCatalog()
           return {
             ok: true,
-            value: catalogListResponse(snapshot.catalog, hostCapabilities(input.owners), snapshot.status),
+            value: catalogListResponse(snapshot.catalog, currentCapabilities(input), snapshot.status),
           }
         }
         case 'inventory/list': {
           const request = inventoryRequest(payload)
           return { ok: true, value: {
             protocolVersion: HOST_RPC_PROTOCOL_VERSION,
-            hostCapabilities: hostCapabilities(input.owners),
+            hostCapabilities: currentCapabilities(input),
             inventory: await input.inventory.list(request.scopeKey, request.profileId),
           } }
         }
@@ -272,7 +297,7 @@ export function createHostRpcHandler(input: Readonly<{
           const request = inventoryVerifyRequest(payload)
           return { ok: true, value: {
             protocolVersion: HOST_RPC_PROTOCOL_VERSION,
-            hostCapabilities: hostCapabilities(input.owners),
+            hostCapabilities: currentCapabilities(input),
             inventory: await input.inventory.verify(request.scopeKey, request.profileId, request.targetKey),
           } }
         }
@@ -398,15 +423,22 @@ export function createHostRpcHandler(input: Readonly<{
         }
         default:
           return badRequest(`unknown Extension Center endpoint: ${endpoint}`)
+        }
+      } catch (error: unknown) {
+        if (signal.aborted) return cancelled()
+        if (error instanceof IntentPolicyDeniedError
+          || error instanceof TypeError
+          || (error instanceof Error && /(?:invalid|absent|already|expired|stale|terminal|conflict|unavailable|unexpected|unsupported|does not|not |requires|cannot)/iu.test(error.message))) {
+          return badRequest(error instanceof Error ? error.message : 'request was refused')
+        }
+        return internal()
       }
-    } catch (error: unknown) {
-      if (signal.aborted) return cancelled()
-      if (error instanceof IntentPolicyDeniedError
-        || error instanceof TypeError
-        || (error instanceof Error && /(?:invalid|absent|already|expired|stale|terminal|conflict|unavailable|unexpected|unsupported|does not|not |requires|cannot)/iu.test(error.message))) {
-        return badRequest(error instanceof Error ? error.message : 'request was refused')
-      }
-      return internal()
+    }
+    if (input.generation === undefined) return await execute(outerSignal)
+    try {
+      return await input.generation.run(outerSignal, execute)
+    } catch {
+      return cancelled()
     }
   }
 }

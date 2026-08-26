@@ -248,13 +248,13 @@ Agent 发起的获取另有一份无秘密 task receipt，只包含 Session/user
 - 变更前，每个已发布 operation owner 记录自己准确的 DSH 管理文件、hash、Bundle 顺序、凭据引用与 recovery point。对于 Plugin，必需的 Profile transaction owner——而不是扩展中心 browser 或 rc.2 磁盘编辑器——创建并验证隔离 generation。
 - Profile owner 只 promotion 经过验证的 generation，并返回具名 last-good point。真正运行的 Profile 仍显示 `restart-required`，直到外部 launcher 完成真实重启且扩展中心重新连接。
 - 中断事务在下一次 Host 启动时从 journal 恢复，并完成回滚或进入 `recovery-required`；它永远不能仅凭文件猜测 `active`。
-- 一条位于回执锁定绝对恢复路径的固定 break-glass CLI 可以列出 pending receipt，并在不加载 installed package 或待修 Web Bundle 的情况下要求已发布 Profile owner 恢复指定 last-good generation。
+- 一条位于回执锁定绝对恢复路径的固定 break-glass CLI 会先向已发布 Profile owner 查询确定性 mutation 对应的确切 restore receipt。任何 committed receipt 都必须匹配 journal generation/tree pin，并且当前 inventory 必须是 receipt 的准确 after-snapshot，或其唯一合法 boot-acknowledgement 后继；无关 drift 会被拒绝。只有不存在 receipt 时才能校验 selector 并发起新的 last-good restore。该流程不加载 installed package 或待修 Web Bundle，即使已完成 restart acknowledgement，响应丢失后的重试也不能让 Profile revision 增加两次。
 
 回滚只保证 DSH 管理状态。它不能撤销远程 grant、网络请求或第三方代码产生的副作用；回执必须说明这一限制。
 
 ### 独立项目生命周期
 
-- Product-owned durable state 位于 installed package 与 Profile generation 之外的 `$DSH_HOME/extension-center/`：private operation journal、secret-free receipt、ownership manifest 与 last-good recovery point 分别使用带版本的子目录与 hash。安装与更新把构建后的独立恢复模块原子复制为 `$DSH_HOME/extension-center/recovery/<center-version>/<platform>-<arch>/break-glass.mjs` 下的 owner-only executable，校验其 packed-artifact hash，并在每个可能需要它的 journal 中锁定该绝对路径与 hash；恢复过程永远不从 `node_modules` 导入代码。该 package 不声明 npm `bin`：公开 Profile transaction owner 会拒绝 package binary，恢复只通过准确的 `node` 调用运行复制后的 hash-pinned module。
+- Product-owned durable state 位于 installed package 与 Profile generation 之外的 `$DSH_HOME/extension-center/`：private operation journal、secret-free receipt、ownership manifest 与 last-good recovery point 分别使用带版本的子目录与 hash。安装与更新把构建后的独立恢复模块原子复制为 `$DSH_HOME/extension-center/recovery/<center-version>/<platform>-<arch>/break-glass.mjs` 下的 owner-only executable，校验其 packed-artifact hash，并在每个可能需要它的 journal 中锁定该绝对路径、hash 与 canonical Host home；恢复过程永远不从 `node_modules` 导入代码。break-glass Host 调用只会在 scrubbed environment 中把该锁定 home 用作 `DSH_HOME`，因此 ambient process state 不能把恢复重定向到另一个 Profile store。该 package 不声明 npm `bin`：公开 Profile transaction owner 会拒绝 package binary，恢复只通过准确的 `node` 调用运行复制后的 hash-pinned module。
 - 扩展中心自身的 inventory 行保持只读，并展示准确的通用 DSH CLI 安装、更新、降级与移除命令。它的 UI 永远不尝试自我变更。
 - 扩展中心 `vN-1 → vN` 验收通过通用 CLI 升级；先迁移 plugin-owned durable state 的副本，再发布新状态，并证明 Host 与 Client protocol version 一致，然后完成一次真实 managed operation。stale browser Client 会收到明确的 reload-required 响应，不能对更新后的 Host 提交变更。
 - 自身升级失败时，在 Web 之外重新安装准确的上一 artifact。产品 rollback 代码可以恢复扩展中心管理的其他扩展，但不能声称运行中的损坏 package 能恢复自己。
@@ -277,6 +277,8 @@ Agent 发起的获取另有一份无秘密 task receipt，只包含 Session/user
 ## Ownership and extension points
 
 外部 package 声明插件自有的 `ctx.extensionCenter` service，负责 normalized catalog snapshot、本地 Store search、Capability RAG、acquisition request、provider registration、不可变 plan、operation serialization、receipt 与 recovery orchestration；它不是新的 DSH core Service Definition。Bundle 通过普通 Tool registration 向准确 Agent scope 贡献只读 resolver 与不透明 acquisition-request Tool；确认仍是独立 loopback Client 动作。三个 provider 实现都位于独立仓库，并适配已发布的 DSH owner，而不是绕过它们：Skill provider 拥有准确文件并观察 filesystem provider 与 Skill registry；MCP provider 拥有扩展中心生成的配置行并观察 DSH client 与必需的 dynamic connection owner；Profile provider 调用必需的已发布 Profile transaction owner 来完成 staging、Bundle reconciliation、commit 与 generation rollback，再观察一次外部重启。Profile transaction、dynamic MCP connection mutation 与自动跨重启续行在 rc.2 中保持 unavailable。该 package 通过已发布 Client 扩展机制注册一级**扩展**入口，其默认商店视图与已安装、更新、活动与恢复并列。
+
+Host 侧只要求 Connection，以便 loopback 只读表面持续可用。它在每次读取时观察当前 owner 集合，并通过注入 `profileTransactions`、`mcpConnections`、`taskContinuations`、`skills`、`tools` 与 `loader` 的 Cordis 子 fiber 激活可写 runtime。该子 fiber 只有在 recovery 以及所有 provider、verifier 与 Tool registration 都针对激活时捕获的同一组六个准确 owner 实例完成后，才发布写服务。Setup 阶段或后续 RPC 工作期间发生 owner 替换或丢失时，Host 会 abort 该 generation 的 signal、撤销其写表面、等待全部 tracked task 结算，并按逆序 dispose registration；在此之前，替代 generation 不得发布。晚到的 owner 会自动触发激活，整个切换期间只读表面仍持续报告其余 live owner capability。
 
 每个 provider 负责 provenance、分类型 detail，以及 discover、install、configure、update、enable、disable、uninstall、restore 与 purge 的逐对象 capability map。每项可写 capability 都要提供 plan、apply、verify 与 rollback，或者明确不可逆结果；每项 unavailable 或 external capability 都要给出稳定原因。manager 负责每个目标 Profile、MCP row 或 Skill root 同时只运行一项操作、idempotency、revision fencing、event ordering 与 durable receipt。Provider registration 和每项 status contribution 都是 Cordis effect，其 disposer 会撤销相应行并达到静止。
 

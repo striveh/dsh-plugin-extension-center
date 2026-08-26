@@ -12,8 +12,15 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { verifyRepositoryBuildBinding } from './build-binding.mjs'
+import {
+  verifyImmutablePlanDigest,
+  verifyOperationReceiptJournal,
+  verifyReceiptInventory,
+  verifyTerminalReceiptPlanBinding,
+} from './receipt-binding.mjs'
 import {
   AcceptanceFailure,
   OWNER_MISSING_FAILURE_CODES,
@@ -25,21 +32,21 @@ import {
   hasProviderEndpointOverride,
   keylessEnvironment,
   parseCatalogListEnvelope,
+  requestLiveChildTeardown,
   sanitizeDiagnostic,
   sha256,
   stopChild,
+  waitForAcquisitionAdmission,
   waitForReadyUrl,
 } from './support.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const configuredDshRoot = process.env.DSH_LOCAL_HEAD_ROOT?.trim()
-const dshRoot = resolve(configuredDshRoot && configuredDshRoot.length > 0
-  ? configuredDshRoot
-  : join(projectRoot, '..', 'deepseek-harness'))
-const configuredDshBin = process.env.DSH_LOCAL_HEAD_BIN?.trim()
-const dshBin = resolve(configuredDshBin && configuredDshBin.length > 0
-  ? configuredDshBin
-  : join(dshRoot, 'apps', 'cli', 'lib', 'bin.js'))
+if (configuredDshRoot === undefined || configuredDshRoot.length === 0) {
+  throw new Error('DSH_LOCAL_HEAD_ROOT must name the exact local Host checkout under test')
+}
+const dshRoot = resolve(configuredDshRoot)
+const dshBin = join(dshRoot, 'apps', 'cli', 'lib', 'bin.js')
 const evidenceRoot = join(projectRoot, '.artifacts', 'acceptance', 'full-p0-local-head')
 const expectedBuiltFiles = [
   'apps/cli/lib/bin.js',
@@ -70,11 +77,13 @@ const receipt = {
   target: {
     dshRoot,
     dshBin,
+    dshBinRealpath: null,
     commit: null,
     dirty: null,
     dirtyEntryCount: null,
     dirtyStatusDigest: null,
     version: null,
+    buildBinding: null,
   },
   inputs: {
     isolatedHomesCreatedEmpty: false,
@@ -101,6 +110,7 @@ const receipt = {
     materialUnchangedBeforeApproval: false,
     lifecycle: [],
     terminalReceiptDigests: [],
+    terminalJournalHeadDigests: [],
   },
   notProven: [
     'published-dsh-release-installation',
@@ -111,11 +121,15 @@ const receipt = {
     'task-driven-continuation-with-real-model',
     'provider-e2e',
     'cross-platform-matrix',
+    'browser-client-ui-observation',
+    'break-glass-profile-restore-receipt',
+    'immutable-source-to-runtime-build-provenance',
   ],
 }
 
 let tempRoot
 let webChild
+let initialBuildBinding
 const webOutput = { value: '' }
 
 try {
@@ -232,6 +246,7 @@ try {
       '--version', packedManifest.version,
       '--digest', artifactDigest,
       '--kind', 'bundle',
+      '--mutation-id', 'p0-local-head-extension-center-install',
     ],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 120_000 },
   )
@@ -267,9 +282,15 @@ try {
   await delay(250)
 
   const rpc = createRpcClient(webOrigin, receipt.observations.rpcMethods)
-  const catalogRpcId = 'local-head-catalog-list'
-  const catalogBody = await rpc.raw('catalog/list', { protocolVersion: 1 }, catalogRpcId)
-  const parsedCatalog = parseCatalogListEnvelope(catalogBody, catalogRpcId)
+  let catalogAttempt = 0
+  const parsedCatalog = await waitForAcquisitionAdmission(async () => {
+    catalogAttempt += 1
+    const catalogRpcId = `local-head-catalog-list-${String(catalogAttempt)}`
+    const catalogBody = await rpc.raw('catalog/list', { protocolVersion: 1 }, catalogRpcId)
+    const parsed = parseCatalogListEnvelope(catalogBody, catalogRpcId)
+    assertRequiredHostOwners(parsed.capabilities)
+    return parsed
+  })
   receipt.observations.catalogRevision = parsedCatalog.catalog.revision
   receipt.observations.catalogEntriesDigest = parsedCatalog.catalog.entriesDigest
   receipt.observations.hostCapabilities = assertRequiredHostOwners(parsedCatalog.capabilities)
@@ -473,15 +494,32 @@ try {
 
   const receipts = await rpc.call('operation/receipts', { protocolVersion: 1 })
   requireCondition(Array.isArray(receipts.receipts), 'P0-LOCAL-RECEIPTS', 'operation/receipts omitted its receipt list')
-  for (const expected of terminalReceipts) {
-    requireCondition(
-      receipts.receipts.some(stored => stored?.receipt?.digest === expected.digest
-        && stored.operationId === expected.body.operationId),
+  try {
+    verifyReceiptInventory(receipts.receipts, terminalReceipts)
+  } catch (error) {
+    throw new AcceptanceFailure(
       'P0-LOCAL-RECEIPTS',
-      `terminal receipt ${expected.digest} was absent from durable receipt inventory`,
+      error instanceof Error ? error.message : String(error),
     )
   }
+  requireCondition(true, 'P0-LOCAL-RECEIPTS', 'durable receipt inventory was not independently verified')
+  for (const expected of terminalReceipts) {
+    const operation = await rpc.call('operation/get', {
+      protocolVersion: 1,
+      operationId: expected.body.operationId,
+    })
+    try {
+      verifyOperationReceiptJournal(operation.operation, expected)
+    } catch (error) {
+      throw new AcceptanceFailure(
+        'P0-LOCAL-JOURNAL-RECEIPT-BINDING',
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+    requireCondition(true, 'P0-LOCAL-JOURNAL-RECEIPT-BINDING', `operation ${expected.body.operationId} journal was not independently verified`)
+  }
   receipt.observations.terminalReceiptDigests = terminalReceipts.map(item => item.digest)
+  receipt.observations.terminalJournalHeadDigests = terminalReceipts.map(item => item.body.journalHeadDigest)
   receipt.status = 'passed'
   receipt.p0Status = 'local-head-lifecycle-proven'
 } catch (error) {
@@ -498,22 +536,38 @@ try {
   receipt.observations.assertionAccounting.totalPassed = stableGateAssertionsPassed + requiredOwnerAssertionsPassed
   const finalizationFailures = []
   for (const [label, finalize] of [
-    ['dsh-web-process', async () => { await stopChild(webChild) }],
+    ['dsh-web-process', async () => {
+      if (receipt.status === 'passed') requestLiveChildTeardown(webChild)
+      await stopChild(webChild)
+    }],
     ['web-log', async () => { await writeFile(join(evidenceRoot, 'web.log'), sanitizeDiagnostic(webOutput.value)) }],
     ['temporary-home', async () => { if (tempRoot !== undefined) await rm(tempRoot, { recursive: true, force: true }) }],
   ]) {
     try {
       await finalize()
     } catch (finalizationError) {
-      finalizationFailures.push(`${label}: ${sanitizeDiagnostic(finalizationError instanceof Error ? finalizationError.message : String(finalizationError))}`)
+      finalizationFailures.push({
+        code: finalizationError instanceof AcceptanceFailure ? finalizationError.code : 'P0-LOCAL-TEARDOWN',
+        message: `${label}: ${sanitizeDiagnostic(finalizationError instanceof Error ? finalizationError.message : String(finalizationError))}`,
+      })
+    }
+  }
+  if (receipt.status === 'passed') {
+    try {
+      await assertLocalHeadBuildBindingUnchanged()
+    } catch (finalBuildError) {
+      finalizationFailures.push({
+        code: finalBuildError instanceof AcceptanceFailure ? finalBuildError.code : 'P0-LOCAL-HOST-BUILD-BINDING',
+        message: `build-binding: ${sanitizeDiagnostic(finalBuildError instanceof Error ? finalBuildError.message : String(finalBuildError))}`,
+      })
     }
   }
   if (finalizationFailures.length > 0) {
     receipt.status = 'invalid'
     receipt.p0Status = 'not-proven'
     receipt.failure = {
-      code: 'P0-LOCAL-TEARDOWN',
-      message: `[P0-LOCAL-TEARDOWN] ${finalizationFailures.join('; ')}`,
+      code: finalizationFailures[0].code,
+      message: `[${finalizationFailures[0].code}] ${finalizationFailures.map(failure => failure.message).join('; ')}`,
     }
     process.exitCode = 1
   }
@@ -541,6 +595,46 @@ async function assertLocalHeadBuilt() {
       )
     }
     requireCondition(info.isFile() && !info.isSymbolicLink(), 'P0-LOCAL-HOST-NOT-BUILT', `required local-HEAD output is not a regular file: ${path}`)
+  }
+  try {
+    const canonicalRoot = await realpath(dshRoot)
+    const canonicalBin = await realpath(dshBin)
+    const binPath = relative(canonicalRoot, canonicalBin)
+    if (binPath === '' || isAbsolute(binPath) || binPath === '..' || binPath.startsWith(`..${sep}`)) {
+      throw new Error('built CLI realpath resolves outside the configured DSH checkout')
+    }
+    receipt.target.dshBinRealpath = canonicalBin
+    initialBuildBinding = await verifyRepositoryBuildBinding(dshRoot)
+    receipt.target.buildBinding = {
+      ...initialBuildBinding,
+      finalRecordSha256: null,
+      reverifiedAfterLifecycle: false,
+    }
+  } catch (error) {
+    throw new AcceptanceFailure(
+      'P0-LOCAL-HOST-BUILD-BINDING',
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+async function assertLocalHeadBuildBindingUnchanged() {
+  try {
+    const finalBuildBinding = await verifyRepositoryBuildBinding(dshRoot)
+    if (initialBuildBinding === undefined
+      || finalBuildBinding.recordSha256 !== initialBuildBinding.recordSha256) {
+      throw new Error('Host repository build record bytes changed during local-HEAD acceptance')
+    }
+    receipt.target.buildBinding = {
+      ...initialBuildBinding,
+      finalRecordSha256: finalBuildBinding.recordSha256,
+      reverifiedAfterLifecycle: true,
+    }
+  } catch (error) {
+    throw new AcceptanceFailure(
+      'P0-LOCAL-HOST-BUILD-BINDING',
+      error instanceof Error ? error.message : String(error),
+    )
   }
 }
 
@@ -610,9 +704,15 @@ function assertPlan(response, expected) {
   requireCondition(response.policy?.status === 'eligible', 'P0-LOCAL-PLAN-POLICY', `${expected.operationKind} policy was not eligible`)
   const plan = expectRecord(response.plan, `${expected.operationKind} plan`)
   const content = expectRecord(plan.content, `${expected.operationKind} plan content`)
+  let planIntegrityFailure = null
+  try {
+    verifyImmutablePlanDigest(plan)
+  } catch (error) {
+    planIntegrityFailure = error instanceof Error ? error.message : String(error)
+  }
   const mismatches = [
     ['intentId', typeof response.intentId === 'string' && content.intentId === response.intentId, content.intentId],
-    ['hash', typeof plan.hash === 'string' && /^sha256:[a-f0-9]{64}$/.test(plan.hash), plan.hash],
+    ['hash', planIntegrityFailure === null, planIntegrityFailure ?? plan.hash],
     ['origin', content.origin === 'store', content.origin],
     ['singleUse', content.singleUse === true, content.singleUse],
     ['candidateRef', content.candidateRef === expected.candidateRef, content.candidateRef],
@@ -736,6 +836,11 @@ function assertCommittedLifecycle(response, plan, externalRuntimeAction) {
     ['verificationDigests', Array.isArray(body.verificationDigests) && body.verificationDigests.length > 0, Array.isArray(body.verificationDigests) ? body.verificationDigests.length : typeof body.verificationDigests],
     ['receiptDigest', typeof receiptValue.digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(receiptValue.digest), receiptValue.digest],
   ].filter(([, matches]) => !matches)
+  try {
+    verifyTerminalReceiptPlanBinding(receiptValue, plan)
+  } catch (error) {
+    mismatches.push(['receiptCanonicalBinding', false, error instanceof Error ? error.message : String(error)])
+  }
   requireCondition(
     mismatches.length === 0,
     'P0-LOCAL-LIFECYCLE-RECEIPT',

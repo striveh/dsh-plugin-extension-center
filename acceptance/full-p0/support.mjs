@@ -27,6 +27,19 @@ export {
 /** Exact read-only Extension Center channel exercised by the owner preflight. */
 export const EXTENSION_CENTER_CHANNEL = '/dsh-extension-center'
 
+/**
+ * Prove an observed child stayed live until the acceptance runner requested teardown.
+ * @param {import('node:child_process').ChildProcess | undefined} child Observed child.
+ */
+export function requestLiveChildTeardown(child) {
+  if (child === undefined || child.exitCode !== null || child.signalCode !== null || !child.kill('SIGTERM')) {
+    throw new AcceptanceFailure(
+      'P0-LOCAL-WEB-TERMINATED',
+      'Web Host exited before the acceptance runner initiated teardown',
+    )
+  }
+}
+
 /** Exact read-only method exercised by the owner preflight. */
 export const CATALOG_LIST_METHOD = 'catalog/list'
 
@@ -159,6 +172,30 @@ export function assertRequiredHostOwners(capabilities) {
     }
   }
   return Object.freeze(observed)
+}
+
+/**
+ * Wait for the writable Host generation after every required owner is live.
+ * The observer must validate the signed catalog envelope and owner booleans on
+ * every attempt, so this wait admits only the documented activating state.
+ */
+export async function waitForAcquisitionAdmission(observe, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 50
+  if (typeof observe !== 'function'
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 0
+    || !Number.isSafeInteger(intervalMs) || intervalMs < 0) {
+    throw new TypeError('acquisition admission wait requires an observer and non-negative integer timing')
+  }
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const observed = await observe()
+    if (observed?.value?.hostCapabilities?.acquisition === true
+      && observed.value.hostCapabilities.reason === null) return observed
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return observed
+    await delay(Math.min(intervalMs, remaining))
+  }
 }
 
 /** Remove inherited provider credentials and provider endpoint overrides from a child environment. */

@@ -307,10 +307,10 @@ export function parseCatalogListResponse(value: unknown): CatalogListResponse {
     && skillRegistry
     && toolRegistry
     && loaderObservation
-  if (acquisition !== ownersAvailable) {
-    throw new Error('extension-center: Host acquisition claim does not match required owner capabilities')
+  if (acquisition && !ownersAvailable) {
+    throw new Error('extension-center: Host acquisition claim requires all owners and a ready writable runtime')
   }
-  const expectedReason = ownersAvailable ? null : 'host-capability'
+  const expectedReason = acquisition ? null : 'host-capability'
   if (capabilities.reason !== expectedReason) {
     throw new Error('extension-center: invalid Host capability reason')
   }

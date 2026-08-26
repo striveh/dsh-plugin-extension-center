@@ -17,11 +17,12 @@ import { testReviewEvidence } from './support/review-evidence.ts'
 
 const roots: string[] = []
 const OPERATION_ID = 'operation:break-glass:plugin:1'
+const RECOVERY_MUTATION_ID = `extension-center-recovery-${createHash('sha256').update(OPERATION_ID).digest('hex')}`
 const TARGET_KEY = 'plugin:web:profile:web:dsh-example'
 const CANDIDATE_GENERATION = '11111111-1111-4111-8111-111111111111'
 const RECOVERY_GENERATION = '22222222-2222-4222-8222-222222222222'
 
-type HostBehavior = 'restore' | 'noop-restore' | 'old-rc2'
+type HostBehavior = 'restore' | 'noop-restore' | 'old-rc2' | 'lost-restore-output' | 'lost-restore-output-before-ack'
 
 interface JsonRecord {
   readonly [key: string]: unknown
@@ -29,6 +30,8 @@ interface JsonRecord {
 
 interface JournalFixture {
   readonly root: string
+  readonly hostHome: string
+  readonly ambientHostHome: string
   readonly cliPath: string
   readonly hostCliPath: string
   readonly callsPath: string
@@ -60,14 +63,19 @@ function bytesDigest(value: string | Buffer): string {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`
 }
 
-function event(sequence: number, previousDigest: string | null, entry: JsonRecord): JsonRecord {
+function event(
+  sequence: number,
+  previousDigest: string | null,
+  entry: JsonRecord,
+  atMs = 1_000 + sequence,
+): JsonRecord {
   const unsigned = {
     schemaVersion: 1,
     operationId: OPERATION_ID,
     targetKey: TARGET_KEY,
     sequence,
     previousDigest,
-    atMs: 1_000 + sequence,
+    atMs,
     entry,
   }
   return { ...unsigned, digest: jsonDigest(unsigned) }
@@ -103,26 +111,27 @@ async function compileStandaloneCli(root: string): Promise<Readonly<{ path: stri
   return { path: await realpath(path), source }
 }
 
-async function writeHostCli(root: string, behavior: HostBehavior): Promise<Readonly<{
+async function writeHostCli(root: string, hostHome: string, behavior: HostBehavior): Promise<Readonly<{
   path: string
   callsPath: string
   statePath: string
 }>> {
   const path = join(root, 'host-cli.mjs')
-  const statePath = join(root, 'host-inventory.json')
-  const callsPath = join(root, 'host-calls.json')
+  const statePath = join(hostHome, 'host-inventory.json')
+  const callsPath = join(hostHome, 'host-calls.json')
   const candidateDigest = jsonDigest({ generation: CANDIDATE_GENERATION })
   const recoveryDigest = jsonDigest({ generation: RECOVERY_GENERATION })
+  const restoreFromRollback = behavior === 'lost-restore-output-before-ack'
   await writeFile(statePath, `${JSON.stringify({
     snapshot: {
       profile: 'web',
       revision: 7,
       treeDigest: candidateDigest,
-      effectivePath: join(root, 'profiles', CANDIDATE_GENERATION),
+      effectivePath: join(hostHome, 'profiles', CANDIDATE_GENERATION),
       activeGeneration: CANDIDATE_GENERATION,
-      lastGoodGeneration: RECOVERY_GENERATION,
-      rollbackGeneration: null,
-      bootStatus: 'pending-restart',
+      lastGoodGeneration: restoreFromRollback ? CANDIDATE_GENERATION : RECOVERY_GENERATION,
+      rollbackGeneration: restoreFromRollback ? RECOVERY_GENERATION : null,
+      bootStatus: restoreFromRollback ? 'verified' : 'pending-restart',
     },
     active: summary(CANDIDATE_GENERATION, candidateDigest),
     staged: [],
@@ -130,19 +139,36 @@ async function writeHostCli(root: string, behavior: HostBehavior): Promise<Reado
   }, null, 2)}\n`)
   await writeFile(path, `
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
-const root = dirname(fileURLToPath(import.meta.url))
+const root = process.env.DSH_HOME
+if (root === undefined || root.length === 0) throw new Error('DSH_HOME is required')
 const statePath = join(root, 'host-inventory.json')
 const callsPath = join(root, 'host-calls.json')
+const receiptPath = join(root, 'host-restore-receipt.json')
 const args = process.argv.slice(2)
 const prior = existsSync(callsPath) ? JSON.parse(readFileSync(callsPath, 'utf8')) : []
 prior.push(args)
 writeFileSync(callsPath, JSON.stringify(prior))
-if (args.length !== 4 || args[0] !== 'plugin' || args[1] !== '--profile' || args[2] !== 'web') {
+if ((args.length !== 4 && args.length !== 6) || args[0] !== 'plugin' || args[1] !== '--profile' || args[2] !== 'web') {
   process.stderr.write('unsupported rc2 invocation\\n')
   process.exitCode = 2
+} else if (args[3] === 'restore-receipt') {
+  if (${JSON.stringify(behavior)} === 'old-rc2') {
+    process.stderr.write('unsupported rc2 operation\\n')
+    process.exitCode = 2
+  } else if (args.length !== 6 || args[4] !== '--mutation-id' || args[5] !== ${JSON.stringify(RECOVERY_MUTATION_ID)}) {
+    process.stderr.write('missing exact restore receipt mutation id\\n')
+    process.exitCode = 2
+  } else {
+    const receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : null
+    process.stdout.write(JSON.stringify({
+      profile: 'web',
+      mutationId: args[5],
+      status: receipt === null ? 'not-found' : 'committed',
+      receipt,
+    }, null, 2) + '\\n')
+  }
 } else if (args[3] === 'list') {
   if (${JSON.stringify(behavior)} === 'old-rc2') {
     process.stdout.write('Legend: production dependency, optional only, dev only\\n')
@@ -150,25 +176,45 @@ if (args.length !== 4 || args[0] !== 'plugin' || args[1] !== '--profile' || args
     process.stdout.write(JSON.stringify(JSON.parse(readFileSync(statePath, 'utf8')), null, 2) + '\\n')
   }
 } else if (args[3] === 'restore') {
+  if (args.length !== 6 || args[4] !== '--mutation-id' || args[5] !== ${JSON.stringify(RECOVERY_MUTATION_ID)}) {
+    process.stderr.write('missing exact restore mutation id\\n')
+    process.exitCode = 2
+  } else {
   const state = JSON.parse(readFileSync(statePath, 'utf8'))
-  const target = state.recoverable.find(item => item.generation === state.snapshot.lastGoodGeneration)
+  const targetGeneration = state.snapshot.activeGeneration !== state.snapshot.lastGoodGeneration
+    ? state.snapshot.lastGoodGeneration
+    : state.snapshot.rollbackGeneration
+  const target = state.recoverable.find(item => item.generation === targetGeneration)
   if (target === undefined) {
     process.stderr.write('no recovery target\\n')
     process.exitCode = 2
   } else {
-    if (${JSON.stringify(behavior)} === 'restore') {
+    if (${JSON.stringify(behavior)} === 'restore' || ${JSON.stringify(behavior)} === 'lost-restore-output'
+      || ${JSON.stringify(behavior)} === 'lost-restore-output-before-ack') {
+      const before = structuredClone(state.snapshot)
       const priorActive = state.active
       state.snapshot.revision += 1
       state.snapshot.activeGeneration = target.generation
       state.snapshot.treeDigest = target.treeDigest
       state.snapshot.effectivePath = join(root, 'profiles', target.generation)
-      state.snapshot.bootStatus = 'verified'
+      state.snapshot.bootStatus = target.generation === state.snapshot.lastGoodGeneration ? 'verified' : 'pending-restart'
       state.active = target
       state.staged = [...state.staged, priorActive]
       state.recoverable = []
       writeFileSync(statePath, JSON.stringify(state, null, 2) + '\\n')
+      writeFileSync(receiptPath, JSON.stringify({
+        mutationId: args[5],
+        status: 'committed',
+        operation: 'restore',
+        before,
+        after: state.snapshot,
+        restartRequired: true,
+      }, null, 2) + '\\n')
+      if (${JSON.stringify(behavior)} === 'lost-restore-output'
+        || ${JSON.stringify(behavior)} === 'lost-restore-output-before-ack') process.kill(process.pid, 'SIGKILL')
     }
     process.stdout.write('dsh: restored generation ' + target.generation + '; restart required\\n')
+  }
   }
 } else {
   process.stderr.write('unsupported rc2 operation\\n')
@@ -275,10 +321,17 @@ async function fixture(behavior: HostBehavior = 'restore'): Promise<JournalFixtu
   const created = await mkdtemp(join(tmpdir(), 'extension-break-glass-'))
   const root = await realpath(created)
   roots.push(root)
+  const hostHomePath = join(root, 'host-home')
+  const ambientHostHomePath = join(root, 'wrong-ambient-host-home')
+  await mkdir(hostHomePath, { mode: 0o700 })
+  await mkdir(ambientHostHomePath, { mode: 0o700 })
+  const hostHome = await realpath(hostHomePath)
+  const ambientHostHome = await realpath(ambientHostHomePath)
   const cli = await compileStandaloneCli(root)
-  const host = await writeHostCli(root, behavior)
+  const host = await writeHostCli(root, hostHome, behavior)
   const recoveryExecutable = await installRecoveryExecutable({
     root,
+    hostHome,
     packageVersion: '1.0.0',
     cliPath: cli.path,
     hostCliPath: host.path,
@@ -301,6 +354,8 @@ async function fixture(behavior: HostBehavior = 'restore'): Promise<JournalFixtu
   const operationDirectory = join(root, 'operations', createHash('sha256').update(OPERATION_ID).digest('hex'))
   return {
     root,
+    hostHome,
+    ambientHostHome,
     cliPath: recoveryExecutable.executablePath,
     hostCliPath: host.path,
     callsPath: host.callsPath,
@@ -315,7 +370,7 @@ async function fixture(behavior: HostBehavior = 'restore'): Promise<JournalFixtu
 function runCli(value: JournalFixture): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>> {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(process.execPath, [value.cliPath, value.root, OPERATION_ID], {
-      env: { ...process.env, DSH_HOME: join(value.root, 'dsh-home') },
+      env: { ...process.env, DSH_HOME: value.ambientHostHome },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const stdout: Buffer[] = []
@@ -356,10 +411,35 @@ describe('standalone Host break-glass recovery', () => {
       exitCode: 0,
     })
     expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
       ['plugin', '--profile', 'web', 'list'],
-      ['plugin', '--profile', 'web', 'restore'],
+      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
       ['plugin', '--profile', 'web', 'list'],
     ])
+    await expect(readFile(join(value.ambientHostHome, 'host-calls.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a non-canonical pinned Host home before invoking either ambient or pinned Host state', async () => {
+    const value = await fixture()
+    const opened = value.events[0]!
+    const openedEntry = structuredClone(opened.entry) as Record<string, unknown>
+    const planEvidence = openedEntry.planEvidence as Record<string, unknown>
+    ;(planEvidence.recoveryExecutable as Record<string, unknown>).hostHome = `${value.hostHome}/../host-home`
+    const rebuilt = [event(1, null, openedEntry)]
+    for (const prior of value.events.slice(1)) {
+      rebuilt.push(event(rebuilt.length + 1, rebuilt.at(-1)!.digest as string, prior.entry as JsonRecord))
+    }
+    await rm(value.operationDirectory, { recursive: true })
+    await persistJournal(value.root, rebuilt)
+
+    const result = await runCli(value)
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('Host home path is not its canonical real directory')
+    await expect(readFile(value.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(value.ambientHostHome, 'host-calls.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('fails closed on a changed event chain or CURRENT head before invoking the Host CLI', async () => {
@@ -382,6 +462,46 @@ describe('standalone Host break-glass recovery', () => {
     expect(pointerResult.exitCode).toBe(1)
     expect(pointerResult.stderr).toContain('headDigest does not match')
     await expect(readFile(changedPointer.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a fully rehashed backward clock or non-terminal evidence before invoking the Host CLI', async () => {
+    const backwardClock = await fixture()
+    const rebuiltTime: JsonRecord[] = []
+    for (const [index, prior] of backwardClock.events.entries()) {
+      rebuiltTime.push(event(
+        index + 1,
+        index === 0 ? null : rebuiltTime.at(-1)!.digest as string,
+        structuredClone(prior.entry) as JsonRecord,
+        index === 2 ? 1_000 : prior.atMs as number,
+      ))
+    }
+    await rm(backwardClock.operationDirectory, { recursive: true })
+    await persistJournal(backwardClock.root, rebuiltTime)
+
+    const backwardResult = await runCli(backwardClock)
+    expect(backwardResult.exitCode).toBe(1)
+    expect(backwardResult.stderr).toContain('journal time moved backwards')
+    await expect(readFile(backwardClock.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const nonTerminalEvidence = await fixture()
+    const rebuiltEvidence: JsonRecord[] = []
+    for (const [index, prior] of nonTerminalEvidence.events.entries()) {
+      const entry = structuredClone(prior.entry) as Record<string, unknown>
+      if (index === 1) entry.evidenceDigest = jsonDigest({ forged: 'non-terminal' })
+      rebuiltEvidence.push(event(
+        index + 1,
+        index === 0 ? null : rebuiltEvidence.at(-1)!.digest as string,
+        entry,
+        prior.atMs as number,
+      ))
+    }
+    await rm(nonTerminalEvidence.operationDirectory, { recursive: true })
+    await persistJournal(nonTerminalEvidence.root, rebuiltEvidence)
+
+    const evidenceResult = await runCli(nonTerminalEvidence)
+    expect(evidenceResult.exitCode).toBe(1)
+    expect(evidenceResult.stderr).toContain('non-terminal journal transitions cannot publish final evidence')
+    await expect(readFile(nonTerminalEvidence.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('verifies a present receipt digest before refusing a non-recovery journal', async () => {
@@ -455,16 +575,16 @@ describe('standalone Host break-glass recovery', () => {
     await expect(readFile(hostMismatch.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('fails closed when an rc2-style list is not the exact owner inventory', async () => {
+  it('fails closed when the Host lacks the exact restore-receipt protocol', async () => {
     const value = await fixture('old-rc2')
 
     const result = await runCli(value)
 
     expect(result.exitCode).toBe(1)
     expect(result.stdout).toBe('')
-    expect(result.stderr).toContain('Host CLI list did not return one JSON value')
+    expect(result.stderr).toContain('Host CLI restore-receipt probe failed with exit code 2')
     expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
-      ['plugin', '--profile', 'web', 'list'],
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
     ])
   })
 
@@ -480,6 +600,7 @@ describe('standalone Host break-glass recovery', () => {
     expect(result.exitCode).toBe(1)
     expect(result.stderr).toContain('current recovery selector drifted from the journal pin')
     expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
       ['plugin', '--profile', 'web', 'list'],
     ])
   })
@@ -493,9 +614,87 @@ describe('standalone Host break-glass recovery', () => {
     expect(result.stdout).toBe('')
     expect(result.stderr).toContain('does not prove the exact restored generation')
     expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
       ['plugin', '--profile', 'web', 'list'],
-      ['plugin', '--profile', 'web', 'restore'],
+      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
       ['plugin', '--profile', 'web', 'list'],
     ])
+  })
+
+  it('recognizes the committed receipt after SIGKILL loses restore stdout and does not advance revision again', async () => {
+    const value = await fixture('lost-restore-output')
+
+    const interrupted = await runCli(value)
+    expect(interrupted.exitCode).toBe(1)
+    expect(interrupted.stdout).toBe('')
+    expect(interrupted.stderr).toContain('Host CLI restore ended without an exit code')
+
+    const retried = await runCli(value)
+    expect(retried).toEqual({
+      stdout: 'profile restored; Center journal reconciliation pending\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
+      snapshot: { revision: number; activeGeneration: string; treeDigest: string }
+    }
+    expect(state.snapshot).toMatchObject({
+      revision: 8,
+      activeGeneration: RECOVERY_GENERATION,
+      treeDigest: jsonDigest({ generation: RECOVERY_GENERATION }),
+    })
+    const calls = JSON.parse(await readFile(value.callsPath, 'utf8')) as string[][]
+    expect(calls).toEqual([
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
+      ['plugin', '--profile', 'web', 'list'],
+      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
+      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
+      ['plugin', '--profile', 'web', 'list'],
+    ])
+    expect(calls.filter(args => args[3] === 'restore')).toHaveLength(1)
+  })
+
+  it('recognizes the same committed receipt after the restored generation is acknowledged', async () => {
+    const value = await fixture('lost-restore-output-before-ack')
+
+    const interrupted = await runCli(value)
+    expect(interrupted.exitCode).toBe(1)
+    expect(interrupted.stderr).toContain('Host CLI restore ended without an exit code')
+    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
+      snapshot: Record<string, unknown>
+    }
+    state.snapshot.revision = 9
+    state.snapshot.lastGoodGeneration = RECOVERY_GENERATION
+    state.snapshot.rollbackGeneration = CANDIDATE_GENERATION
+    state.snapshot.bootStatus = 'verified'
+    await writeFile(value.statePath, `${JSON.stringify(state, null, 2)}\n`)
+
+    const retried = await runCli(value)
+
+    expect(retried).toEqual({
+      stdout: 'profile restored; Center journal reconciliation pending\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    const calls = JSON.parse(await readFile(value.callsPath, 'utf8')) as string[][]
+    expect(calls.filter(args => args[3] === 'restore')).toHaveLength(1)
+  })
+
+  it('rejects unrelated snapshot drift after a committed restore receipt', async () => {
+    const value = await fixture('lost-restore-output-before-ack')
+    await runCli(value)
+    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
+      snapshot: Record<string, unknown>
+    }
+    state.snapshot.revision = 9
+    state.snapshot.lastGoodGeneration = RECOVERY_GENERATION
+    state.snapshot.rollbackGeneration = '33333333-3333-4333-8333-333333333333'
+    state.snapshot.bootStatus = 'verified'
+    await writeFile(value.statePath, `${JSON.stringify(state, null, 2)}\n`)
+
+    const retried = await runCli(value)
+
+    expect(retried.exitCode).toBe(1)
+    expect(retried.stderr).toContain('current inventory diverged from the committed restore receipt')
   })
 })

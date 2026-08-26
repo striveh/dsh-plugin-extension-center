@@ -78,7 +78,7 @@ export declare class CapabilityAcquisitionService {
     /** Create the real Host continuation only after the trusted plan decision approved acquisition. */
     activateApprovedPlan(planHash: string): Promise<void>;
     /** Reconcile every approved task plan after Host restart without consuming it. */
-    recoverApprovedPlans(): Promise<void>;
+    recoverApprovedPlans(signal?: AbortSignal): Promise<void>;
     /** Register the non-mutating verifier that releases only exact committed task receipts. */
     registerVerifier(): () => void;
     /** Bind a loopback plan decision to its independent task attempt. */

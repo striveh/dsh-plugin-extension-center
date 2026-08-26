@@ -29,6 +29,14 @@ export interface ProfileTransactionsOwner {
         before: unknown;
         after: unknown;
     }>>;
+    getRestoreReceipt(request: unknown): Promise<Readonly<{
+        mutationId: string;
+        status: 'committed';
+        operation: 'restore';
+        before: unknown;
+        after: unknown;
+        restartRequired: true;
+    }> | null>;
     acknowledgeBoot(request: unknown): Promise<Readonly<{
         before: unknown;
         after: unknown;

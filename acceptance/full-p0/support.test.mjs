@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +17,9 @@ import {
   keylessEnvironment,
   mutableHostStateDigest,
   parseCatalogListEnvelope,
+  requestLiveChildTeardown,
+  stopChild,
+  waitForAcquisitionAdmission,
 } from './support.mjs'
 
 function response(capabilities) {
@@ -99,6 +104,33 @@ test('owner failures are stable and ordered', () => {
   assert.equal(REQUIRED_HOST_OWNERS.length, 6)
 })
 
+test('acquisition admission waits only for a live-owner generation to activate', async () => {
+  let attempts = 0
+  const admitted = await waitForAcquisitionAdmission(async () => {
+    attempts += 1
+    const parsed = parseCatalogListEnvelope(response({
+      ...allAvailable,
+      acquisition: attempts === 2,
+      reason: attempts === 2 ? null : 'host-capability',
+    }), 'owner-preflight')
+    assertRequiredHostOwners(parsed.capabilities)
+    return parsed
+  }, { timeoutMs: 100, intervalMs: 0 })
+  assert.equal(attempts, 2)
+  assert.equal(admitted.value.hostCapabilities.acquisition, true)
+
+  const activating = await waitForAcquisitionAdmission(async () => {
+    const parsed = parseCatalogListEnvelope(response({
+      ...allAvailable,
+      acquisition: false,
+      reason: 'host-capability',
+    }), 'owner-preflight')
+    assertRequiredHostOwners(parsed.capabilities)
+    return parsed
+  }, { timeoutMs: 0 })
+  assert.equal(activating.value.hostCapabilities.acquisition, false)
+})
+
 test('the response must carry correlated signed-catalog evidence', () => {
   assert.throws(
     () => parseCatalogListEnvelope({ ...response({}), rpcId: 'other' }, 'owner-preflight'),
@@ -137,4 +169,18 @@ test('mutable state digest detects target writes and ignores dependency-tree noi
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('a passed lane accepts only a Web child still live at runner-owned teardown', async () => {
+  const running = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  await once(running, 'spawn')
+  requestLiveChildTeardown(running)
+  await stopChild(running)
+
+  const exited = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' })
+  await once(exited, 'close')
+  assert.throws(
+    () => requestLiveChildTeardown(exited),
+    error => error instanceof AcceptanceFailure && error.code === 'P0-LOCAL-WEB-TERMINATED',
+  )
 })

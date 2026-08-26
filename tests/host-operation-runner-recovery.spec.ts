@@ -40,7 +40,12 @@ afterEach(async () => {
 class RecoveryProvider implements LifecycleProvider {
   readonly kind = 'skill' as const
   readonly observedPhases: string[] = []
+  recoverGate: Promise<void> | null = null
+  recoverStarted: (() => void) | null = null
   recoverFailure = false
+  rollbackGate: Promise<void> | null = null
+  rollbackStarted: (() => void) | null = null
+  rollbackMutations = 0
   rollbackFailures = 0
 
   constructor(
@@ -54,6 +59,9 @@ class RecoveryProvider implements LifecycleProvider {
   apply(): Promise<AppliedProviderOperation> { throw new Error('not used') }
 
   async recover(request: ProviderOperationRequest): Promise<AppliedProviderOperation | null> {
+    this.recoverStarted?.()
+    if (this.recoverGate !== null) await this.recoverGate
+    request.signal.throwIfAborted()
     const loaded = await this.operations.load(request.authorization.operationId)
     this.observedPhases.push(loaded?.projection.phase ?? 'absent')
     if (this.recoverFailure) throw new Error('simulated recovery failure')
@@ -80,12 +88,16 @@ class RecoveryProvider implements LifecycleProvider {
     return Promise.resolve({ digest: canonicalSha256({ verified: applied.afterDigest }) })
   }
 
-  rollback(applied: AppliedProviderOperation) {
+  async rollback(applied: AppliedProviderOperation): Promise<`sha256:${string}`> {
+    this.rollbackStarted?.()
+    if (this.rollbackGate !== null) await this.rollbackGate
+    applied.prepared.request.signal.throwIfAborted()
+    this.rollbackMutations += 1
     if (this.rollbackFailures > 0) {
       this.rollbackFailures -= 1
       throw new Error('simulated rollback failure')
     }
-    return Promise.resolve(applied.prepared.beforeDigest)
+    return applied.prepared.beforeDigest
   }
 
   cleanup(): Promise<void> { return Promise.resolve() }
@@ -757,6 +769,31 @@ describe('phase-aware operation recovery', () => {
     expect(await value.locks.list()).toEqual([])
   })
 
+  it('does not translate owner-generation cancellation into a durable recovery mutation', async () => {
+    const value = await fixture()
+    await append(value, transitionOperation(value.journal, 'staging', null, null, Date.now()))
+    await snapshot(value)
+    await append(value, transitionOperation(value.journal, 'applying', null, null, Date.now()))
+    const started = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    value.provider.recoverStarted = () => { started.resolve() }
+    value.provider.recoverGate = gate.promise
+    const controller = new AbortController()
+
+    const recovery = value.runner.recover(controller.signal)
+    await started.promise
+    controller.abort(new Error('Host owner generation retired'))
+    gate.resolve()
+
+    await expect(recovery).rejects.toThrow('Host owner generation retired')
+    expect((await value.operations.load(value.authorization.operationId))?.projection).toMatchObject({
+      phase: 'applying',
+      receipt: null,
+    })
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toHaveLength(1)
+  })
+
   it('keeps an applying mutation fenced through failed rollback and explicit recovery', async () => {
     const value = await fixture()
     await append(value, transitionOperation(value.journal, 'staging', null, null, Date.now()))
@@ -782,6 +819,33 @@ describe('phase-aware operation recovery', () => {
       .resolves.toMatchObject({ status: 'rolled-back', receipt: { body: { outcome: 'rolled-back' } } })
     expect((await value.operations.load(value.authorization.operationId))?.projection.phase).toBe('rolled-back')
     expect(await value.locks.list()).toEqual([])
+  })
+
+  it('stops an explicit lifecycle recovery before a retired owner can mutate', async () => {
+    const value = await fixture()
+    await append(value, transitionOperation(value.journal, 'staging', null, null, Date.now()))
+    await snapshot(value)
+    await append(value, transitionOperation(value.journal, 'applying', null, null, Date.now()))
+    await append(value, transitionOperation(value.journal, 'rolling-back', null, null, Date.now()))
+    await append(value, transitionOperation(value.journal, 'recovery-required', null, 'rollback-failed', Date.now()))
+    const initialEvents = value.journal.events.length
+    const started = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    value.provider.rollbackStarted = () => { started.resolve() }
+    value.provider.rollbackGate = gate.promise
+    const controller = new AbortController()
+
+    const recovery = value.runner.recoverOperation(value.authorization.operationId, controller.signal)
+    await started.promise
+    controller.abort(new Error('Host owner generation retired'))
+    gate.resolve()
+
+    await expect(recovery).rejects.toThrow('Host owner generation retired')
+    const loaded = await value.operations.load(value.authorization.operationId)
+    expect(loaded?.projection.phase).toBe('rolling-back')
+    expect(loaded?.journal.events).toHaveLength(initialEvents + 1)
+    expect(value.provider.rollbackMutations).toBe(0)
+    expect(await value.locks.list()).toHaveLength(1)
   })
 
   it('resumes an interrupted rolling-back journal without replaying verification or commit', async () => {
