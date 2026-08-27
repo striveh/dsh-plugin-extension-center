@@ -1158,6 +1158,8 @@ try {
     env: runtimeEnv,
     profileId: 'web',
     packageName: pluginV010.name,
+    leaseTimeoutMs: 120_000,
+    cliTimeoutMs: 300_000,
     startReplacementHost: () => {
       const launched = launchOfficialWeb(dshBin, workspace, runtimeEnv, webOutput)
       webChild = launched.child
