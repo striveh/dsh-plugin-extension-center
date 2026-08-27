@@ -328,7 +328,7 @@ jobs:
           echo "RUNTIME_RECEIPT_SHA=sha256:$(sha256sum .artifacts/acceptance/runtime-release/receipt.json | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
       - name: Resolve immutable pnpm binding
         run: |
-          node scripts/resolve-pnpm-binding.mjs "$(command -v pnpm)" > .artifacts/pnpm-binding.json
+          node scripts/resolve-pnpm-binding.mjs node_modules/pnpm/bin/pnpm.mjs > .artifacts/pnpm-binding.json
           test "$(jq -er '.version' .artifacts/pnpm-binding.json)" = 11.21.0
           {
             echo "PINNED_PNPM_BIN=$(jq -er '.binPath' .artifacts/pnpm-binding.json)"
