@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file. The format 
 - Load each Release artifact's manifest authority from its own exact source commit, so rc.0 backfill and later update verification do not compare historical packages with the protected-main verifier manifest.
 - Give the four subprocess-heavy standalone recovery tests the same explicit 15-second test budget as adjacent recovery cases, preventing loaded Node 22 CI from applying Vitest's unrelated five-second default.
 - Bind public-release package-manager execution to the lock-installed `pnpm` dependency instead of the self-updated GitHub Action launcher, whose executable intentionally lives outside a package root.
+- Resolve each Release tag through the bounded Git refs endpoint instead of the commit endpoint, whose rc.0 response includes a 300-file patch projection larger than the metadata limit.
+- Validate GitHub's current signed Release v0.2 predicate, verified release-service identity, database id, tag-ref commit, statement, and exact asset subjects instead of the superseded v0.1 projection.
 
 ## [0.1.0-rc.0] - 2026-08-27
 

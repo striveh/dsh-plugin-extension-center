@@ -112,7 +112,7 @@ function releaseArtifact(artifact) {
       bundleSha256: `sha256:${'6'.repeat(64)}`,
       statementSha256: `sha256:${'7'.repeat(64)}`,
       releaseVerificationResultSha256: `sha256:${'8'.repeat(64)}`,
-      tagRefSha1: '9'.repeat(40),
+      tagRefSha1: artifact.sourceCommit,
       assets: payload.map(asset => ({
         ...asset,
         verificationResultSha256: `sha256:${'a'.repeat(64)}`,
@@ -870,6 +870,7 @@ test('rejects any artifact digest, version, manifest, commit, or runtime receipt
     input => { input.githubCi.packAttestation.sha256 = `sha256:${'0'.repeat(64)}`; const { receiptDigest, ...body } = input.githubCi; input.githubCi.receiptDigest = canonicalSha256(body) },
     input => { input.githubCi.packAttestation.pnpmTreeSha256 = `sha256:${'0'.repeat(64)}`; const { receiptDigest, ...body } = input.githubCi; input.githubCi.receiptDigest = canonicalSha256(body) },
     input => { input.publicRelease.inputs.current.packed.bundledPnpmTreeSha256 = `sha256:${'0'.repeat(64)}` },
+    input => { input.publicRelease.inputs.current.immutableRelease.tagRefSha1 = '0'.repeat(40) },
     input => { input.runtimeRelease.observations.current.installedPnpmTreeSha256 = `sha256:${'0'.repeat(64)}` },
     input => { input.publicRelease.inputs.runtimeAcceptance.sha256 = `sha256:${'0'.repeat(64)}` },
     input => { input.runtimeRelease.ciPackAttestation.fileSha256 = `sha256:${'0'.repeat(64)}` },

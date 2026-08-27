@@ -47,13 +47,16 @@ const MAX_RUNTIME_RECEIPT_BYTES = 1024 * 1024
 const MAX_GH_OUTPUT_BYTES = 8 * 1024 * 1024
 const SHA256 = /^(?:sha256:)?([0-9a-f]{64})$/u
 const EXACT_SHA256 = /^sha256:[0-9a-f]{64}$/u
-const SHA1 = /^[0-9a-f]{40}$/u
 const COMMIT = /^[0-9a-f]{40}$/u
 const SEMVER = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u
 const PINNED_PNPM_VERSION = '11.21.0'
 const RUNTIME_ACCEPTANCE_ID = 'P0-CENTER-HOST-CLIENT-BOOT'
-const RELEASE_PREDICATE_TYPE = 'https://in-toto.io/attestation/release/v0.1'
+const RELEASE_PREDICATE_TYPE = 'https://in-toto.io/attestation/release/v0.2'
 const RELEASE_STATEMENT_TYPE = 'https://in-toto.io/Statement/v1'
+const RELEASE_BUNDLE_MEDIA_TYPE = 'application/vnd.dev.sigstore.bundle.v0.3+json'
+const RELEASE_VERIFICATION_MEDIA_TYPE = 'application/vnd.dev.sigstore.verificationresult+json;version=0.1'
+const RELEASE_CERTIFICATE_SAN = 'https://dotcom.releases.github.com'
+const RELEASE_VERIFIED_SAN_PATTERN = '^https://dotcom\\.releases\\.github\\.com$'
 const EXPECTED_MANIFEST_FIELDS = Object.freeze([
   'name', 'private', 'type', 'main', 'types', 'exports', 'files', 'engines', 'dsh',
   'dependencies', 'bundledDependencies', 'peerDependencies', 'peerDependenciesMeta',
@@ -354,19 +357,25 @@ async function fetchGitHubJson(url, fetchImpl, label) {
 }
 
 /** Bind GitHub Release and tag metadata to one exact three-file CI payload. */
-export function validateGitHubReleaseMetadata(specification, releaseValue, commitValue, ciReleaseAssetsValue) {
+export function validateGitHubReleaseMetadata(specification, releaseValue, tagRefValue, ciReleaseAssetsValue) {
   const spec = artifactSpecification(specification, 'GitHub Release artifact')
   const expectedAssets = exactCiReleaseAssets(ciReleaseAssetsValue, spec)
   const source = normalizeReleaseArtifactSource(spec.source, 'GitHub Release source', spec.version)
   if (source.kind !== 'github-release') fail('P0-RELEASE-METADATA', 'GitHub metadata requires a public Release source')
   const release = record(releaseValue, 'GitHub Release metadata')
-  const resolvedCommit = record(commitValue, 'GitHub tag commit metadata')
+  const tagRef = record(tagRefValue, 'GitHub Release tag ref metadata')
+  const tagObject = record(tagRef.object, 'GitHub Release tag ref object')
   const tag = `v${spec.version}`
   const expectedPrerelease = spec.parsedVersion.prerelease.length > 0
   if (release.tag_name !== tag || release.draft !== false || release.prerelease !== expectedPrerelease
     || release.html_url !== `https://github.com/${GITHUB_OWNER}/${GITHUB_REPOSITORY}/releases/tag/${tag}`
     || typeof release.target_commitish !== 'string' || release.target_commitish.length === 0
-    || release.target_commitish.length > 256 || resolvedCommit.sha !== spec.commit) {
+    || release.target_commitish.length > 256
+    || tagRef.ref !== `refs/tags/${tag}`
+    || tagRef.url !== githubApiUrl(`git/refs/tags/${encodeURIComponent(tag)}`).href
+    || tagObject.type !== 'commit'
+    || tagObject.sha !== spec.commit
+    || tagObject.url !== githubApiUrl(`git/commits/${spec.commit}`).href) {
     fail('P0-RELEASE-METADATA', 'GitHub Release state, tag, or resolved commit did not match the artifact')
   }
   if (!Array.isArray(release.assets)) fail('P0-RELEASE-METADATA', 'GitHub Release assets must be an array')
@@ -406,11 +415,11 @@ export function validateGitHubReleaseMetadata(specification, releaseValue, commi
 
 async function verifyGitHubReleaseMetadata(spec, ciReleaseAssets, fetchImpl) {
   const tag = `v${spec.version}`
-  const [release, resolvedCommit] = await Promise.all([
+  const [release, tagRef] = await Promise.all([
     fetchGitHubJson(githubApiUrl(`releases/tags/${encodeURIComponent(tag)}`), fetchImpl, 'GitHub Release metadata'),
-    fetchGitHubJson(githubApiUrl(`commits/${encodeURIComponent(tag)}`), fetchImpl, 'GitHub tag commit'),
+    fetchGitHubJson(githubApiUrl(`git/ref/tags/${encodeURIComponent(tag)}`), fetchImpl, 'GitHub Release tag ref'),
   ])
-  return validateGitHubReleaseMetadata(spec, release, resolvedCommit, ciReleaseAssets)
+  return validateGitHubReleaseMetadata(spec, release, tagRef, ciReleaseAssets)
 }
 
 function ghVersion(value) {
@@ -438,8 +447,9 @@ function releaseAttestationResult(value, expected) {
   const attestation = record(result.attestation, 'GitHub immutable Release attestation')
   const bundle = record(attestation.bundle, 'GitHub immutable Release attestation bundle')
   const envelope = record(bundle.dsseEnvelope, 'GitHub immutable Release DSSE envelope')
-  if (attestation.initiator !== 'github' || envelope.payloadType !== 'application/vnd.in-toto+json') {
-    fail('P0-RELEASE-IMMUTABILITY', 'GitHub Release attestation issuer or payload type is invalid')
+  if (bundle.mediaType !== RELEASE_BUNDLE_MEDIA_TYPE
+    || envelope.payloadType !== 'application/vnd.in-toto+json') {
+    fail('P0-RELEASE-IMMUTABILITY', 'GitHub Release attestation bundle or payload type is invalid')
   }
   let statement
   try {
@@ -450,19 +460,23 @@ function releaseAttestationResult(value, expected) {
   }
   const decoded = record(statement, 'GitHub immutable Release statement')
   const predicate = record(decoded.predicate, 'GitHub immutable Release predicate')
+  const tagUri = `pkg:github/${GITHUB_OWNER}/${GITHUB_REPOSITORY}@${expected.tag}`
   if (decoded._type !== RELEASE_STATEMENT_TYPE || decoded.predicateType !== RELEASE_PREDICATE_TYPE
     || predicate.repository !== `${GITHUB_OWNER}/${GITHUB_REPOSITORY}`
-    || predicate.tag !== expected.tag || String(predicate.releaseId) !== String(expected.releaseId)) {
+    || predicate.tag !== expected.tag || predicate.purl !== tagUri
+    || predicate.databaseId !== String(expected.releaseId)
+    || !/^[1-9][0-9]*$/u.test(predicate.ownerId)
+    || !/^[1-9][0-9]*$/u.test(predicate.packageId)
+    || predicate.repositoryId !== predicate.packageId) {
     fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release statement does not bind the exact repository, tag, and Release id')
   }
   if (!Array.isArray(decoded.subject) || decoded.subject.length !== expected.assets.length + 1) {
     fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release statement has an unexpected subject set')
   }
-  const tagUri = `pkg:github/${GITHUB_OWNER}/${GITHUB_REPOSITORY}@${expected.tag}`
   const tagSubjects = decoded.subject.filter(subject => subject?.uri === tagUri)
   if (tagSubjects.length !== 1) fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release statement omitted its exact tag subject')
   const tagDigest = record(tagSubjects[0].digest, 'GitHub immutable Release tag digest')
-  if (Object.keys(tagDigest).length !== 1 || !SHA1.test(tagDigest.sha1)) {
+  if (Object.keys(tagDigest).length !== 1 || tagDigest.sha1 !== expected.sourceCommit) {
     fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release tag subject is not one SHA-1 ref digest')
   }
   for (const expectedAsset of expected.assets) {
@@ -476,6 +490,25 @@ function releaseAttestationResult(value, expected) {
     }
   }
   const verificationResult = record(result.verificationResult, 'GitHub immutable Release signature verification')
+  const signature = record(verificationResult.signature, 'GitHub immutable Release verified signature')
+  const certificate = record(signature.certificate, 'GitHub immutable Release verified certificate')
+  const verifiedIdentity = record(verificationResult.verifiedIdentity, 'GitHub immutable Release verified identity')
+  const verifiedSan = record(
+    verifiedIdentity.subjectAlternativeName,
+    'GitHub immutable Release verified subject alternative name',
+  )
+  const verifiedIssuer = record(verifiedIdentity.issuer, 'GitHub immutable Release verified issuer')
+  const verifiedStatement = record(verificationResult.statement, 'GitHub immutable Release verified statement')
+  if (verificationResult.mediaType !== RELEASE_VERIFICATION_MEDIA_TYPE
+    || certificate.subjectAlternativeName !== RELEASE_CERTIFICATE_SAN
+    || typeof certificate.certificateIssuer !== 'string'
+    || certificate.certificateIssuer.length < 1
+    || certificate.certificateIssuer.length > 4_096
+    || verifiedSan.regexp !== RELEASE_VERIFIED_SAN_PATTERN
+    || verifiedIssuer.regexp !== '.*'
+    || canonicalJson(verifiedStatement) !== canonicalJson(decoded)) {
+    fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release verification identity or statement is invalid')
+  }
   return Object.freeze({
     bundleSha256: `sha256:${sha256(Buffer.from(canonicalJson(bundle)))}`,
     statementSha256: `sha256:${sha256(Buffer.from(canonicalJson(decoded)))}`,
@@ -489,6 +522,7 @@ export function validateGitHubImmutableReleaseProof(value) {
   const input = record(value, 'GitHub immutable Release proof')
   const tag = bounded(input.tag, 'GitHub immutable Release tag', 128)
   const releaseId = positiveInteger(input.releaseId, 'GitHub immutable Release id')
+  const sourceCommit = commit(input.sourceCommit, 'GitHub immutable Release source commit')
   const assets = input.assets
   if (!Array.isArray(assets) || assets.length !== 3) {
     fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release proof requires exactly three assets')
@@ -502,7 +536,7 @@ export function validateGitHubImmutableReleaseProof(value) {
       sha256: asset.sha256,
     })
   }))
-  const expected = Object.freeze({ tag, releaseId, assets: exactAssets })
+  const expected = Object.freeze({ tag, releaseId, sourceCommit, assets: exactAssets })
   const release = releaseAttestationResult(input.releaseResult, expected)
   if (!Array.isArray(input.assetResults) || input.assetResults.length !== exactAssets.length) {
     fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable Release proof requires one signed result per asset')
@@ -592,7 +626,7 @@ function ghJson(value, label) {
   }
 }
 
-async function verifyGitHubImmutableRelease(tag, releaseId, downloadedAssets, runner = runBoundedGh) {
+async function verifyGitHubImmutableRelease(tag, releaseId, sourceCommit, downloadedAssets, runner = runBoundedGh) {
   const ghVersionOutput = await runner(['--version'])
   const releaseResult = ghJson(await runner([
     'release', 'verify', tag, '--repo', `${GITHUB_OWNER}/${GITHUB_REPOSITORY}`, '--format', 'json',
@@ -608,6 +642,7 @@ async function verifyGitHubImmutableRelease(tag, releaseId, downloadedAssets, ru
   return validateGitHubImmutableReleaseProof({
     tag,
     releaseId,
+    sourceCommit,
     assets: downloadedAssets,
     ghVersionOutput,
     releaseResult,
@@ -770,9 +805,16 @@ export async function acquireVerifiedReleaseArtifact(specification, destination,
     }
     if (tgzEvidence === null) fail('P0-RELEASE-CI-PAYLOAD', 'CI Release payload omitted its tgz')
     const immutableRelease = dependencies.immutableReleaseProof === undefined
-      ? await verifyGitHubImmutableRelease(release.tag, release.releaseId, downloadedAssets, dependencies.ghRunner)
+      ? await verifyGitHubImmutableRelease(
+        release.tag,
+        release.releaseId,
+        release.sourceCommit,
+        downloadedAssets,
+        dependencies.ghRunner,
+      )
       : validateGitHubImmutableReleaseProof(dependencies.immutableReleaseProof)
     if (immutableRelease.tag !== release.tag || immutableRelease.releaseId !== release.releaseId
+      || immutableRelease.tagRefSha1 !== release.sourceCommit
       || immutableRelease.assets.some((asset, index) => asset.name !== downloadedAssets[index].name
         || asset.sha256 !== downloadedAssets[index].sha256 || asset.sizeBytes !== downloadedAssets[index].sizeBytes)) {
       fail('P0-RELEASE-IMMUTABILITY', 'GitHub immutable proof does not bind the downloaded exact Release assets')

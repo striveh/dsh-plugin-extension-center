@@ -30,7 +30,6 @@ const MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
 const SHA512 = /^sha512-[A-Za-z0-9+/]+={0,2}$/u
 const COMMIT = /^[0-9a-f]{40}$/u
-const SHA1 = /^[0-9a-f]{40}$/u
 const MAX_SOURCE_EVIDENCE_AGE_MS = 60 * 60 * 1_000
 const GITHUB_ASSET_ORIGINS = new Set([
   'https://objects.githubusercontent.com',
@@ -356,7 +355,7 @@ function releaseArtifact(value, label) {
   const immutable = record(artifact.immutableRelease, `${label} immutable Release proof`)
   if (immutable.repository !== GITHUB_REPOSITORY || immutable.tag !== release.tag
     || immutable.releaseId !== release.releaseId || !/^\d+\.\d+\.\d+$/u.test(immutable.ghVersion)
-    || !SHA1.test(immutable.tagRefSha1)) {
+    || immutable.tagRefSha1 !== sourceCommit) {
     fail('P0-RELEASE-READY-PUBLIC-RELEASE', `${label} immutable proof does not bind its concrete Release`)
   }
   for (const field of ['bundleSha256', 'statementSha256', 'releaseVerificationResultSha256']) {
@@ -662,7 +661,7 @@ function releaseReadyArtifact(value, label) {
     immutableRelease: Object.freeze({
       bundleSha256: digest(immutable.bundleSha256, `${label} immutable bundle SHA-256`),
       statementSha256: digest(immutable.statementSha256, `${label} immutable statement SHA-256`),
-      tagRefSha1: SHA1.test(immutable.tagRefSha1)
+      tagRefSha1: immutable.tagRefSha1 === sourceCommit
         ? immutable.tagRefSha1
         : fail('P0-RELEASE-READY-PREVIOUS', `${label} immutable tag ref is invalid`),
     }),
