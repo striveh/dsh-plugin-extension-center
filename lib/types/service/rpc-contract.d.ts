@@ -12,12 +12,12 @@ export type RpcJson = null | boolean | number | string | readonly RpcJson[] | {
 };
 /** Dynamic acquisition availability derived from live Host owners. */
 export interface HostCapabilityProjection {
-    readonly profileTransaction: boolean;
+    readonly managedPluginLifecycle: boolean;
     readonly dynamicMcpConnection: boolean;
     readonly durableContinuation: boolean;
     readonly skillRegistry: boolean;
     readonly toolRegistry: boolean;
-    readonly loaderObservation: boolean;
+    readonly loaderMutation: boolean;
     readonly acquisition: boolean;
     readonly reason: 'host-capability' | null;
 }
@@ -227,23 +227,15 @@ export type OperationReceiptsRequest = RpcVersioned;
 export interface OperationReceiptsResponse extends RpcVersioned {
     readonly receipts: readonly StoredReceipt[];
 }
-/** External launcher acknowledgement for the exact staged Profile generation. */
-export interface ProfileBootAckRequest extends RpcVersioned {
-    readonly operationId: string;
-    readonly profileId: string;
-    readonly generation: string;
-}
-/** Operation state after processing one exact boot acknowledgement. */
-export interface ProfileBootAckResponse extends RpcVersioned {
+/** Exact operation whose retained owner recovery point must be replayed. */
+export type OperationRecoverRequest = OperationGetRequest;
+/** Current state after one explicit fenced recovery attempt. */
+export interface OperationRecoverResponse extends RpcVersioned {
     readonly operationId: string;
     readonly status: OperationOutcome | 'restart-required' | 'recovery-required';
     readonly receipt: OperationReceipt | null;
 }
-/** Exact operation whose retained owner recovery point must be replayed. */
-export type OperationRecoverRequest = OperationGetRequest;
-/** Current state after one explicit fenced recovery attempt. */
-export type OperationRecoverResponse = ProfileBootAckResponse;
 /** Names of the full-P0 private management endpoints. */
-export type HostRpcEndpoint = 'catalog/list' | 'catalog/refresh' | 'inventory/list' | 'inventory/verify' | 'intent/preview' | 'plan/get' | 'plan/list' | 'plan/decide' | 'approval/list' | 'approval/configure' | 'task-attempt/list' | 'task-attempt/select' | 'task-attempt/retry' | 'task-attempt/cancel' | 'configuration/options' | 'lifecycle/request' | 'operation/get' | 'operation/list' | 'operation/receipts' | 'operation/recover' | 'operation/ack-profile-boot';
+export type HostRpcEndpoint = 'catalog/list' | 'catalog/refresh' | 'inventory/list' | 'inventory/verify' | 'intent/preview' | 'plan/get' | 'plan/list' | 'plan/decide' | 'approval/list' | 'approval/configure' | 'task-attempt/list' | 'task-attempt/select' | 'task-attempt/retry' | 'task-attempt/cancel' | 'configuration/options' | 'lifecycle/request' | 'operation/get' | 'operation/list' | 'operation/receipts' | 'operation/recover';
 export {};
 //# sourceMappingURL=rpc-contract.d.ts.map

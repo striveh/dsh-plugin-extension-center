@@ -4,6 +4,10 @@ import { lstat, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { canonicalJson, canonicalSha256 } from '../domain/index.ts'
 import {
+  TASK_CONTINUATION_INVALID_REASONS,
+  type TaskContinuationInvalidReason,
+} from '../internal/continuation/types.ts'
+import {
   ensurePrivateDirectory,
   openRegularNoFollow,
   storageKey,
@@ -19,6 +23,7 @@ import type {
   TaskAttemptOutcome,
   TaskAttemptPhase,
   TaskAttemptResult,
+  TaskRetryContinuationState,
   TaskRetryContinuation,
 } from './types.ts'
 
@@ -262,6 +267,49 @@ export class FileTaskAttemptStore {
       if (prior.canceledAtMs !== null) return prior
       const next = decodeTaskRetryContinuation({ ...prior, canceledAtMs: nowMs }, taskAttemptId)
       await writeCanonicalAtomic(this.retryContinuationPath(taskAttemptId), next)
+      return next
+    })
+  }
+
+  /** Fold one exact Host continuation state into its acquisition task attempt. */
+  async reconcileContinuation(
+    taskAttemptId: string,
+    state: TaskRetryContinuationState,
+    nowMs: number,
+    invalidReason?: TaskContinuationInvalidReason,
+  ): Promise<TaskAttempt> {
+    assertContinuationInvalidReason(state, invalidReason)
+    return this.serialize(async () => {
+      const prior = await this.required(taskAttemptId)
+      if (prior.outcome !== null || state === 'pending' || state === 'ready') return prior
+      if (prior.result?.kind !== 'acquisition-candidate') {
+        throw new Error('task continuation does not bind an acquisition attempt')
+      }
+      if (state === 'consumed' || state === 'dispatching' || state === 'dispatched' || state === 'claimed') {
+        if (prior.phase !== 'ready-to-resume' && prior.phase !== 'resuming') {
+          throw new Error('consumed task continuation is not ready to resume')
+        }
+        const next = decodeTaskAttempt({
+          ...prior,
+          revision: prior.revision + 1,
+          updatedAtMs: nowMs,
+          phase: 'resuming',
+          ...(state === 'claimed'
+            ? { outcome: 'continued', reason: 'continuation-claimed' }
+            : {}),
+        })
+        await writeCanonicalAtomic(this.attemptPath(taskAttemptId), next)
+        return next
+      }
+      const terminal = continuationTerminal(state, invalidReason)
+      const next = decodeTaskAttempt({
+        ...prior,
+        revision: prior.revision + 1,
+        updatedAtMs: nowMs,
+        outcome: terminal.outcome,
+        reason: terminal.reason,
+      })
+      await writeCanonicalAtomic(this.attemptPath(taskAttemptId), next)
       return next
     })
   }
@@ -526,4 +574,41 @@ export class FileTaskAttemptStore {
       release()
     }
   }
+}
+
+function continuationTerminal(
+  state: Exclude<
+    TaskRetryContinuationState,
+    'pending' | 'ready' | 'consumed' | 'dispatching' | 'dispatched' | 'claimed'
+  >,
+  invalidReasonValue?: TaskContinuationInvalidReason,
+): Readonly<{ outcome: TaskAttemptOutcome; reason: string }> {
+  switch (state) {
+    case 'delivery-unknown': return Object.freeze({ outcome: 'resume-conflict', reason: 'continuation-delivery-unknown' })
+    case 'canceled': return Object.freeze({ outcome: 'canceled', reason: 'continuation-canceled' })
+    case 'superseded': return Object.freeze({ outcome: 'resume-conflict', reason: 'continuation-superseded' })
+    case 'expired': return Object.freeze({ outcome: 'rejected', reason: 'continuation-expired' })
+    case 'invalid': {
+      if (invalidReasonValue === undefined || !TASK_CONTINUATION_INVALID_REASONS.includes(invalidReasonValue)) {
+        throw new Error('invalid task continuation requires an exact invalid reason')
+      }
+      return Object.freeze({
+        outcome: 'resume-conflict',
+        reason: `continuation-invalid:${invalidReasonValue}`,
+      })
+    }
+  }
+}
+
+function assertContinuationInvalidReason(
+  state: TaskRetryContinuationState,
+  value: TaskContinuationInvalidReason | undefined,
+): void {
+  if (state === 'invalid') {
+    if (value === undefined || !TASK_CONTINUATION_INVALID_REASONS.includes(value)) {
+      throw new Error('invalid task continuation requires an exact invalid reason')
+    }
+    return
+  }
+  if (value !== undefined) throw new Error('task continuation invalid reason requires invalid state')
 }

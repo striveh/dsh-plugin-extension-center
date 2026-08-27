@@ -78,7 +78,7 @@ describe('built Client lazy-CJS ABI', () => {
       '@deepseek-ai/dsh-client-runtime/client',
     ]))
     expect(bundleCode()).not.toContain(resolve('.'))
-    expect(bundleCode()).not.toContain('capability_request_acquisition')
+    expect(bundleCode()).not.toContain('extension_center_request_acquisition')
   })
 
   it('registers only two additive entries and removes entries, copy, and style on disposal', () => {

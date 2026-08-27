@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { lstat, readFile, readdir, readlink } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
   AcceptanceFailure,
   TARGET_DSH_COMMIT,
   TARGET_DSH_VERSION,
   describeNetworkDestination,
+  immutablePackageTreeDigest,
+  installOfficialDshHost,
   runChecked,
   sanitizeDiagnostic,
   stopChild,
@@ -18,6 +20,8 @@ export {
   TARGET_DSH_COMMIT,
   TARGET_DSH_VERSION,
   describeNetworkDestination,
+  immutablePackageTreeDigest,
+  installOfficialDshHost,
   runChecked,
   sanitizeDiagnostic,
   stopChild,
@@ -26,6 +30,26 @@ export {
 
 /** Exact read-only Extension Center channel exercised by the owner preflight. */
 export const EXTENSION_CENTER_CHANNEL = '/dsh-extension-center'
+
+/** Profile paths whose package-manager or fixture bytes may change without changing the supported Profile surface. */
+export const PROFILE_REMOVAL_MUTATION_WHITELIST = Object.freeze([
+  'cordis.patch.yml',
+  'cordis.yml (exact generated empty-profile bytes)',
+  'pnpm-lock.yaml',
+  'node_modules/.package-map.json (exact generated self-only bytes)',
+  'node_modules/.modules.yaml',
+  'node_modules/.bin/**',
+  'node_modules/.pnpm/**',
+  'node_modules/.pnpm-workspace-state-v1.json',
+])
+
+const GENERATED_EMPTY_PROFILE_CONFIG = [
+  '# dsh profile root — an empty entry list. The tree is composed as patches:',
+  '# each bundle in package.json\'s dsh.profile.bundles, then cordis.patch.yml, then any',
+  '# --patch overlays. Edit cordis.patch.yml, not this file.',
+  '[]',
+  '',
+].join('\n')
 
 /**
  * Prove an observed child stayed live until the acceptance runner requested teardown.
@@ -46,9 +70,9 @@ export const CATALOG_LIST_METHOD = 'catalog/list'
 /** Stable owner checks in the order the complete P0 must satisfy them. */
 export const REQUIRED_HOST_OWNERS = Object.freeze([
   Object.freeze({
-    key: 'profileTransaction',
-    label: 'Profile transaction',
-    failureCode: 'P0-RED-HOST-PROFILE-TRANSACTION-OWNER-MISSING',
+    key: 'managedPluginLifecycle',
+    label: 'managed Plugin lifecycle',
+    failureCode: 'P0-RED-CENTER-MANAGED-PLUGIN-LIFECYCLE-MISSING',
   }),
   Object.freeze({
     key: 'dynamicMcpConnection',
@@ -71,9 +95,9 @@ export const REQUIRED_HOST_OWNERS = Object.freeze([
     failureCode: 'P0-RED-HOST-TOOL-REGISTRY-OWNER-MISSING',
   }),
   Object.freeze({
-    key: 'loaderObservation',
-    label: 'Loader observation',
-    failureCode: 'P0-RED-HOST-LOADER-OBSERVATION-OWNER-MISSING',
+    key: 'loaderMutation',
+    label: 'Loader mutation',
+    failureCode: 'P0-RED-HOST-LOADER-MUTATION-MISSING',
   }),
 ])
 
@@ -282,6 +306,74 @@ export async function mutableHostStateDigest(roots) {
   return hash.digest('hex')
 }
 
+/**
+ * Hash the Profile surface outside the exact package-manager and fixture mutation whitelist.
+ * @param {string} profileRoot Exact initialized Profile root.
+ * @returns {Promise<string>} SHA-256 surface digest.
+ */
+export async function profileRemovalSurfaceDigest(profileRoot) {
+  const root = resolve(profileRoot)
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  if (!isRecord(manifest) || typeof manifest.name !== 'string' || manifest.name.length === 0) {
+    throw new AcceptanceFailure('P0-RC2-PROFILE-MANIFEST', 'Profile package.json must name the Profile package')
+  }
+  const hash = createHash('sha256')
+  await hashProfileRemovalSurface(root, root, hash, manifest.name)
+  return `sha256:${hash.digest('hex')}`
+}
+
+/**
+ * Reject direct or indirect Center-managed resolution links after child and Center removal.
+ * @param {string} profileRoot Exact Profile root.
+ * @param {string} centerRoot Canonical Center state root.
+ * @param {readonly string[]} packageNames Center and managed child package names.
+ * @returns {Promise<void>} Completion after the resolution surface is clean.
+ */
+export async function assertNoManagedResolutionLinks(profileRoot, centerRoot, packageNames) {
+  const modules = join(resolve(profileRoot), 'node_modules')
+  const ownedRoot = resolve(centerRoot)
+  for (const packageName of packageNames) {
+    const invalidSegment = typeof packageName === 'string'
+      && packageName.split('/').some(segment => segment.length === 0 || segment === '.' || segment === '..')
+    if (typeof packageName !== 'string' || packageName.length === 0 || invalidSegment) {
+      throw new TypeError('managed resolution-link audit requires canonical package names')
+    }
+    const direct = join(modules, ...packageName.split('/'))
+    const info = await optionalLstat(direct)
+    if (info !== null) {
+      throw new AcceptanceFailure(
+        'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+        `removed package retained a direct Profile resolution entry: ${packageName}`,
+      )
+    }
+  }
+  if (await optionalLstat(modules) === null) return
+  const inspect = async (path) => {
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      if (path === modules && entry.name === '.pnpm') continue
+      const child = join(path, entry.name)
+      if (entry.name.startsWith('.dsh-center-link-') || entry.name.startsWith('.dsh-center-unlink-')) {
+        throw new AcceptanceFailure(
+          'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+          'removed Plugin retained a Center resolution transaction entry',
+        )
+      }
+      if (entry.isSymbolicLink()) {
+        const target = resolve(dirname(child), await readlink(child))
+        if (isInside(ownedRoot, target)) {
+          throw new AcceptanceFailure(
+            'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+            'removed Plugin retained a Profile link into Center-owned material',
+          )
+        }
+      } else if (entry.isDirectory()) {
+        await inspect(child)
+      }
+    }
+  }
+  await inspect(modules)
+}
+
 /** Reject package-manager lifecycle code before packing and from the final tarball manifest. */
 export function assertNoPackageLifecycleScripts(manifest, phase) {
   const scripts = isRecord(manifest.scripts) ? manifest.scripts : {}
@@ -339,4 +431,86 @@ async function hashMutableTree(root, path, hash) {
     .filter(entry => entry.name !== 'node_modules')
     .sort((left, right) => left.name.localeCompare(right.name))
   for (const entry of entries) await hashMutableTree(root, join(path, entry.name), hash)
+}
+
+async function hashProfileRemovalSurface(root, path, hash, profilePackageName) {
+  const name = relative(root, path).replaceAll('\\', '/') || '.'
+  if (profileRemovalPathWhitelisted(name)) return
+  const info = await lstat(path)
+  if (info.isSymbolicLink()) {
+    hash.update(`link:${name}:${await readlink(path)}\0`)
+    return
+  }
+  if (info.isFile()) {
+    const source = await readFile(path)
+    if (name === 'cordis.yml' && source.equals(Buffer.from(GENERATED_EMPTY_PROFILE_CONFIG))) return
+    if (name === 'node_modules/.package-map.json'
+      && source.equals(generatedSelfOnlyPackageMap(profilePackageName))) return
+    const bytes = name === 'package.json'
+      ? Buffer.from(`${canonicalJson(normalizedProfileManifest(JSON.parse(await readFile(path, 'utf8'))))}\n`)
+      : source
+    hash.update(`file:${name}:${String(bytes.length)}\0`)
+    hash.update(bytes)
+    return
+  }
+  if (!info.isDirectory()) {
+    hash.update(`other:${name}\0`)
+    return
+  }
+  const entries = (await readdir(path, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  for (const entry of entries) {
+    await hashProfileRemovalSurface(root, join(path, entry.name), hash, profilePackageName)
+  }
+}
+
+function profileRemovalPathWhitelisted(path) {
+  return path === 'cordis.patch.yml'
+    || path === 'pnpm-lock.yaml'
+    || path === 'node_modules/.modules.yaml'
+    || path === 'node_modules/.pnpm-workspace-state-v1.json'
+    || path === 'node_modules/.bin'
+    || path.startsWith('node_modules/.bin/')
+    || path === 'node_modules/.pnpm'
+    || path.startsWith('node_modules/.pnpm/')
+}
+
+function generatedSelfOnlyPackageMap(profilePackageName) {
+  return Buffer.from(`${JSON.stringify({
+    packages: {
+      '.': {
+        url: '..',
+        dependencies: { [profilePackageName]: '.' },
+      },
+    },
+  })}\n`)
+}
+
+async function optionalLstat(path) {
+  try {
+    return await lstat(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function isInside(root, path) {
+  const offset = relative(root, path)
+  return offset === '' || offset !== '..' && !offset.startsWith(`..${sep}`)
+}
+
+function normalizedProfileManifest(manifest) {
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+    throw new AcceptanceFailure('P0-RC2-PROFILE-MANIFEST', 'Profile package.json must be an object')
+  }
+  return { ...manifest, dependencies: manifest.dependencies ?? {} }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
 }

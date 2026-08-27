@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,6 +9,8 @@ import {
   AcceptanceFailure,
   CATALOG_LIST_METHOD,
   REQUIRED_HOST_OWNERS,
+  PROFILE_REMOVAL_MUTATION_WHITELIST,
+  assertNoManagedResolutionLinks,
   assertRequiredHostOwners,
   catalogListRequest,
   hasBlockedCredentialEnvironment,
@@ -17,6 +19,7 @@ import {
   keylessEnvironment,
   mutableHostStateDigest,
   parseCatalogListEnvelope,
+  profileRemovalSurfaceDigest,
   requestLiveChildTeardown,
   stopChild,
   waitForAcquisitionAdmission,
@@ -43,12 +46,12 @@ function response(capabilities) {
 }
 
 const allMissing = {
-  profileTransaction: false,
+  managedPluginLifecycle: false,
   dynamicMcpConnection: false,
   durableContinuation: false,
   skillRegistry: false,
   toolRegistry: false,
-  loaderObservation: false,
+  loaderMutation: false,
 }
 
 const allAvailable = Object.fromEntries(
@@ -75,22 +78,22 @@ test('owner failures are stable and ordered', () => {
   assert.throws(
     () => assertRequiredHostOwners(parsed.capabilities),
     error => error instanceof AcceptanceFailure
-      && error.code === 'P0-RED-HOST-PROFILE-TRANSACTION-OWNER-MISSING',
+      && error.code === 'P0-RED-CENTER-MANAGED-PLUGIN-LIFECYCLE-MISSING',
   )
   assert.throws(
-    () => assertRequiredHostOwners({ ...allMissing, profileTransaction: true }),
+    () => assertRequiredHostOwners({ ...allMissing, managedPluginLifecycle: true }),
     error => error instanceof AcceptanceFailure
       && error.code === 'P0-RED-HOST-DYNAMIC-MCP-CONNECTION-OWNER-MISSING',
   )
   assert.throws(
-    () => assertRequiredHostOwners({ ...allMissing, profileTransaction: true, dynamicMcpConnection: true }),
+    () => assertRequiredHostOwners({ ...allMissing, managedPluginLifecycle: true, dynamicMcpConnection: true }),
     error => error instanceof AcceptanceFailure
       && error.code === 'P0-RED-HOST-DURABLE-CONTINUATION-OWNER-MISSING',
   )
   assert.throws(
     () => assertRequiredHostOwners({
       ...allMissing,
-      profileTransaction: true,
+      managedPluginLifecycle: true,
       dynamicMcpConnection: true,
       durableContinuation: true,
     }),
@@ -104,7 +107,7 @@ test('owner failures are stable and ordered', () => {
   assert.equal(REQUIRED_HOST_OWNERS.length, 6)
 })
 
-test('acquisition admission waits only for a live-owner generation to activate', async () => {
+test('acquisition admission waits only for every lifecycle capability to become ready', async () => {
   let attempts = 0
   const admitted = await waitForAcquisitionAdmission(async () => {
     attempts += 1
@@ -118,6 +121,16 @@ test('acquisition admission waits only for a live-owner generation to activate',
   }, { timeoutMs: 100, intervalMs: 0 })
   assert.equal(attempts, 2)
   assert.equal(admitted.value.hostCapabilities.acquisition, true)
+
+  attempts = 0
+  const deferredOwners = await waitForAcquisitionAdmission(async () => {
+    attempts += 1
+    return parseCatalogListEnvelope(response(attempts === 1
+      ? { ...allMissing, acquisition: false, reason: 'host-capability' }
+      : { ...allAvailable, acquisition: true, reason: null }), 'owner-preflight')
+  }, { timeoutMs: 100, intervalMs: 0 })
+  assert.equal(attempts, 2)
+  assert.deepEqual(assertRequiredHostOwners(deferredOwners.capabilities), allAvailable)
 
   const activating = await waitForAcquisitionAdmission(async () => {
     const parsed = parseCatalogListEnvelope(response({
@@ -166,6 +179,94 @@ test('mutable state digest detects target writes and ignores dependency-tree noi
     assert.equal(await mutableHostStateDigest([root]), before)
     await writeFile(join(root, 'state.json'), '{"changed":true}\n')
     assert.notEqual(await mutableHostStateDigest([root]), before)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Profile removal digest ignores only declared package-manager paths and the exact generated empty Profile', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-center-profile-removal-surface-'))
+  try {
+    await mkdir(join(root, 'node_modules'), { recursive: true })
+    await writeFile(join(root, 'package.json'), '{"name":"dsh-profile-web","private":true,"dependencies":{}}\n')
+    const before = await profileRemovalSurfaceDigest(root)
+    await writeFile(join(root, 'cordis.patch.yml'), '- id: fixture\n')
+    await writeFile(join(root, 'cordis.yml'), [
+      '# dsh profile root — an empty entry list. The tree is composed as patches:',
+      '# each bundle in package.json\'s dsh.profile.bundles, then cordis.patch.yml, then any',
+      '# --patch overlays. Edit cordis.patch.yml, not this file.',
+      '[]',
+      '',
+    ].join('\n'))
+    await writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+    await writeFile(
+      join(root, 'node_modules', '.package-map.json'),
+      '{"packages":{".":{"url":"..","dependencies":{"dsh-profile-web":"."}}}}\n',
+    )
+    await writeFile(join(root, 'node_modules', '.modules.yaml'), 'layoutVersion: 5\n')
+    await mkdir(join(root, 'node_modules', '.bin'), { recursive: true })
+    await writeFile(join(root, 'node_modules', '.bin', 'package-manager-shim'), 'allowed')
+    await mkdir(join(root, 'node_modules', '.pnpm'), { recursive: true })
+    await writeFile(join(root, 'node_modules', '.pnpm', 'retained-cache'), 'allowed')
+    await writeFile(join(root, 'package.json'), '{"name":"dsh-profile-web","private":true}\n')
+    assert.equal(await profileRemovalSurfaceDigest(root), before)
+    assert.deepEqual(PROFILE_REMOVAL_MUTATION_WHITELIST, [
+      'cordis.patch.yml',
+      'cordis.yml (exact generated empty-profile bytes)',
+      'pnpm-lock.yaml',
+      'node_modules/.package-map.json (exact generated self-only bytes)',
+      'node_modules/.modules.yaml',
+      'node_modules/.bin/**',
+      'node_modules/.pnpm/**',
+      'node_modules/.pnpm-workspace-state-v1.json',
+    ])
+    await writeFile(join(root, 'cordis.yml'), '- id: unexpected\n')
+    assert.notEqual(await profileRemovalSurfaceDigest(root), before)
+    await writeFile(join(root, 'cordis.yml'), [
+      '# dsh profile root — an empty entry list. The tree is composed as patches:',
+      '# each bundle in package.json\'s dsh.profile.bundles, then cordis.patch.yml, then any',
+      '# --patch overlays. Edit cordis.patch.yml, not this file.',
+      '[]',
+      '',
+    ].join('\n'))
+    await writeFile(
+      join(root, 'node_modules', '.package-map.json'),
+      '{"packages":{".":{"url":"..","dependencies":{"dsh-profile-web":".","stale-plugin":"1.0.0"}}}}\n',
+    )
+    assert.notEqual(await profileRemovalSurfaceDigest(root), before)
+    await writeFile(
+      join(root, 'node_modules', '.package-map.json'),
+      '{"packages":{".":{"url":"..","dependencies":{"dsh-profile-web":"."}}}}\n',
+    )
+    await writeFile(join(root, 'unexpected.json'), '{}\n')
+    assert.notEqual(await profileRemovalSurfaceDigest(root), before)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Profile removal rejects direct packages and indirect links into Center material', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-center-profile-resolution-links-'))
+  const profileRoot = join(root, 'profile')
+  const centerRoot = join(root, 'center')
+  const material = join(centerRoot, 'material', 'plugins', 'fixture')
+  try {
+    await mkdir(join(profileRoot, 'node_modules'), { recursive: true })
+    await mkdir(material, { recursive: true })
+    await assertNoManagedResolutionLinks(profileRoot, centerRoot, ['dsh-plugin-extension-center', 'fixture-plugin'])
+    const direct = join(profileRoot, 'node_modules', 'fixture-plugin')
+    await symlink(material, direct, 'junction')
+    await assert.rejects(
+      assertNoManagedResolutionLinks(profileRoot, centerRoot, ['dsh-plugin-extension-center', 'fixture-plugin']),
+      error => error instanceof AcceptanceFailure && error.code === 'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+    )
+    await rm(direct, { force: true })
+    const indirect = join(profileRoot, 'node_modules', 'indirect')
+    await symlink(material, indirect, 'junction')
+    await assert.rejects(
+      assertNoManagedResolutionLinks(profileRoot, centerRoot, ['dsh-plugin-extension-center', 'fixture-plugin']),
+      error => error instanceof AcceptanceFailure && error.code === 'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+    )
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -5,13 +5,17 @@
 [![CI](https://github.com/striveh/dsh-plugin-extension-center/actions/workflows/ci.yml/badge.svg)](https://github.com/striveh/dsh-plugin-extension-center/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-这是一个独立社区插件项目，目标是为 DeepSeek Harness 提供本机统一扩展中心。P0 有两个一等获取入口：Agent 可以识别任务能力缺口并用本地 Capability RAG 检索准入候选，用户也可以在扩展商店中浏览、搜索、比较并自主获取同一目录里的扩展。两条路径汇合到同一个准入目录、政策、Host-owned transaction engine、owner 验证、inventory 与回执 schema；每项动作分别获得自己的准确不可变计划。每个可写目录候选还必须覆盖发现、安装、配置、准确更新、验证、卸载与失败恢复；只有扩展真实 owner 支持时才提供启用和停用。产品不合并 DSH Plugin、MCP Server 与 Skill 的生命周期，也不把“安装成功”冒充为“代码安全”。
+这是一个独立社区插件项目，目标是为 DeepSeek Harness 提供本机统一扩展中心。P0 有两个一等获取入口：Agent 可以识别任务能力缺口并用本地 Capability RAG 检索准入候选，用户也可以在扩展商店中浏览、搜索、比较并自主获取同一目录里的扩展。两条路径汇合到同一个准入目录、政策、扩展中心自有发现与获取控制面、验证、inventory 与回执 schema；每项动作分别获得自己的准确不可变计划。每个可写目录候选还必须覆盖发现、安装、配置、准确更新、验证、卸载与失败恢复；只有扩展真实 owner 支持时才提供启用和停用。产品不合并 DSH Plugin、MCP Server 与 Skill 的生命周期，也不把“安装成功”冒充为“代码安全”。
 
 本项目不是 DeepSeek Harness 官方 Release。产品代码、目录政策、测试、兼容性声明和 Release 都归本仓库所有；DSH monorepo 只作为宿主，不承载产品实现。
 
-状态（2026-08-26）：独立项目已经实现签名离线商店、带未过期 last-good 缓存的可配置在线签名目录刷新、只产生线索的发现与 threshold-signing pipeline、归一化已安装 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与恢复、Plugin/MCP/Skill 类型化 provider、任务优先的本地 Capability RAG、受信 MCP 配置队列，以及绑定原任务的持久续行。界面把商店获取与已安装对象的生命周期动作分开，并准确展示目录新鲜度、connection 与 artifact 的 ownership、权限、验证、恢复和回执。Host/Client focused tests、确定性目录 fault tests 与 rc.2 packed 只读浏览器验收已通过。新的 operation evidence 会锁定 package 自带的独立恢复 executable；它不加载 Center runtime 就能请求准确 Profile 恢复。已发布 rc.2 没有 Profile transaction `list`/`restore`/`restore-receipt` Consumer，因此这条路径会按设计 fail closed。已部署签名远端 revision 及其独立生成的准入 receipt、本地可写 Host 崩溃恢复、已发布 Release 安装、真实 provider 任务完成与普通用户可用性仍是独立发布门禁。
+状态（2026-08-27）：源码实现了签名商店、带未过期 last-good 缓存的签名目录刷新、只产生线索的发现与 threshold signing、归一化 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与 receipt、Plugin/MCP/Skill 类型化操作、任务优先的本地 Capability RAG、恢复编排以及持久化续行 claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，扩展中心都会暂存并锁定准确 archive，并把 package membership 变更委托给官方 `dsh plugin --profile` CLI；只有官方 Profile package manager 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row。纯配置通过官方 Loader 在同一个 Host 进程替换并验证准确受管 row。MCP stdio connection 挂载官方 MCP Client，Skill 通过官方 registry 投影，续行使用官方 Agent 与 Session 服务。设计中不存在 fork 专用 package 或 DSH Host PR。准确边界见[纯插件架构](docs/plugin-only-architecture.zh.md)。
 
-公开的 `main` 分支是开发源码预览，不是稳定 Release 或 npm 发布。Manifest 有意保留 `private: true`，用于在可写兼容版本仍为 `TBD` 时阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码。只有已发布 Host 与下述外部 P0 门禁通过后，才能创建有效的 `v0.1.0` tag 或 Release。
+证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。`0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`，不声明从更早 Center Release 更新。后续候选必须证明不同前一版本到当前版本的真实 artifact 更新，把前一次已部署签名目录提升为当前 package bootstrap，并部署其准确相邻签名后继。公开 Release 安装、Pages 刷新与跨边界完成状态只由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
+
+公开的 `main` 分支是开发源码预览，不是稳定 Release 或 npm 发布。Manifest 有意保留 `private: true` 以阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码或经过审查的 GitHub Release asset。GitHub Release、公开 Pages 目录或已完成 CI lane 的状态只由对应准确版本的 receipt 记录，绝不能从源码文件、workflow、repository setting 或本地测试中推断。
+
+Release provenance 以 byte 为准。只有准确 `main` push 的 Node 22 CI job 上传的确定性 tarball、`SHA256SUMS` 和自摘要 pack attestation 可作为 Release 候选。CI verifier 会绑定 Actions archive digest、run id 与 attempt、只含三个准确 entry 的 ZIP payload、source commit、packed manifest、bundled pnpm tree 和 tarball byte；下载只允许固定 GitHub API，以及随后一次准入的 GitHub Actions 或 Azure Blob storage redirect。Runtime、公开 Release 与复合 receipt 都必须绑定同一个已 attested tarball。Repository Release immutability 与受保护 `v*` tag 会阻止后续修改；这些 repository policy 不能替代任何具体 Release 的 receipt。
 
 - [P0 产品规格与验收路径](docs/p0-product-spec.zh.md)
 - [P0 product specification and acceptance path](docs/p0-product-spec.md)
@@ -21,12 +25,36 @@
 - [Catalog discovery, admission, and signing](docs/catalog-operations.md)
 - [rc.2 签名离线商店验收](acceptance/store-only/README.zh.md)
 - [rc.2 signed offline Store acceptance](acceptance/store-only/README.md)
+- [基于官方 rc.2 的完整 P0 验收](acceptance/full-p0/README.zh.md)
+- [full P0 acceptance on official rc.2](acceptance/full-p0/README.md)
 
-已审计的发布基线仍是不可变的 `dsh-v0.1.1-rc.2` Release。它支持只读商店 lane，但不包含三个新的可写 owner，因此永久保留为负兼容 lane。另一份本地 DSH HEAD 已实现 Profile transaction、dynamic MCP connection 与 durable task-continuation dispatch，供集成验收使用；它不是已发布 Release，也不改写 rc.2 历史。可写兼容版本保持 **TBD**，直到某个准确 DSH Release 发布这些 owner，并且同一 packed Bundle 在未经修改的该 Release 上通过 artifact、浏览器、恢复、生命周期与真实任务门禁。
+正在验证的兼容性目标是不可变的官方 `dsh-v0.1.1-rc.2` Release，对应 commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`。扩展中心消费其已发布的 Plugin CLI、Loader、Tool、Skill、MCP Client、Agent、Session、Connection RPC 与 Web Client 扩展点。只有 packed Bundle 在未经修改的该 Release 上通过相应 lane，兼容性主张才有效。
+
+## 安装已发布的候选版本
+
+只有匹配的 GitHub Release 已存在且公开 Release receipt 通过后，下列坐标才有效；否则 Release 安装主张不可用，开发版本 checkout 不能替代它。对于已发布候选，应从不可变 GitHub Release asset 安装扩展中心，不能依赖移动分支。官方 DSH Plugin CLI 会把 Profile package management 委托给 pnpm，因此 `PATH` 中必须存在 `pnpm`：
+
+```sh
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.0/dsh-plugin-extension-center-0.1.0-rc.0.tgz
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.0/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.0.tgz --ignore-scripts --save-exact
+dsh plugin --profile web list --depth 0
+dsh --profile web --dump-config
+dsh web
+```
+
+更新、降级或移除扩展中心前先停止 Host。更新或降级时，把新的准确本地 archive 传给同一个 `add` 命令；移除也只能通过官方 Profile package manager 完成，然后重启 DSH：
+
+```sh
+dsh plugin --profile web remove dsh-plugin-extension-center
+```
+
+运行时配置属于官方 Loader patch，应写入 `$DSH_HOME/profiles/web/cordis.patch.yml` 或相应的 home-level patch。Loader patch 会替换匹配 row 的完整配置，因此修改一个字段时也必须重述所有需要保留的字段，并用 `dsh --profile web --dump-config` 确认结果。默认 Bundle 配置只信任准确的公开 `plugins.json` URL，有意不声明任何 `mcpRuntimes` allowlist。Artifact acquisition 会拒绝 initial URL 和 redirect URL 中的所有 IPv4 与 IPv6 literal。它默认最多允许一次 redirect，跨 origin 跳转只能到 `objects.githubusercontent.com` 或 `release-assets.githubusercontent.com`；下载会把已消费 authorization 绑定到不可变 plan 中捕获的签名坐标，并校验准入 byte size 与 digest。部署方可以把 `maximumArtifactRedirects` 收紧为零，并缩小或清空 `allowedArtifactRedirectHosts`。Hostname 与 DNS 仍不可信：该 URL 检查不解析域名，也不声称防御 DNS rebinding。用户通过该 Loader row 配置准确 executable path、digest、version、fixed arguments 与 working directory 前，MCP candidate 始终不可写。P0 mutation 与 recovery 支持 macOS 和 Linux，在 Windows 上 fail closed。
 
 ## 开发版本检出
 
-公开 `main` 只用于源码审查和开发。验证 rc.2 只读商店 lane 时，应锁定一个审查过的准确 commit，不能依赖移动分支：
+公开 `main` 只用于源码审查和开发。验证 packed rc.2 商店纵切时，应锁定一个审查过的准确 commit，不能依赖移动分支：
 
 ```sh
 dsh plugin --profile web add github:striveh/dsh-plugin-extension-center#<reviewed-commit-sha>
@@ -34,7 +62,7 @@ dsh --profile web --dump-config
 dsh web
 ```
 
-仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。已发布 DSH `0.1.1-rc.2` 必须把生命周期操作显示为不可用；不能把本地可写 Host 的结果作为已发布兼容声明。
+仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。扩展中心自身必须只通过这个官方 CLI 从外部安装、更新、降级或卸载；运行中的扩展中心不会自我修改。`0.1.0-rc.0` bootstrap 有意不携带前一 Center artifact 或 release-ready receipt，并证明目录 `r8→r9`。从 `0.1.0-rc.1` 开始，每个 Release receipt 必须绑定并运行不同的前一与当前 artifact 以及准确成功的前一 post-publication receipt；rc.1 提升 `r9` 并部署 `r10`，stable 必须直接从 rc.1 晋级、提升 `r10` 并部署 `r11`。
 
 开发与验证命令：
 
@@ -44,20 +72,18 @@ pnpm test
 pnpm run pack:preview
 pnpm exec playwright install chromium
 pnpm run test:acceptance:store
-pnpm run test:acceptance:host-negative
+pnpm run test:acceptance:official-rc2
 ```
 
-本地可写 Host lane 还要求另一份已构建且具备全部六项 owner 的 DSH checkout，它只构成该准确 checkout 的发布证据。证据与发布规则见[贡献指南](CONTRIBUTING.md)，私密漏洞报告路径见[安全政策](SECURITY.md)。
+证据与发布规则见[贡献指南](CONTRIBUTING.md)，私密漏洞报告路径见[安全政策](SECURITY.md)。
 
 ## 在线目录刷新
 
-`catalogTrustedOrigin` 只接受一个 canonical HTTPS origin；Host 始终请求固定 `/plugins.json` 路径，并且只接纳通过 package 固定签名根验证的完整 envelope。`catalogFetchTimeoutMs` 限制每次请求，`catalogRefreshIntervalMs` 控制可选后台刷新。启动、loopback `catalog/refresh` 动作、商店与任务 Capability RAG 共用同一份 admitted snapshot。商店检索文本与任务内容绝不会进入请求。刷新失败时只能继续使用未过期且已验证的 bootstrap 或 last-good snapshot，并报告 `source`、`freshness`、`degradedReason` 与 `lastRefreshAtMs`；snapshot 过期后 fail closed。
+`catalogTrustedUrl` 只接受一个准确的 canonical HTTPS URL；Host 只接纳通过 package 固定签名根验证的完整 envelope。`catalogFetchTimeoutMs` 限制每次请求，`catalogRefreshIntervalMs` 控制可选后台刷新。启动、loopback `catalog/refresh` 动作、商店与任务 Capability RAG 共用同一份 admitted snapshot。商店检索文本与任务内容绝不会进入请求。刷新失败时只能继续使用未过期且已验证的 bootstrap 或 last-good snapshot，并报告 `source`、`freshness`、`degradedReason` 与 `lastRefreshAtMs`；snapshot 过期后 fail closed。
 
-## Break-glass Profile 恢复
+## Break-glass 扩展中心恢复
 
-Host 启动时会把构建后的无依赖恢复 CLI 原子复制到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。每个已消费 operation 都会记录该准确绝对路径与 SHA-256、公开 DSH CLI 的准确路径与 SHA-256，以及 canonical Host home。如果 Center 或 Web 无法加载，可运行 `node <pinned-break-glass.mjs> <center-root> <operation-id>`。它先验证自身 bytes、Host CLI bytes、canonical Host home、journal chain、`CURRENT` head、plan evidence 与任何已有 receipt。Host 调用只会在 scrubbed environment 中把锁定的 home 注入为 `DSH_HOME`；ambient `DSH_HOME` 不能选择另一个 Profile store。随后它以已验证 operation id 推导的确定性 mutation identity 查询 Host 的确切 Profile restore receipt。committed receipt 必须匹配 journal generation/tree pin，并且当前 inventory 必须是 receipt 的准确 after-snapshot，或从该 snapshot 产生的唯一合法 boot-acknowledgement transition；任何无关 drift 都会被拒绝。只有 `not-found` 才允许校验当前 selector 并调用新 restore。因此即使恢复后的 generation 已被 acknowledge，响应丢失或调用方被杀死后的重试也不会发布第二次 transition。它不导入 Center runtime，也不直接写 Profile。成功只表示 `profile restored; Center journal reconciliation pending`；仍需在 Center 恢复启动后对保留 journal 做 reconciliation。
-
-不可变 rc.2 Host 是负向 lane：其通用 `dsh plugin` 只转发 pnpm 参数，不实现准确 JSON `list`、generation `restore` 与 mutation-bound `restore-receipt` 协议，因此恢复会 fail closed，且不会声称已恢复。完整恢复仍以未来已发布 DSH Release 提供该公开 Profile transaction Consumer，并通过 packed crash-path 验收为门禁。
+源码会把无依赖恢复 CLI 安装到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。恢复绑定 schema v5 与 official-execution binding v2 会固定该文件和 Center root，同时固定 canonical Node executable、版本与 digest，POSIX supervisor，私有 bundled `pnpm@11.7.0` package、registry SRI、完整 tree、entrypoint、shim 与 shell，以及准确官方 rc.2 package、entrypoint 与已安装 production-dependency closure。对已安装 Profile，扩展中心严格读取变更前的准确 `package.json`、`pnpm-lock.yaml`、`node_modules/.modules.yaml` 与引用的已安装 package manifest，再从这些本地事实合成 owner-only、content-addressed 的 pnpm 11 metadata-cache generation。被绑定的 generation identity 覆盖 Profile digest、现有 canonical store、生成文件、固定 pnpm runtime 与 cache manifest；每次使用前都重新验证 manifest 与文件 digest。Binding 存入 Plugin provider recovery snapshot，因此正常 rollback 与独立 break-glass recovery 会验证并使用同一 generation。Cache 缺失、被更改、经由 symlink 替换或与 binding 不匹配时，会在下一次官方 CLI Profile 写入前 fail closed。执行期继续 offline 且禁用 lifecycle script；该 cache 不是网络预热，也不声称能获取不可用的 package byte。只有同时没有 lock 且没有 `node_modules` 安装的 Profile 才使用扩展中心私有的 per-Profile store。独立 process-group supervisor 会在 timeout 或 parent 丢失（包括 parent `SIGKILL`）后终止完整 mutation subtree；execution lease 会在该 subtree 仍存活时阻止 stale-lock reclaim。该变更与恢复路径只支持 macOS 和 Linux，在 Windows 上 fail closed。DSH 停止时，break-glass recovery 会验证 journal 绑定的 provider snapshot，只调用已绑定的官方 CLI 恢复准确 Profile before-state，验证结果后才提交 Center state。它绝不直接写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row，也不导入已损坏的 Center runtime。后续官方 DSH 启动必须验证所选 Profile dependency、Loader contribution 与声明 consumer，恢复终态证据才有效。准确完整生命周期 receipt 记录某个 Release candidate 的 packed break-glass 执行是否通过；源码本身不构成该主张。
 
 ## 许可证
 

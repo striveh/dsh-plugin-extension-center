@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { CatalogEnvelope, CatalogRoot } from '../src/catalog-contract.ts'
 import {
   CatalogSnapshotManager,
-  catalogEndpoint,
+  canonicalCatalogUrl,
   verifyCatalogAdvance,
   type SignedCatalogDocument,
 } from '../src/catalog-refresh.ts'
@@ -17,6 +17,7 @@ import {
 import { canonicalJson, canonicalSha256, verifyCatalog } from '../src/catalog.ts'
 
 const NOW = Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000
+const CATALOG_URL = 'https://catalog.example.test/project/plugins.json'
 const roots: string[] = []
 
 afterEach(async () => {
@@ -30,8 +31,14 @@ async function scratch(): Promise<string> {
   return root
 }
 
-function bootstrapResponse(): Response {
-  return new Response(canonicalJson({
+function responseAt(url: string, body: BodyInit, init: ResponseInit = {}): Response {
+  const response = new Response(body, init)
+  Object.defineProperty(response, 'url', { configurable: true, value: url })
+  return response
+}
+
+function bootstrapResponse(url = CATALOG_URL): Response {
+  return responseAt(url, canonicalJson({
     envelope: BOOTSTRAP_CATALOG_ENVELOPE,
     signatures: BOOTSTRAP_CATALOG_SIGNATURES,
   }), {
@@ -86,11 +93,19 @@ function signedChain(): Readonly<{
 }
 
 describe('live admitted catalog snapshot', () => {
-  it('accepts only a canonical HTTPS origin and keeps the request path fixed', () => {
-    expect(catalogEndpoint('https://catalog.example.test')).toBe('https://catalog.example.test/plugins.json')
-    expect(() => catalogEndpoint('http://catalog.example.test')).toThrow('canonical HTTPS origin')
-    expect(() => catalogEndpoint('https://catalog.example.test/path')).toThrow('canonical HTTPS origin')
-    expect(() => catalogEndpoint('https://user@catalog.example.test')).toThrow('canonical HTTPS origin')
+  it('accepts one exact canonical HTTPS resource URL without credentials, query, or fragment', () => {
+    expect(canonicalCatalogUrl(CATALOG_URL)).toBe(CATALOG_URL)
+    for (const value of [
+      'http://catalog.example.test/project/plugins.json',
+      'https://user@catalog.example.test/project/plugins.json',
+      'https://catalog.example.test/project/plugins.json?revision=1',
+      'https://catalog.example.test/project/plugins.json#revision-1',
+      'https://CATALOG.example.test/project/plugins.json',
+      'https://catalog.example.test:443/project/plugins.json',
+      ' https://catalog.example.test/project/plugins.json',
+    ]) {
+      expect(() => canonicalCatalogUrl(value)).toThrow('one canonical HTTPS URL')
+    }
   })
 
   it('admits one same-or-next signed revision and rejects rollback, gaps, and broken links', () => {
@@ -115,13 +130,15 @@ describe('live admitted catalog snapshot', () => {
     let calls = 0
     let release: (() => void) | undefined
     const blocked = new Promise<void>(resolve => { release = resolve })
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = []
     const manager = new CatalogSnapshotManager(root, {
-      trustedOrigin: 'https://catalog.example.test',
+      trustedUrl: CATALOG_URL,
       fetchTimeoutMs: 5_000,
     }, {
       now: () => NOW,
-      fetch: (async () => {
+      fetch: (async (input, init) => {
         calls += 1
+        requests.push({ url: String(input), init })
         if (calls > 1) await blocked
         return bootstrapResponse()
       }) as typeof fetch,
@@ -137,25 +154,36 @@ describe('live admitted catalog snapshot', () => {
     release!()
     await Promise.all([first, second])
     expect(calls).toBe(2)
+    expect(requests).toEqual([
+      { url: CATALOG_URL, init: expect.objectContaining({ method: 'GET', redirect: 'error' }) },
+      { url: CATALOG_URL, init: expect.objectContaining({ method: 'GET', redirect: 'error' }) },
+    ])
     const cache = await readFile(join(root, 'catalog', 'last-good.json'), 'utf8')
     expect(cache).toBe(`${canonicalJson(JSON.parse(cache))}\n`)
   })
 
   it('retains an unexpired last-good snapshot with explicit degraded evidence on fetch and size failures', async () => {
     const root = await scratch()
-    let mode: 'ok' | 'network' | 'oversized' = 'ok'
+    let mode: 'ok' | 'network' | 'oversized' | 'redirected' | 'wrong-content-type' | 'invalid-json' = 'ok'
     const manager = new CatalogSnapshotManager(root, {
-      trustedOrigin: 'https://catalog.example.test',
+      trustedUrl: CATALOG_URL,
       fetchTimeoutMs: 5_000,
     }, {
       now: () => NOW,
       fetch: (async () => {
         if (mode === 'network') throw new Error('deterministic offline')
         if (mode === 'oversized') {
-          return new Response('x', {
+          return responseAt(CATALOG_URL, 'x', {
             status: 200,
             headers: { 'content-type': 'application/json', 'content-length': String(512 * 1024 + 1) },
           })
+        }
+        if (mode === 'redirected') return bootstrapResponse('https://other.example.test/plugins.json')
+        if (mode === 'wrong-content-type') {
+          return responseAt(CATALOG_URL, '{}', { status: 200, headers: { 'content-type': 'text/plain' } })
+        }
+        if (mode === 'invalid-json') {
+          return responseAt(CATALOG_URL, '{', { status: 200, headers: { 'content-type': 'application/json' } })
         }
         return bootstrapResponse()
       }) as typeof fetch,
@@ -169,12 +197,24 @@ describe('live admitted catalog snapshot', () => {
     await expect(manager.refresh()).resolves.toMatchObject({
       status: { degraded: true, degradedReason: 'catalog response exceeds its download bound' },
     })
+    mode = 'redirected'
+    await expect(manager.refresh()).resolves.toMatchObject({
+      status: { degraded: true, degradedReason: 'catalog endpoint redirected outside its fixed URL' },
+    })
+    mode = 'wrong-content-type'
+    await expect(manager.refresh()).resolves.toMatchObject({
+      status: { degraded: true, degradedReason: 'catalog endpoint did not return application/json' },
+    })
+    mode = 'invalid-json'
+    await expect(manager.refresh()).resolves.toMatchObject({
+      status: { degraded: true, degradedReason: 'catalog response is not strict UTF-8 JSON' },
+    })
     expect(manager.current().catalog.envelope.entriesDigest).toBe(BOOTSTRAP_CATALOG_ENVELOPE.entriesDigest)
   })
 
   it('never follows a substituted last-good symlink', async () => {
     const root = await scratch()
-    const first = new CatalogSnapshotManager(root, { trustedOrigin: null, fetchTimeoutMs: 5_000 }, {
+    const first = new CatalogSnapshotManager(root, { trustedUrl: null, fetchTimeoutMs: 5_000 }, {
       now: () => NOW,
       fetch: globalThis.fetch,
     })
@@ -185,7 +225,7 @@ describe('live admitted catalog snapshot', () => {
     await writeFile(target, '{}\n')
     await rm(cache)
     await symlink(target, cache)
-    const reopened = new CatalogSnapshotManager(root, { trustedOrigin: null, fetchTimeoutMs: 5_000 }, {
+    const reopened = new CatalogSnapshotManager(root, { trustedUrl: null, fetchTimeoutMs: 5_000 }, {
       now: () => NOW,
       fetch: globalThis.fetch,
     })

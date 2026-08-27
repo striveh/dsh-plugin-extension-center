@@ -16,7 +16,7 @@ export function testReviewEvidence(
     credentialChoice: 'not-applicable' as const,
     rollbackPoint: pluginRecovery === null
       ? { kind: 'absent-state' as const, id: 'absent', digest: canonicalSha256(null) }
-      : { kind: 'profile-generation' as const, id: pluginRecovery.generation, digest: pluginRecovery.treeDigest },
+      : { kind: 'managed-version' as const, id: pluginRecovery.generation, digest: pluginRecovery.treeDigest },
     rollbackLimits: ['dsh-managed-state-only' as const],
     notProven: ['user-task-outcome' as const],
   }
@@ -54,6 +54,16 @@ export function testReviewEvidence(
   const manifestBody = '{}'
   const files = ['package.json']
   const patchBody = '[]\n'
+  const activation = {
+    install: { profileDependency: 'add', loaderEntry: 'create' },
+    configure: { profileDependency: 'retain', loaderEntry: 'replace' },
+    update: { profileDependency: 'replace', loaderEntry: 'replace' },
+    enable: { profileDependency: 'retain', loaderEntry: 'retain' },
+    disable: { profileDependency: 'retain', loaderEntry: 'retain' },
+    uninstall: { profileDependency: 'remove', loaderEntry: 'remove' },
+    restore: { profileDependency: 'restore', loaderEntry: 'restore' },
+    purge: { profileDependency: 'remove', loaderEntry: 'remove' },
+  } as const
   return {
     ...common,
     kind,
@@ -62,11 +72,18 @@ export function testReviewEvidence(
       manifestDigest: canonicalSha256({}), files, fileManifestDigest: canonicalSha256(files),
     },
     dependencies: [],
-    lockfile: {
-      path: 'pnpm-lock.yaml', beforeDigest: null, packageName: 'fixture', beforeVersion: null,
+    managedMaterial: {
+      owner: 'extension-center', packageName: 'fixture', beforeVersion: null,
       afterVersion: '1.0.0', targetIntegrity: canonicalSha256('artifact'),
     },
-    bundles: [{ id: 'fixture', action: 'add', patchDigest: canonicalSha256(patchBody), patchBody }],
+    packageMetadata: {
+      bundlePatch: { path: 'cordis.patch.yml', patchDigest: canonicalSha256(patchBody), patchBody },
+    },
+    activation: {
+      mutationOwner: operationKind === 'configure' ? 'official-loader' : 'official-dsh-cli',
+      ...activation[operationKind],
+      restartRequired: operationKind !== 'configure', packageName: 'fixture',
+    },
     scripts: { before: [], after: [], forbiddenLifecycle: [] },
     settings: {
       adapterVersion: null, adapterDigest: null, schemaDigest: null, ownerRevision: 'fixture:1',

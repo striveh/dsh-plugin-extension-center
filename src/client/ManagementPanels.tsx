@@ -5,11 +5,12 @@ import type { OperationKind } from '../plans/types.ts'
 import type { HostCapabilityProjection, RpcJson } from '../service/rpc-contract.ts'
 import type { TaskConfigurationRow } from '../service/rpc-contract.ts'
 import type { TaskRetryContinuationProjectionState } from '../task-attempt/index.ts'
+import { isCapabilityResolverCandidate } from '../resolver-candidates.ts'
 import { HostCapabilityStatus } from './HostCapabilityStatus.tsx'
 import type { ExtensionCenterKey } from './locales.ts'
 import type { ExtensionManagementClient, ExtensionManagementContext } from './management-api.ts'
 import { PlanReview, ReviewEvidenceDetails } from './PlanReview.tsx'
-import { RESOLVER_CANDIDATE_REF, ResolverConfigDraft } from './ResolverConfigDraft.tsx'
+import { ResolverConfigDraft } from './ResolverConfigDraft.tsx'
 import { McpConfigurationDraft, SkillConfigurationDraft } from './TypedConfigurationDrafts.tsx'
 import css from './ExtensionCenter.module.css'
 
@@ -23,7 +24,10 @@ const RETRY_CONTINUATION_KEYS: Readonly<Record<TaskRetryContinuationProjectionSt
   pending: 'taskAttempt.retryContinuation.pending',
   ready: 'taskAttempt.retryContinuation.ready',
   consumed: 'taskAttempt.retryContinuation.consumed',
+  dispatching: 'taskAttempt.retryContinuation.dispatching',
+  dispatched: 'taskAttempt.retryContinuation.dispatched',
   claimed: 'taskAttempt.retryContinuation.claimed',
+  'delivery-unknown': 'taskAttempt.retryContinuation.deliveryUnknown',
   canceled: 'taskAttempt.retryContinuation.canceled',
   superseded: 'taskAttempt.retryContinuation.superseded',
   expired: 'taskAttempt.retryContinuation.expired',
@@ -220,6 +224,7 @@ function TaskConfigurationFlow({ row, management, t, onClose, onCreated }: {
     setState({ status: 'loading' })
     management.configurationOptions({
       candidateRef: row.candidateRef,
+      operationKind: 'install',
       targetKey: null,
       scopeKey: row.scopeKey,
       profileId: row.profileId,
@@ -266,6 +271,9 @@ function actionTitle(row: InventoryRow, operation: OperationKind, t: Translate):
 function candidateForAction(row: InventoryRow, operation: OperationKind): string | null {
   if (operation === 'update' && row.updateObservation.status === 'available') {
     return row.updateObservation.candidateRef
+  }
+  if (operation === 'restore' && row.restoreObservation.status === 'available') {
+    return row.restoreObservation.candidateRef
   }
   return row.candidateRef
 }
@@ -328,6 +336,7 @@ export function InstalledPanel({ management, context, candidates, t }: Managemen
     setConfigurationState({ row, operationKind, returnFocus, status: 'loading', options: [], currentConfiguration: null })
     management.configurationOptions({
       candidateRef,
+      operationKind,
       targetKey: row.targetKey,
       scopeKey: row.scopeKey,
       profileId: row.profileId,
@@ -433,7 +442,7 @@ export function InstalledPanel({ management, context, candidates, t }: Managemen
                   <strong>{t('management.unavailable')}</strong><code>{configurationState.error}</code>
                   <button type="button" onClick={() => { setConfigurationState(undefined); configurationState.returnFocus.focus() }}>{t('action.cancel')}</button>
                 </div>
-              ) : row.candidateRef === RESOLVER_CANDIDATE_REF ? (
+              ) : row.candidateRef !== null && isCapabilityResolverCandidate(row.candidateRef) ? (
                 <ResolverConfigDraft
                   initial={configurationState.currentConfiguration ?? undefined}
                   t={t}
@@ -445,6 +454,11 @@ export function InstalledPanel({ management, context, candidates, t }: Managemen
                     configurationState.returnFocus.focus()
                   }}
                 />
+              ) : row.kind === 'plugin' ? (
+                <div className={css.managementError} role="alert">
+                  <strong>{t('management.unavailable')}</strong><code>{row.candidateRef ?? row.extensionId}</code>
+                  <button type="button" onClick={() => { setConfigurationState(undefined); configurationState.returnFocus.focus() }}>{t('action.cancel')}</button>
+                </div>
               ) : row.kind === 'mcp' ? (
                 <McpConfigurationDraft
                   options={configurationState.options}
@@ -530,6 +544,7 @@ export function UpdatesPanel({ management, context, candidates, t }: ManagementP
                   setConfigurationError(undefined)
                   void management.configurationOptions({
                     candidateRef: update.candidateRef,
+                    operationKind: 'update',
                     targetKey: row.targetKey,
                     scopeKey: row.scopeKey,
                     profileId: row.profileId,

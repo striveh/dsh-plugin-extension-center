@@ -22,6 +22,10 @@ const MCP_REGISTRY_ORIGIN = 'https://registry.modelcontextprotocol.io'
 const GITHUB_SKILL_SEARCH_URL = 'https://api.github.com/search/repositories?q=topic%3Aagent-skill&sort=updated&order=desc&per_page=100&page=1'
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 const MAX_INPUT_BYTES = 16 * 1024 * 1024
+const PACKAGE_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
+if (typeof PACKAGE_VERSION !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(PACKAGE_VERSION)) {
+  throw new Error('catalog-pipeline: package version is invalid')
+}
 
 function fail(message) {
   throw new Error(`catalog-pipeline: ${message}`)
@@ -109,7 +113,7 @@ async function responseJson(url) {
     redirect: 'error',
     headers: {
       Accept: 'application/json',
-      'User-Agent': 'dsh-extension-center-catalog-pipeline/0.0.0-development',
+      'User-Agent': `dsh-extension-center-catalog-pipeline/${PACKAGE_VERSION}`,
     },
     signal: AbortSignal.timeout(20_000),
   })

@@ -1,16 +1,22 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
-import type { LoaderOwner, ManagedTargetRecord, ManagedVersion, ProfileTransactionsOwner } from '../host/index.ts'
+import type { LoaderOwner, ManagedTargetRecord, ManagedVersion } from '../host/index.ts'
 import { CenterStateStore, openRegularNoFollow } from '../host/index.ts'
-import type { RpcJson } from '../service/rpc-contract.ts'
-import { inspectNpmArchive } from './npm-archive.ts'
 import {
-  buildCapabilityResolverPatch,
-  hasPluginConfigurationAdapter,
-  type PluginConfigurationPatch,
-} from './plugin-config-adapter.ts'
+  ManagedPluginOwner,
+  type ManagedPluginActivation,
+  type ManagedPluginLoader,
+  type ManagedPluginOwnerOptions,
+  type ManagedPluginSnapshot,
+} from '../internal/plugin/index.ts'
+import type { RpcJson } from '../service/rpc-contract.ts'
+import {
+  decodeProfileMetadataCacheBinding,
+  prepareProfileMetadataCache,
+  type ProfileMetadataCacheBinding,
+} from '../recovery/profile-metadata-cache.ts'
+import { inspectNpmArchive } from './npm-archive.ts'
+import { validateCapabilityResolverConfiguration } from './plugin-config-adapter.ts'
 import { managedStateDigest, nextManagedRecord } from './records.ts'
 import type {
   AppliedProviderOperation,
@@ -20,136 +26,179 @@ import type {
   ProviderVerification,
 } from './types.ts'
 
-interface ProfileSnapshotView {
-  readonly profile: string
-  readonly revision: number
-  readonly treeDigest: string
-  readonly effectivePath: string
-  readonly activeGeneration: string | null
-  readonly lastGoodGeneration: string | null
-  readonly rollbackGeneration: string | null
-  readonly bootStatus: 'live' | 'pending-restart' | 'verified'
-}
+export type { ManagedPluginLoader, ManagedPluginOwnerOptions, ManagedPluginSnapshot } from '../internal/plugin/index.ts'
 
 interface PreparedPlugin {
-  readonly snapshot: ProfileSnapshotView
-  readonly configurationPatch: PluginConfigurationPatch | null
+  readonly snapshot: ManagedPluginSnapshot
+  readonly materialPath: string | null
+  readonly activation: ManagedPluginActivation | null
+  readonly metadataCache: ProfileMetadataCacheBinding | null
 }
 
 interface PluginRecoveryPoint {
-  readonly snapshot: ProfileSnapshotView
-  readonly configurationPatch: PluginConfigurationPatch | null
+  readonly snapshot: ManagedPluginSnapshot
   readonly artifactPath: string | null
+  readonly metadataCache: ProfileMetadataCacheBinding | null
 }
 
-interface PendingProfileMutation {
-  readonly operationId: string
-  readonly generation: string
-  readonly treeDigest: string
-  readonly revision: number
-  readonly profileId: string
-  readonly packageName: string
-  readonly operationKind: ProviderOperationRequest['plan']['operationKind'] | 'rollback'
-}
-
-/** Loader evidence derived inside the Host after the complete tree settles. */
+/** Loader evidence derived inside the Host after the exact owner row settles. */
 export interface PluginRuntimeEvidence {
   readonly entryId: string
   readonly moduleName: string
   readonly fiberPhase: 'active' | 'absent'
 }
 
-/** Host-only observer; browser payloads never supply consumer evidence. */
+/** Compatibility observer retained for callers that only need read-only Loader evidence. */
 export interface PluginRuntimeProbe {
   observe(packageName: string, operation: ProviderOperationRequest['plan']['operationKind']): Promise<PluginRuntimeEvidence>
 }
 
-/** Direct Loader observer used after app-boot has acknowledged the active generation. */
+/** Direct official Loader observer; row ids are Loader-generated and never package identities. */
 export class LoaderPluginRuntimeProbe implements PluginRuntimeProbe {
-  constructor(private readonly loader: LoaderOwner) {}
+  constructor(private readonly loader: Pick<LoaderOwner, 'entries'>) {}
 
   async observe(packageName: string, operation: ProviderOperationRequest['plan']['operationKind']): Promise<PluginRuntimeEvidence> {
-    await this.loader.await()
-    const matches = [...this.loader.entries()].filter(entry => !entry.options.group
-      && (entry.options.id === packageName || entry.options.name === packageName))
+    const matches = [...this.loader.entries()].filter(entry => !entry.options.group && entry.options.name === packageName)
     if (operation === 'uninstall') {
       if (matches.length !== 0) throw new Error('uninstalled Plugin remains in the settled Loader tree')
       return Object.freeze({ entryId: packageName, moduleName: packageName, fiberPhase: 'absent' })
     }
-    const active = matches.find(entry => entry.options.id === packageName
-      && entry.options.name === packageName
-      && !entry.disabled
-      && entry.fiber?.state === 2)
-    if (active === undefined) throw new Error('Plugin target is not ACTIVE in the settled Loader tree')
-    return Object.freeze({ entryId: packageName, moduleName: packageName, fiberPhase: 'active' })
+    if (matches.length !== 1 || matches[0]!.disabled) {
+      throw new Error('Plugin target has no unique enabled Loader row')
+    }
+    const expectedId = matches[0]!.id
+    await matches[0]!.refresh()
+    const started = [...this.loader.entries()].find(entry => entry.id === expectedId
+      && !entry.options.group && entry.options.name === packageName)
+    if (started === undefined || started.disabled || started.fiber === undefined) {
+      throw new Error('Plugin target did not start in its exact Loader row')
+    }
+    await started.fiber.await()
+    const settled = [...this.loader.entries()].filter(entry => !entry.options.group && entry.options.name === packageName)
+    if (settled.length !== 1 || settled[0]!.id !== expectedId
+      || settled[0]!.disabled || settled[0]!.fiber?.state !== 2) {
+      throw new Error('Plugin target is not ACTIVE in its exact Loader row')
+    }
+    return Object.freeze({ entryId: settled[0]!.id, moduleName: settled[0]!.options.name, fiberPhase: 'active' })
   }
 }
 
-function snapshot(value: unknown): ProfileSnapshotView {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Profile snapshot is invalid')
-  const item = value as Record<string, unknown>
-  if (
-    typeof item.profile !== 'string'
-    || !Number.isSafeInteger(item.revision)
-    || typeof item.treeDigest !== 'string'
-    || !Number.isSafeInteger(item.revision)
-    || typeof item.effectivePath !== 'string'
-    || (item.activeGeneration !== null && typeof item.activeGeneration !== 'string')
-    || (item.lastGoodGeneration !== null && typeof item.lastGoodGeneration !== 'string')
-    || (item.rollbackGeneration !== null && typeof item.rollbackGeneration !== 'string')
-    || !['live', 'pending-restart', 'verified'].includes(item.bootStatus as string)
-  ) throw new Error('Profile snapshot fields are invalid')
-  return item as unknown as ProfileSnapshotView
-}
-
-function pending(record: ManagedTargetRecord): PendingProfileMutation | null {
+function pending(record: ManagedTargetRecord): Readonly<{
+  operationId: string
+  activationId: string
+  operationKind: ProviderOperationRequest['plan']['operationKind'] | 'rollback'
+}> | null {
   const value = record.pending
   if (value === null) return null
-  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('pending Profile mutation is invalid')
-  const item = value as Record<string, RpcJson>
-  if (
-    typeof item.operationId !== 'string'
-    || typeof item.generation !== 'string'
-    || typeof item.treeDigest !== 'string'
-    || typeof item.profileId !== 'string'
-    || typeof item.packageName !== 'string'
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('pending managed Plugin mutation is invalid')
+  const item = value as Readonly<Record<string, RpcJson>>
+  if (typeof item.operationId !== 'string' || typeof item.generation !== 'string'
     || typeof item.operationKind !== 'string'
-    || !['install', 'configure', 'update', 'uninstall', 'restore', 'rollback'].includes(item.operationKind)
-  ) throw new Error('pending Profile mutation fields are invalid')
-  return item as unknown as PendingProfileMutation
-}
-
-function pluginState(version: ManagedVersion): Record<string, RpcJson> {
-  const value = version.kindState
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('managed Plugin state is invalid')
-  return value as Record<string, RpcJson>
-}
-
-function profileFence(value: ProfileSnapshotView): string {
-  return `profile:${String(value.revision)}:${value.treeDigest}`
-}
-
-function recoveryPoint(value: RpcJson): PluginRecoveryPoint {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Plugin recovery point is invalid')
-  }
-  const input = value as Record<string, RpcJson>
-  if (input.kind !== 'plugin'
-    || typeof input.snapshot !== 'object' || input.snapshot === null || Array.isArray(input.snapshot)
-    || (input.artifactPath !== null && typeof input.artifactPath !== 'string')
-    || (input.configurationPatch !== null
-      && (typeof input.configurationPatch !== 'object' || Array.isArray(input.configurationPatch)))) {
-    throw new Error('Plugin recovery point fields are invalid')
+    || !['install', 'configure', 'update', 'uninstall', 'restore', 'rollback'].includes(item.operationKind)) {
+    throw new Error('pending managed Plugin mutation fields are invalid')
   }
   return Object.freeze({
-    snapshot: snapshot(input.snapshot),
-    configurationPatch: input.configurationPatch as unknown as PluginConfigurationPatch | null,
-    artifactPath: input.artifactPath as string | null,
+    operationId: item.operationId,
+    activationId: item.generation,
+    operationKind: item.operationKind as ProviderOperationRequest['plan']['operationKind'] | 'rollback',
   })
 }
 
-function mutationId(operationId: string, phase: 'apply' | 'rollback'): string {
-  return `${operationId}:${phase}`
+function pluginState(version: ManagedVersion): Record<string, RpcJson> {
+  if (typeof version.kindState !== 'object' || version.kindState === null || Array.isArray(version.kindState)) {
+    throw new Error('managed Plugin state is invalid')
+  }
+  return version.kindState as Record<string, RpcJson>
+}
+
+const RUNTIME_STATE_FIELDS = Object.freeze([
+  'consumerObserved', 'loaderPhase', 'restartObserved', 'restartToken', 'runtimeEvidence', 'treeDigest',
+] as const)
+
+function withoutSettlementEvidence(version: ManagedVersion | null): Readonly<Record<string, unknown>> | null {
+  if (version === null) return null
+  const kindState = { ...pluginState(version) }
+  for (const field of RUNTIME_STATE_FIELDS) delete kindState[field]
+  delete kindState.rollbackOperationId
+  return immutableJsonClone({ ...version, kindState })
+}
+
+function restoredCore(record: ManagedTargetRecord): Readonly<Record<string, unknown>> {
+  return immutableJsonClone({
+    kind: record.kind,
+    extensionId: record.extensionId,
+    targetKey: record.targetKey,
+    scopeKey: record.scopeKey,
+    profileId: record.profileId,
+    current: withoutSettlementEvidence(record.current),
+    lastGood: withoutSettlementEvidence(record.lastGood),
+    removed: withoutSettlementEvidence(record.removed),
+    pending: record.pending,
+  })
+}
+
+function rollbackOperation(record: ManagedTargetRecord, operationId: string): boolean {
+  return [record.current, record.removed, record.lastGood].some((version) => {
+    if (version === null) return false
+    return pluginState(version).rollbackOperationId === operationId
+  })
+}
+
+function plannedPackageName(request: ProviderOperationRequest): string {
+  const review = request.plan.reviewEvidence
+  if (review.kind !== 'plugin'
+    || review.activation.packageName !== review.manifest.packageName
+    || review.managedMaterial.packageName !== review.manifest.packageName) {
+    throw new Error('Plugin package identity does not bind the immutable review evidence')
+  }
+  return review.manifest.packageName
+}
+
+function packageName(record: ManagedTargetRecord | null, request: ProviderOperationRequest): string {
+  const expected = plannedPackageName(request)
+  const version = record?.current ?? record?.removed ?? record?.lastGood
+  if (version === null || version === undefined) return expected
+  const value = pluginState(version).packageName
+  if (typeof value !== 'string' || value !== expected) {
+    throw new Error('managed Plugin package identity does not match the immutable plan')
+  }
+  return value
+}
+
+function recoveryPoint(value: RpcJson): PluginRecoveryPoint {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Plugin recovery point is invalid')
+  const input = value as Record<string, RpcJson>
+  if (input.kind !== 'plugin' || typeof input.snapshot !== 'object' || input.snapshot === null || Array.isArray(input.snapshot)
+    || Object.keys(input).sort().join('\0') !== ['artifactPath', 'kind', 'metadataCache', 'snapshot'].join('\0')
+    || (input.artifactPath !== null && typeof input.artifactPath !== 'string')) {
+    throw new Error('Plugin recovery point fields are invalid')
+  }
+  const held = input.snapshot as Record<string, RpcJson>
+  const fields = ['bootStatus', 'digest', 'materialRoot', 'ownerRevision', 'profileId', 'revision']
+  if (Object.keys(held).sort().join('\0') !== fields.join('\0')
+    || typeof held.profileId !== 'string' || !Number.isSafeInteger(held.revision)
+    || typeof held.digest !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(held.digest)
+    || typeof held.materialRoot !== 'string' || typeof held.ownerRevision !== 'string'
+    || !['live', 'pending-restart', 'verified'].includes(held.bootStatus as string)) {
+    throw new Error('Plugin owner snapshot fields are invalid')
+  }
+  const digest = held.digest as `sha256:${string}`
+  const ownerRevision = `managed-plugin:${String(held.revision)}:${digest}`
+  if (held.ownerRevision !== ownerRevision) throw new Error('Plugin owner snapshot revision is invalid')
+  return Object.freeze({
+    snapshot: Object.freeze({
+      profileId: held.profileId,
+      revision: held.revision as number,
+      digest,
+      materialRoot: held.materialRoot,
+      bootStatus: held.bootStatus as ManagedPluginSnapshot['bootStatus'],
+      ownerRevision,
+    }),
+    artifactPath: input.artifactPath as string | null,
+    metadataCache: input.metadataCache === null
+      ? null
+      : decodeProfileMetadataCacheBinding(input.metadataCache, 'Plugin recovery point metadata cache'),
+  })
 }
 
 async function verifyPackedArtifact(path: string, integrity: string): Promise<void> {
@@ -172,95 +221,115 @@ async function verifyPackedArtifact(path: string, integrity: string): Promise<vo
   if (observed !== integrity) throw new Error('Plugin recovery artifact does not match the immutable plan integrity')
 }
 
-/** Exact plan mutation digest for the typed Profile patch adapter. */
+/** Exact Center-owned configuration digest; no official Profile patch is read or changed. */
 export function pluginConfigurationMutationDigest(
-  patch: PluginConfigurationPatch,
+  configuration: RpcJson,
   ownerRevision: string,
 ): `sha256:${string}` {
-  return canonicalSha256({
-    operation: 'configure',
-    schema: patch.schema,
-    adapterDigest: patch.adapterDigest,
-    expectedDigest: patch.expectedDigest,
-    nextDigest: patch.nextDigest,
-    configuration: patch.configuration,
-    ownerRevision,
-  })
+  const value = validateCapabilityResolverConfiguration(configuration)
+  return canonicalSha256({ operation: 'configure', configuration: value, ownerRevision })
 }
 
-/** Profile generation adapter for install, update, uninstall, restore, and boot acknowledgement. */
+/** Center-owned lifecycle using the official Profile CLI for packages and Loader APIs for runtime configuration. */
 export class PluginLifecycleProvider implements LifecycleProvider {
   readonly kind = 'plugin' as const
+  private readonly owner: ManagedPluginOwner
+  private readonly officialDsh: ManagedPluginOwnerOptions['officialDsh']
 
   constructor(
     private readonly store: CenterStateStore,
-    private readonly owner: ProfileTransactionsOwner,
-    private readonly runtime: PluginRuntimeProbe,
-  ) {}
+    loader: ManagedPluginLoader,
+    options: ManagedPluginOwnerOptions,
+  ) {
+    this.officialDsh = options.officialDsh
+    this.owner = new ManagedPluginOwner(store, loader, options)
+  }
+
+  /** Reconcile official Profile packages and Loader rows with Center-owned desired state. */
+  initialize(): Promise<void> {
+    return this.owner.initialize()
+  }
+
+  /** Project the exact Center-owned profile state used by planning fences. */
+  snapshot(profileId: string): Promise<ManagedPluginSnapshot> {
+    return this.owner.snapshot(profileId)
+  }
 
   async observe(targetKey: string): Promise<ManagedTargetRecord | null> {
+    await this.initialize()
     return await this.store.getManaged(targetKey) ?? null
   }
 
   async prepare(request: ProviderOperationRequest): Promise<PreparedProviderOperation> {
     if (request.plan.operationKind === 'purge') {
-      throw new Error('Plugin purge is unavailable while Profile recovery generations retain package data')
+      throw new Error('Plugin purge is unavailable while Center recovery material is retained')
     }
     if (['enable', 'disable'].includes(request.plan.operationKind)) {
       throw new Error(`Plugin ${request.plan.operationKind} is unsupported in P0`)
     }
+    const expectedPackageName = plannedPackageName(request)
+    if (expectedPackageName === 'dsh-plugin-extension-center') {
+      throw new Error('the Extension Center cannot manage its own Plugin package')
+    }
     const before = await this.observe(request.plan.targetKey)
-    const held = snapshot(await this.owner.snapshot(request.plan.profileId))
-    if (profileFence(held) !== request.plan.fences.profileRevision) throw new Error('Profile revision/tree fence is stale')
-    let configurationPatch: PluginConfigurationPatch | null = null
+    const held = await this.snapshot(request.plan.profileId)
+    if (request.plan.fences.ownerRevision !== held.ownerRevision
+      || request.plan.fences.profileRevision !== held.ownerRevision) {
+      throw new Error('managed Plugin owner fence is stale')
+    }
+    let materialPath: string | null = null
+    let activation: ManagedPluginActivation | null = null
     if (request.plan.operationKind === 'install' || request.plan.operationKind === 'update') {
       if (request.artifactPath === null) throw new Error('Plugin install or update requires an acquired archive')
       const inspection = await inspectNpmArchive(request.artifactPath, null)
-      if (inspection.name !== request.entry.artifact.id || inspection.version !== request.entry.artifact.version) {
-        throw new Error('Plugin package identity does not match the verified catalog entry')
+      if (inspection.name !== expectedPackageName || inspection.version !== request.plan.artifactRevision) {
+        throw new Error('Plugin package identity does not match the consumed immutable plan')
       }
       const review = request.plan.reviewEvidence
       if (review.kind !== 'plugin') throw new Error('Plugin plan has no Plugin review evidence')
       const peers = Object.fromEntries(review.dependencies
         .filter(dependency => dependency.kind === 'peer' && dependency.afterVersion !== null)
         .map(dependency => [dependency.id, dependency.afterVersion]))
-      const bundle = review.bundles.find(item => item.id === request.entry.artifact.id)
+      const bundle = review.packageMetadata.bundlePatch
       if (inspection.manifestBody !== review.manifest.body
         || inspection.manifestDigest !== review.manifest.manifestDigest
         || inspection.fileManifestDigest !== review.manifest.fileManifestDigest
         || canonicalSha256(inspection.files) !== canonicalSha256(review.manifest.files)
         || canonicalSha256(inspection.scripts) !== canonicalSha256(review.scripts.after)
         || canonicalSha256(inspection.peerDependencies) !== canonicalSha256(peers)
-        || inspection.bundlePatch === null
-        || bundle === undefined
-        || inspection.bundlePatch.body !== bundle.patchBody
-        || inspection.bundlePatch.digest !== bundle.patchDigest) {
+        || inspection.bundlePatch === null || bundle === null
+        || inspection.bundlePatch.body !== bundle.patchBody || inspection.bundlePatch.digest !== bundle.patchDigest) {
         throw new Error('Plugin archive does not match the immutable review evidence')
       }
+      activation = await this.owner.materialize({
+        targetKey: request.plan.targetKey,
+        profileId: request.plan.profileId,
+        packageName: inspection.name,
+        version: inspection.version,
+        integrity: request.plan.artifactIntegrity,
+        archivePath: request.artifactPath,
+        inspection,
+      })
+      materialPath = activation.materialPath
     } else if (request.plan.operationKind === 'configure') {
-      const current = before?.current
-      if (current === null || current === undefined
-        || current.candidateRef !== request.plan.candidateRef
-        || !hasPluginConfigurationAdapter(current.candidateRef, request.entry.artifact.version)) {
-        throw new Error('Plugin has no exact typed configuration adapter')
+      if (before?.current === null || before === null || before.current.candidateRef !== request.plan.candidateRef) {
+        throw new Error('Plugin configure requires the exact installed candidate')
       }
-      const patchPath = join(held.effectivePath, 'cordis.patch.yml')
-      configurationPatch = buildCapabilityResolverPatch(await readFile(patchPath, 'utf8'), request.payload.configuration)
-      if (configurationPatch.candidateRef !== request.plan.candidateRef) {
-        throw new Error('typed Plugin configuration adapter does not match the immutable plan')
-      }
-      if (pluginConfigurationMutationDigest(configurationPatch, profileFence(held)) !== request.plan.mutationDigest) {
-        throw new Error('typed Plugin configuration mutation does not match the immutable plan digest')
+      if (pluginConfigurationMutationDigest(request.payload.configuration, held.ownerRevision) !== request.plan.mutationDigest) {
+        throw new Error('Plugin configuration mutation does not match the immutable plan digest')
       }
     } else if (request.artifactPath !== null) {
       throw new Error('Plugin operation received an unneeded artifact')
     }
+    const metadataCache = this.officialDsh === undefined
+      ? null
+      : await prepareProfileMetadataCache(this.officialDsh, request.plan.profileId)
     return Object.freeze({
       request,
       before,
       beforeDigest: managedStateDigest(before),
-      stagingPath: null,
-      prepared: Object.freeze({ snapshot: held, configurationPatch } satisfies PreparedPlugin),
+      stagingPath: materialPath,
+      prepared: Object.freeze({ snapshot: held, materialPath, activation, metadataCache } satisfies PreparedPlugin),
     })
   }
 
@@ -269,506 +338,394 @@ export class PluginLifecycleProvider implements LifecycleProvider {
     return immutableJsonClone({
       kind: 'plugin',
       snapshot: detail.snapshot,
-      configurationPatch: detail.configurationPatch,
       artifactPath: prepared.request.artifactPath,
+      metadataCache: detail.metadataCache,
     }) as unknown as RpcJson
   }
 
   async apply(prepared: PreparedProviderOperation): Promise<AppliedProviderOperation> {
     const detail = prepared.prepared as PreparedPlugin
     const { request } = prepared
-    let afterSnapshot: ProfileSnapshotView
-    let generation: string | null = null
-    if (request.plan.operationKind === 'restore') {
-      const receipt = await this.owner.restoreLastGood({
-        profile: request.plan.profileId,
-        mutationId: mutationId(request.authorization.operationId, 'apply'),
-        expectedRevision: detail.snapshot.revision,
-        expectedTreeDigest: detail.snapshot.treeDigest,
-      }) as { after?: unknown }
-      afterSnapshot = snapshot(receipt.after)
-      generation = afterSnapshot.activeGeneration
-    } else {
-      const mutation = request.plan.operationKind === 'uninstall'
-        ? { operation: 'uninstall', packageName: request.entry.artifact.id }
-        : request.plan.operationKind === 'configure'
-          ? {
-              operation: 'configure',
-              packageName: request.entry.artifact.id,
-              patch: {
-                expectedDigest: detail.configurationPatch!.expectedDigest,
-                nextUtf8: detail.configurationPatch!.nextUtf8,
-                nextDigest: detail.configurationPatch!.nextDigest,
-              },
-            }
-          : {
-            operation: request.plan.operationKind,
-            kind: 'bundle',
-            packageName: request.entry.artifact.id,
-            version: request.entry.artifact.version,
-            artifact: { path: request.artifactPath, digest: request.plan.artifactIntegrity },
-          }
-      const staged = await this.owner.stage({
-        profile: request.plan.profileId,
-        mutationId: mutationId(request.authorization.operationId, 'apply'),
-        expectedRevision: detail.snapshot.revision,
-        expectedTreeDigest: detail.snapshot.treeDigest,
-        mutation,
-      })
-      generation = staged.generation
-      try {
-        const receipt = await this.owner.commit({
-          profile: request.plan.profileId,
-          expectedRevision: detail.snapshot.revision,
-          expectedTreeDigest: detail.snapshot.treeDigest,
-          generation,
-        }) as { after?: unknown }
-        afterSnapshot = snapshot(receipt.after)
-      } catch (error: unknown) {
-        await this.owner.abort({ profile: request.plan.profileId, generation })
-        throw error
-      }
-    }
-    if (generation === null) throw new Error('Profile mutation did not publish a generation')
     let supplied: ManagedVersion | null = null
     if (request.plan.operationKind === 'install' || request.plan.operationKind === 'update') {
+      if (detail.materialPath === null || detail.activation === null) throw new Error('Plugin prepared material is absent')
       supplied = immutableJsonClone({
         candidateRef: request.plan.candidateRef,
         artifactRevision: request.plan.artifactRevision,
         artifactIntegrity: request.plan.artifactIntegrity,
-        materialPath: afterSnapshot.effectivePath,
+        materialPath: detail.materialPath,
         configuration: request.payload.configuration,
         enabled: true,
-        ownerRevision: profileFence(afterSnapshot),
-        kindState: {
-          packageName: request.entry.artifact.id,
-          profileGeneration: generation,
-          treeDigest: afterSnapshot.treeDigest,
-          loaderPhase: 'pending-restart',
-          consumerObserved: false,
-          externalRestartObserved: false,
-        },
-      }) as unknown as ManagedVersion
+        ownerRevision: detail.snapshot.ownerRevision,
+        kindState: this.pendingState(request),
+      }) as ManagedVersion
     }
-    let after = nextManagedRecord(prepared.before, request, supplied, Date.now())
-    if (after.current !== null && (request.plan.operationKind === 'restore' || request.plan.operationKind === 'configure')) {
-      const state = pluginState(after.current)
-      after = immutableJsonClone({
-        ...after,
+    let desired = nextManagedRecord(prepared.before, request, supplied, Date.now())
+    if (desired.current !== null && ['configure', 'restore'].includes(request.plan.operationKind)) {
+      desired = immutableJsonClone({
+        ...desired,
         current: {
-          ...after.current,
-          materialPath: afterSnapshot.effectivePath,
-          ownerRevision: profileFence(afterSnapshot),
-          kindState: {
-            packageName: state.packageName,
-            profileGeneration: generation,
-            treeDigest: afterSnapshot.treeDigest,
-            loaderPhase: 'pending-restart',
-            consumerObserved: false,
-            externalRestartObserved: false,
-          },
+          ...desired.current,
+          ownerRevision: detail.snapshot.ownerRevision,
+          configuration: request.plan.operationKind === 'configure'
+            ? request.payload.configuration
+            : desired.current.configuration,
+          kindState: this.pendingState(request),
         },
       }) as ManagedTargetRecord
     }
-    after = immutableJsonClone({
-      ...after,
+    const activationId = `managed:${request.authorization.operationId}`
+    desired = immutableJsonClone({
+      ...desired,
       pending: {
         operationId: request.authorization.operationId,
-        generation,
-        treeDigest: afterSnapshot.treeDigest,
-        revision: afterSnapshot.revision,
+        generation: activationId,
+        treeDigest: canonicalSha256({ targetKey: request.plan.targetKey, activationId }),
+        revision: Math.max(1, detail.snapshot.revision),
         profileId: request.plan.profileId,
-        packageName: request.entry.artifact.id,
+        packageName: plannedPackageName(request),
         operationKind: request.plan.operationKind,
       },
     }) as ManagedTargetRecord
-    await this.store.putManaged(after, prepared.before?.revision ?? 0)
-    return this.applied(prepared, after, generation)
+    const committed = await this.owner.commit(
+      prepared.before,
+      desired,
+      plannedPackageName(request),
+      detail.metadataCache,
+    )
+    await this.store.putManaged(committed.sidecar.managed, prepared.before?.revision ?? 0)
+    return this.applied(prepared, committed.sidecar.managed, committed.restartRequired, false)
   }
 
   async verify(applied: AppliedProviderOperation): Promise<ProviderVerification | null> {
-    if (!applied.restartRequired) return Object.freeze({ digest: canonicalSha256({ structural: applied.afterDigest }) })
     const record = await this.store.getManaged(applied.prepared.request.plan.targetKey)
-    if (record === undefined) throw new Error('managed Plugin disappeared before boot verification')
+    if (record === undefined) {
+      if (!applied.rollbackRestartRequired || applied.prepared.before !== null) {
+        throw new Error('managed Plugin disappeared before verification')
+      }
+      const receipt = await this.owner.verifyAbsentRollback({
+        operationId: applied.prepared.request.authorization.operationId,
+        targetKey: applied.prepared.request.plan.targetKey,
+        profileId: applied.prepared.request.plan.profileId,
+      })
+      return Object.freeze({ digest: canonicalSha256({ state: managedStateDigest(null), absentRollback: receipt }) })
+    }
     if (pending(record) !== null) return null
-    const observed = snapshot(await this.owner.snapshot(applied.prepared.request.plan.profileId))
-    if (observed.bootStatus !== 'verified' || observed.activeGeneration !== applied.profileGeneration) {
-      throw new Error('Profile owner has no exact acknowledged boot evidence')
-    }
-    const removed = applied.rollbackRestart
-      ? applied.prepared.before?.current == null
-      : applied.prepared.request.plan.operationKind === 'uninstall'
-    const evidenceVersion = removed ? record.removed : record.current
-    if (evidenceVersion === null) throw new Error('Plugin boot evidence has no exact managed version')
-    const state = pluginState(evidenceVersion)
-    const expectedPhase = removed ? 'absent' : 'active'
-    if (state.consumerObserved !== true || state.externalRestartObserved !== true || state.loaderPhase !== expectedPhase) {
-      throw new Error('Plugin consumer evidence is incomplete after boot acknowledgement')
-    }
-    return Object.freeze({ digest: canonicalSha256({
-      generation: observed.activeGeneration,
-      treeDigest: observed.treeDigest,
-      bootStatus: observed.bootStatus,
-      runtimeEvidence: state.runtimeEvidence,
-    }) })
+    const evidence = await this.owner.verify(record)
+    return Object.freeze({ digest: canonicalSha256({ state: managedStateDigest(record), runtimeEvidence: evidence }) })
   }
 
-  /** Reconcile an already acknowledged Profile boot with exact settled Loader evidence. */
+  /** A process restart token is acknowledged only after a new Host rehydrates the managed Plugin. */
   async acknowledgeBoot(input: Readonly<{
     operationId: string
     targetKey: string
     profileId: string
-    generation: string
+    restartToken?: string
   }>): Promise<void> {
+    await this.initialize()
     const record = await this.store.getManaged(input.targetKey)
-    if (record === undefined) throw new Error('Plugin operation target does not exist')
-    const staged = pending(record)
-    if (
-      staged === null
-      || staged.operationId !== input.operationId
-      || staged.profileId !== input.profileId
-      || staged.generation !== input.generation
-    ) throw new Error('boot acknowledgement does not bind the pending Profile generation')
-    const held = snapshot(await this.owner.snapshot(input.profileId))
-    if (held.activeGeneration !== input.generation
-      || (held.revision !== staged.revision && held.revision !== staged.revision + 1)
-      || held.treeDigest !== staged.treeDigest
-      || held.bootStatus !== 'verified') {
-      throw new Error('Profile generation has not been acknowledged by a successful app boot')
+    if (record === undefined) {
+      await this.owner.verifyAbsentRollback({
+        operationId: input.operationId,
+        targetKey: input.targetKey,
+        profileId: input.profileId,
+      })
+      return
     }
-    const runtimeOperation = staged.operationKind === 'rollback'
-      ? (await this.store.getProviderSnapshot(input.operationId))?.before?.current == null ? 'uninstall' : 'restore'
-      : staged.operationKind
-    const evidence = await this.runtime.observe(staged.packageName, runtimeOperation)
-    await this.store.putBootAck({
-      schemaVersion: 1,
-      operationId: input.operationId,
-      profileId: input.profileId,
-      generation: input.generation,
-      phase: staged.operationKind === 'rollback' ? 'rollback' : 'candidate',
-      revision: held.revision,
-      treeDigest: held.treeDigest,
-      consumerObserved: true,
-      acknowledgedAtMs: Date.now(),
-    })
-    let current = record.current
-    if (current !== null) {
-      const state = pluginState(current)
-      current = immutableJsonClone({
-        ...current,
-        ownerRevision: profileFence(held),
-        materialPath: held.effectivePath,
-        kindState: {
-          ...state,
-          profileGeneration: input.generation,
-          treeDigest: held.treeDigest,
-          loaderPhase: 'active',
-          consumerObserved: true,
-          externalRestartObserved: true,
-          runtimeEvidence: evidence,
-        },
-      }) as unknown as ManagedVersion
+    if (record.profileId !== input.profileId || record.lastOperationId !== input.operationId) {
+      throw new Error('managed Plugin restart acknowledgement does not bind the operation')
     }
-    let removed = record.removed
-    if (current === null && removed !== null) {
-      const state = pluginState(removed)
-      removed = immutableJsonClone({
-        ...removed,
-        ownerRevision: profileFence(held),
-        materialPath: held.effectivePath,
-        kindState: {
-          ...state,
-          profileGeneration: input.generation,
-          treeDigest: held.treeDigest,
-          loaderPhase: 'absent',
-          consumerObserved: true,
-          externalRestartObserved: true,
-          runtimeEvidence: evidence,
-        },
-      }) as unknown as ManagedVersion
-    }
-    await this.store.putManaged(immutableJsonClone({
-      ...record,
-      revision: record.revision + 1,
-      current,
-      removed,
-      pending: null,
-      updatedAtMs: Date.now(),
-    }) as ManagedTargetRecord, record.revision)
+    if (pending(record) !== null) throw new Error('managed Plugin has not been rehydrated by a new Host process')
+    await this.owner.verify(record)
   }
 
-  async rollback(applied: AppliedProviderOperation) {
+  async rollback(applied: AppliedProviderOperation): Promise<`sha256:${string}`> {
     const current = await this.store.getManaged(applied.prepared.request.plan.targetKey)
-    if (current === undefined) throw new Error('managed Plugin disappeared before rollback')
-    let staged = pending(current)
-    if (staged === null) {
-      const acknowledged = await this.store.getBootAck(applied.prepared.request.authorization.operationId)
-      const evidence = current.current ?? current.removed
-      if (acknowledged?.phase !== 'candidate'
-        || acknowledged.profileId !== applied.prepared.request.plan.profileId
-        || evidence === null
-        || pluginState(evidence).profileGeneration !== acknowledged.generation) {
-        throw new Error('Plugin rollback has no exact pending or acknowledged Profile mutation')
-      }
-      staged = {
-        operationId: applied.prepared.request.authorization.operationId,
-        generation: acknowledged.generation,
-        treeDigest: acknowledged.treeDigest,
-        revision: acknowledged.revision,
-        profileId: applied.prepared.request.plan.profileId,
-        packageName: applied.prepared.request.entry.artifact.id,
-        operationKind: applied.prepared.request.plan.operationKind,
-      }
-    } else if (staged.operationId !== applied.prepared.request.authorization.operationId) {
-      throw new Error('Plugin rollback has no exact pending Profile mutation')
-    }
-    const receipt = await this.owner.restoreLastGood({
-      profile: staged.profileId,
-      mutationId: mutationId(applied.prepared.request.authorization.operationId, 'rollback'),
-      expectedRevision: staged.revision,
-      expectedTreeDigest: staged.treeDigest,
-    }) as { after?: unknown }
-    const restored = snapshot(receipt.after)
-    if (restored.activeGeneration === null) throw new Error('Profile rollback did not publish a generation')
     const before = applied.prepared.before
-    const base = before ?? immutableJsonClone({
-      ...current,
-      current: null,
-      lastGood: null,
-      removed: current.current ?? current.removed,
-    }) as ManagedTargetRecord
-    await this.store.putManaged(immutableJsonClone({
-      ...base,
+    if (current === undefined) {
+      if (before === null && await this.owner.absentRollbackReceipt({
+        operationId: applied.prepared.request.authorization.operationId,
+        targetKey: applied.prepared.request.plan.targetKey,
+        profileId: applied.prepared.request.plan.profileId,
+      }) !== null) {
+        return applied.prepared.beforeDigest
+      }
+      throw new Error('managed Plugin disappeared before rollback')
+    }
+    if (rollbackOperation(current, applied.prepared.request.authorization.operationId)) {
+      return applied.prepared.beforeDigest
+    }
+    if (before === null) {
+      const receipt = await this.owner.rollbackToAbsent(
+        current,
+        packageName(current, applied.prepared.request),
+        applied.prepared.request.authorization.operationId,
+        (applied.prepared.prepared as PreparedPlugin | null)?.metadataCache ?? null,
+      )
+      if (receipt.restartRequired !== applied.prepared.request.plan.restartRequired) {
+        throw new Error('managed Plugin absent rollback restart result does not bind the immutable plan')
+      }
+      return applied.prepared.beforeDigest
+    }
+    let restored: ManagedTargetRecord
+    restored = immutableJsonClone({
+      ...before,
       revision: current.revision + 1,
       lastOperationId: applied.prepared.request.authorization.operationId,
-      pending: {
-        operationId: applied.prepared.request.authorization.operationId,
-        generation: restored.activeGeneration,
-        treeDigest: restored.treeDigest,
-        revision: restored.revision,
-        profileId: applied.prepared.request.plan.profileId,
-        packageName: applied.prepared.request.entry.artifact.id,
-        operationKind: 'rollback',
-      },
+      current: before.current === null ? null : this.markRollback(before.current, applied.prepared.request),
+      lastGood: before.lastGood === null ? null : this.markRollback(before.lastGood, applied.prepared.request),
+      removed: before.removed === null ? null : this.markRollback(before.removed, applied.prepared.request),
+      pending: this.rollbackPending(applied.prepared.request),
       updatedAtMs: Date.now(),
-    }) as ManagedTargetRecord, current.revision)
+    }) as ManagedTargetRecord
+    const committed = await this.owner.commit(
+      current,
+      restored,
+      packageName(before ?? current, applied.prepared.request),
+      (applied.prepared.prepared as PreparedPlugin | null)?.metadataCache ?? null,
+    )
+    if (committed.restartRequired !== applied.prepared.request.plan.restartRequired) {
+      throw new Error('managed Plugin rollback restart result does not bind the immutable plan')
+    }
+    await this.store.putManaged(committed.sidecar.managed, current.revision)
     return applied.prepared.beforeDigest
   }
 
-  /** Check app-boot evidence before the Loader probe can trigger rollback. */
-  async bootReady(input: Readonly<{ profileId: string; generation: string }>): Promise<boolean> {
-    const held = snapshot(await this.owner.snapshot(input.profileId))
-    return held.activeGeneration === input.generation && held.bootStatus === 'verified'
-  }
-
-  /** Remove the temporary rollback tombstone used when the original target was absent. */
-  async finalizeRollback(applied: AppliedProviderOperation): Promise<void> {
-    if (!applied.rollbackRestart || applied.prepared.before !== null) return
-    const record = await this.store.getManaged(applied.prepared.request.plan.targetKey)
-    if (record === undefined || record.pending !== null
-      || record.lastOperationId !== applied.prepared.request.authorization.operationId) {
-      throw new Error('temporary Plugin rollback record is not ready for finalization')
+  /** Runtime repair is complete only when the Center owner has no pending restart. */
+  async bootReady(input: Readonly<{ profileId: string; restartToken?: string }>): Promise<boolean> {
+    const prefix = 'managed-rollback:'
+    if (input.restartToken?.startsWith(prefix)) {
+      const operationId = input.restartToken.slice(prefix.length)
+      const ready = await this.owner.absentRollbackBootReady(operationId, input.profileId)
+      if (ready !== null) return ready
     }
-    await this.store.deleteManaged(record.targetKey, record.revision)
+    return (await this.snapshot(input.profileId)).bootStatus !== 'pending-restart'
   }
 
-  /**
-   * Rebuild the Center rollback-pending record only after the Host exposes the
-   * exact generation and tree digest pinned by the immutable approval.
-   *
-   * @param request Exact consumed Plugin operation.
-   * @param expectedBeforeDigest Journal-authenticated pre-mutation Center state.
-   * @returns Pending rollback evidence, or null while the pinned Host restore is absent.
-   */
+  /** Verify the exact restored state before the operation publishes its terminal receipt. */
+  async verifyRollbackFinalization(applied: AppliedProviderOperation): Promise<void> {
+    if (applied.prepared.before === null) {
+      await this.owner.verifyAbsentRollback({
+        operationId: applied.prepared.request.authorization.operationId,
+        targetKey: applied.prepared.request.plan.targetKey,
+        profileId: applied.prepared.request.plan.profileId,
+      })
+      return
+    }
+    const current = await this.store.getManaged(applied.prepared.request.plan.targetKey)
+    if (current === undefined
+      || current.lastOperationId !== applied.prepared.request.authorization.operationId
+      || pending(current) !== null
+      || !rollbackOperation(current, applied.prepared.request.authorization.operationId)
+      || canonicalSha256(restoredCore(current)) !== canonicalSha256(restoredCore(applied.prepared.before))) {
+      throw new Error('managed Plugin rollback finalization has no exact restored state')
+    }
+  }
+
+  /** Complete post-receipt rollback cleanup from durable operation authority without an intent payload. */
+  async finalizeDurableRollback(input: Readonly<{
+    operationId: string
+    targetKey: string
+    beforeDigest: `sha256:${string}`
+  }>): Promise<boolean> {
+    await this.initialize()
+    const durable = await this.store.getProviderSnapshot(input.operationId)
+    if (durable === undefined) return false
+    if (durable.targetKey !== input.targetKey
+      || durable.beforeDigest !== input.beforeDigest
+      || managedStateDigest(durable.before) !== input.beforeDigest) {
+      throw new Error('managed Plugin durable rollback finalization does not bind the provider snapshot')
+    }
+    if (durable.before === null) {
+      await this.owner.finalizeAbsentRollback(input.operationId)
+      return true
+    }
+    const current = await this.store.getManaged(input.targetKey)
+    return current !== undefined
+      && current.lastOperationId === input.operationId
+      && pending(current) === null
+      && rollbackOperation(current, input.operationId)
+      && canonicalSha256(restoredCore(current)) === canonicalSha256(restoredCore(durable.before))
+  }
+
+  /** Remove transient absent-state proof only after the terminal receipt is durable. */
+  async finalizeRollback(applied: AppliedProviderOperation): Promise<void> {
+    await this.verifyRollbackFinalization(applied)
+    if (applied.prepared.before === null) {
+      await this.owner.finalizeAbsentRollback(applied.prepared.request.authorization.operationId)
+    }
+  }
+
+  /** Consume only exact evidence produced after the pinned executable restored official and Center state. */
   async reconcileBreakGlassRestore(
     request: ProviderOperationRequest,
     expectedBeforeDigest: `sha256:${string}`,
+    journalHeadDigest: `sha256:${string}`,
   ): Promise<AppliedProviderOperation | null> {
-    const review = request.plan.reviewEvidence
-    if (review.kind !== 'plugin') {
-      throw new Error('Plugin break-glass reconciliation has no immutable Profile recovery pin')
-    }
-    const recoveryPin = review.rollbackPoint
-    if (recoveryPin === null || recoveryPin.kind !== 'profile-generation') {
-      throw new Error('Plugin break-glass reconciliation has no immutable Profile recovery pin')
-    }
-    const held = snapshot(await this.owner.snapshot(request.plan.profileId))
-    if (held.profile !== request.plan.profileId
-      || held.activeGeneration !== recoveryPin.id
-      || held.treeDigest !== recoveryPin.digest) return null
-    if (held.bootStatus !== 'pending-restart' && held.bootStatus !== 'verified') {
-      throw new Error('break-glass Profile restore has no restart-verifiable Host state')
-    }
     const durable = await this.store.getProviderSnapshot(request.authorization.operationId)
-    if (durable === undefined
-      || durable.targetKey !== request.plan.targetKey
-      || durable.beforeDigest !== expectedBeforeDigest
-      || managedStateDigest(durable.before) !== expectedBeforeDigest) {
-      throw new Error('Plugin break-glass reconciliation snapshot does not bind the journal')
+    if (durable === undefined || durable.targetKey !== request.plan.targetKey
+      || durable.beforeDigest !== managedStateDigest(durable.before)
+      || durable.beforeDigest !== expectedBeforeDigest) {
+      throw new Error('managed Plugin recovery snapshot does not bind the journal')
     }
-    const existing = await this.store.getManaged(request.plan.targetKey)
-    if (existing !== undefined
-      && existing.lastOperationId !== request.authorization.operationId
-      && managedStateDigest(existing) !== expectedBeforeDigest) {
-      throw new Error('Plugin Center state diverged before break-glass reconciliation')
-    }
-    const alreadyPending = existing === undefined ? null : pending(existing)
-    if (existing !== undefined
-      && alreadyPending?.operationId === request.authorization.operationId
-      && alreadyPending.operationKind === 'rollback'
-      && alreadyPending.generation === recoveryPin.id
-      && alreadyPending.treeDigest === recoveryPin.digest
-      && alreadyPending.revision === held.revision) {
-      const prepared: PreparedProviderOperation = {
-        request,
-        before: durable.before,
-        beforeDigest: durable.beforeDigest as `sha256:${string}`,
-        stagingPath: null,
-        prepared: null,
-      }
-      return this.applied(prepared, existing, recoveryPin.id, true)
-    }
-
-    const temporaryRemoved: ManagedVersion = immutableJsonClone({
-      candidateRef: request.plan.candidateRef,
-      artifactRevision: request.plan.artifactRevision,
-      artifactIntegrity: request.plan.artifactIntegrity,
-      materialPath: held.effectivePath,
-      configuration: request.payload.configuration,
-      enabled: true,
-      ownerRevision: profileFence(held),
-      kindState: {
-        packageName: request.entry.artifact.id,
-        profileGeneration: recoveryPin.id,
-        treeDigest: recoveryPin.digest,
-        loaderPhase: 'pending-restart',
-        consumerObserved: false,
-        externalRestartObserved: false,
-      },
-    }) as ManagedVersion
-    const base = durable.before ?? immutableJsonClone({
-      schemaVersion: 1,
-      kind: 'plugin',
-      extensionId: request.plan.extensionId,
+    const providerSnapshotDigest = canonicalSha256(durable)
+    const marker = await this.owner.breakGlassRestore({
+      operationId: request.authorization.operationId,
       targetKey: request.plan.targetKey,
-      scopeKey: request.plan.scopeKey,
       profileId: request.plan.profileId,
-      revision: 0,
-      lastOperationId: request.authorization.operationId,
-      current: null,
-      lastGood: null,
-      removed: temporaryRemoved,
-      pending: null,
-      updatedAtMs: Date.now(),
-    }) as ManagedTargetRecord
-    const restored = immutableJsonClone({
-      ...base,
-      revision: (existing?.revision ?? 0) + 1,
-      lastOperationId: request.authorization.operationId,
-      pending: {
-        operationId: request.authorization.operationId,
-        generation: recoveryPin.id,
-        treeDigest: recoveryPin.digest,
-        revision: held.revision,
-        profileId: request.plan.profileId,
-        packageName: request.entry.artifact.id,
-        operationKind: 'rollback',
-      },
-      updatedAtMs: Date.now(),
-    }) as ManagedTargetRecord
-    await this.store.putManaged(restored, existing?.revision ?? 0)
+      packageName: plannedPackageName(request),
+      journalHeadDigest,
+      providerSnapshotDigest,
+      beforeDigest: expectedBeforeDigest,
+    })
+    if (marker === null) return null
+    const current = await this.store.getManaged(request.plan.targetKey) ?? null
+    if (marker.restoredManagedDigest !== expectedBeforeDigest) {
+      throw new Error('managed Plugin break-glass marker does not restore the provider before-state')
+    }
+    if (durable.before === null) {
+      if (current !== null || marker.restoredRevision !== null
+        || managedStateDigest(current) !== marker.restoredManagedDigest) {
+        throw new Error('managed Plugin break-glass restore retained an absent before-state')
+      }
+    } else {
+      if (current === null || marker.restoredRevision === null
+        || current.lastOperationId !== request.authorization.operationId || current.pending !== null) {
+        throw new Error('managed Plugin break-glass restore does not match the durable before-state')
+      }
+      const exactRestored = current.revision === marker.restoredRevision
+        && managedStateDigest(current) === marker.restoredManagedDigest
+      const settledRestored = current.revision === marker.restoredRevision + 1
+        && canonicalSha256(restoredCore(current)) === canonicalSha256(restoredCore(durable.before))
+      if (!exactRestored && !settledRestored) {
+        throw new Error('managed Plugin break-glass marker does not bind current Center state')
+      }
+      if (settledRestored) await this.owner.verify(current)
+    }
+    const prepared: PreparedProviderOperation = Object.freeze({
+      request,
+      before: durable.before,
+      beforeDigest: expectedBeforeDigest,
+      stagingPath: null,
+      prepared: null,
+    })
+    return this.applied(prepared, current, false, request.plan.restartRequired)
+  }
+
+  async recover(request: ProviderOperationRequest): Promise<AppliedProviderOperation | null> {
+    await this.initialize()
+    const durable = await this.store.getProviderSnapshot(request.authorization.operationId)
+    if (durable === undefined) return null
+    const record = await this.store.getManaged(request.plan.targetKey)
+    if (durable.targetKey !== request.plan.targetKey
+      || durable.beforeDigest !== managedStateDigest(durable.before)) {
+      throw new Error('Plugin recovery snapshot is absent or corrupt')
+    }
+    const point = recoveryPoint(durable.recoveryPoint)
+    if (point.snapshot.profileId !== request.plan.profileId) throw new Error('Plugin recovery owner snapshot does not bind the plan')
+    if (['install', 'update'].includes(request.plan.operationKind)) {
+      if (point.artifactPath === null) {
+        throw new Error('Plugin recovery material does not bind the immutable operation')
+      }
+      await verifyPackedArtifact(point.artifactPath, request.plan.artifactIntegrity)
+    } else if (point.artifactPath !== null) {
+      throw new Error('Plugin recovery point carries unneeded mutation material')
+    }
     const prepared: PreparedProviderOperation = {
       request,
       before: durable.before,
       beforeDigest: durable.beforeDigest as `sha256:${string}`,
       stagingPath: null,
-      prepared: null,
+      prepared: Object.freeze({
+        snapshot: point.snapshot,
+        materialPath: null,
+        activation: null,
+        metadataCache: point.metadataCache,
+      } satisfies PreparedPlugin),
     }
-    return this.applied(prepared, restored, recoveryPin.id, true)
-  }
-
-  async recover(request: ProviderOperationRequest): Promise<AppliedProviderOperation | null> {
-    const snapshot = await this.store.getProviderSnapshot(request.authorization.operationId)
-    if (snapshot === undefined || snapshot.targetKey !== request.plan.targetKey
-      || snapshot.beforeDigest !== managedStateDigest(snapshot.before)) throw new Error('Plugin recovery snapshot is absent or corrupt')
-    let record = await this.store.getManaged(request.plan.targetKey)
-    if (record?.lastOperationId !== request.authorization.operationId) {
-      if (managedStateDigest(record ?? null) !== snapshot.beforeDigest) {
-        throw new Error('Plugin center state diverged after its Profile mutation')
+    if (record === undefined) {
+      if (prepared.before !== null) return null
+      const receipt = await this.owner.absentRollbackReceipt({
+        operationId: request.authorization.operationId,
+        targetKey: request.plan.targetKey,
+        profileId: request.plan.profileId,
+      })
+      if (receipt === null) return null
+      if (await this.owner.absentRollbackBootReady(request.authorization.operationId, request.plan.profileId)) {
+        await this.owner.verifyAbsentRollback({
+          operationId: request.authorization.operationId,
+          targetKey: request.plan.targetKey,
+          profileId: request.plan.profileId,
+        })
       }
-      const point = recoveryPoint(snapshot.recoveryPoint)
-      if (point.snapshot.profile !== request.plan.profileId
-        || profileFence(point.snapshot) !== request.plan.fences.profileRevision) {
-        throw new Error('Plugin recovery snapshot does not bind the immutable Profile fence')
-      }
-      if (request.plan.operationKind === 'install' || request.plan.operationKind === 'update') {
-        if (point.artifactPath === null || point.configurationPatch !== null) {
-          throw new Error('Plugin recovery material does not bind the immutable operation')
-        }
-        await verifyPackedArtifact(point.artifactPath, request.plan.artifactIntegrity)
-        const inspection = await inspectNpmArchive(point.artifactPath, null)
-        if (inspection.name !== request.entry.artifact.id || inspection.version !== request.entry.artifact.version) {
-          throw new Error('Plugin recovery package identity does not match the verified catalog entry')
-        }
-      } else if (request.plan.operationKind === 'configure') {
-        if (point.artifactPath !== null || point.configurationPatch === null
-          || point.configurationPatch.candidateRef !== request.plan.candidateRef
-          || pluginConfigurationMutationDigest(point.configurationPatch, profileFence(point.snapshot)) !== request.plan.mutationDigest) {
-          throw new Error('Plugin recovery configuration does not bind the immutable plan')
-        }
-      } else if (point.artifactPath !== null || point.configurationPatch !== null) {
-        throw new Error('Plugin recovery point carries unneeded mutation material')
-      }
-      const prepared: PreparedProviderOperation = {
-        request: Object.freeze({ ...request, artifactPath: point.artifactPath }),
-        before: snapshot.before,
-        beforeDigest: snapshot.beforeDigest as `sha256:${string}`,
-        stagingPath: null,
-        prepared: Object.freeze({ snapshot: point.snapshot, configurationPatch: point.configurationPatch } satisfies PreparedPlugin),
-      }
-      await this.apply(prepared)
-      record = await this.store.getManaged(request.plan.targetKey)
+      return this.applied(prepared, null, false, request.plan.restartRequired)
     }
-    if (record?.lastOperationId !== request.authorization.operationId) return null
-    const staged = pending(record)
-    const acknowledged = staged === null ? await this.store.getBootAck(request.authorization.operationId) : undefined
-    const evidence = record.current ?? record.removed
-    if (acknowledged !== undefined && (
-      acknowledged.profileId !== request.plan.profileId
-      || evidence === null
-      || pluginState(evidence).profileGeneration !== acknowledged.generation
-    )) throw new Error('Plugin acknowledged recovery evidence does not bind the managed generation')
-    const generation = staged?.operationId === request.authorization.operationId
-      ? staged.generation
-      : acknowledged?.generation ?? null
-    if (generation === null || generation === '') return null
-    const prepared: PreparedProviderOperation = {
-      request,
-      before: snapshot.before,
-      beforeDigest: snapshot.beforeDigest as `sha256:${string}`,
-      stagingPath: null,
-      prepared: null,
+    if (record.lastOperationId !== request.authorization.operationId) return null
+    const heldPending = pending(record)
+    const rolledBack = rollbackOperation(record, request.authorization.operationId)
+    if (heldPending !== null && heldPending.operationId !== request.authorization.operationId) {
+      throw new Error('Plugin recovery pending state does not bind the operation')
     }
-    return this.applied(prepared, record, generation, staged?.operationKind === 'rollback' || acknowledged?.phase === 'rollback')
+    return this.applied(
+      prepared,
+      record,
+      !rolledBack && request.plan.restartRequired,
+      rolledBack && request.plan.restartRequired,
+    )
   }
 
   cleanup(): Promise<void> {
     return Promise.resolve()
   }
 
+  private pendingState(request: ProviderOperationRequest): RpcJson {
+    return {
+      packageName: plannedPackageName(request),
+      restartToken: `managed:${request.authorization.operationId}`,
+      treeDigest: canonicalSha256({ targetKey: request.plan.targetKey, operationId: request.authorization.operationId }),
+      loaderPhase: 'pending-restart',
+      consumerObserved: false,
+      restartObserved: false,
+    }
+  }
+
+  private rollbackPending(request: ProviderOperationRequest): RpcJson {
+    return {
+      operationId: request.authorization.operationId,
+      generation: `managed-rollback:${request.authorization.operationId}`,
+      treeDigest: canonicalSha256({ targetKey: request.plan.targetKey, operationId: request.authorization.operationId, rollback: true }),
+      revision: 1,
+      profileId: request.plan.profileId,
+      packageName: plannedPackageName(request),
+      operationKind: request.plan.operationKind === 'configure' ? 'configure' : 'rollback',
+    }
+  }
+
+  private markRollback(version: ManagedVersion, request: ProviderOperationRequest): ManagedVersion {
+    return immutableJsonClone({
+      ...version,
+      kindState: {
+        ...pluginState(version),
+        rollbackOperationId: request.authorization.operationId,
+      },
+    }) as ManagedVersion
+  }
+
   private applied(
     prepared: PreparedProviderOperation,
-    after: ManagedTargetRecord,
-    generation: string | null,
-    rollbackRestart = false,
+    after: ManagedTargetRecord | null,
+    restartRequired: boolean,
+    rollbackRestartRequired: boolean,
   ): AppliedProviderOperation {
     return Object.freeze({
       prepared,
       mutationDigest: canonicalSha256({ operationId: prepared.request.authorization.operationId, after: managedStateDigest(after) }),
       afterDigest: managedStateDigest(after),
-      restartRequired: generation !== null,
-      profileGeneration: generation,
-      rollbackRestart,
+      restartRequired,
+      restartToken: restartRequired || rollbackRestartRequired
+        ? `${rollbackRestartRequired ? 'managed-rollback' : 'managed'}:${prepared.request.authorization.operationId}`
+        : null,
+      rollbackRestartRequired,
     })
   }
 }

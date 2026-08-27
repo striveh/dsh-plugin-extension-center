@@ -4,7 +4,6 @@ import { isIP } from 'node:net'
 import { join } from 'node:path'
 import type { OperationAuthorization } from '../plans/index.ts'
 import type { ImmutablePlan } from '../plans/index.ts'
-import type { VerifiedCatalog } from '../catalog.ts'
 import { openRegularNoFollow } from './files.ts'
 
 /** Exact signed-catalog artifact coordinates re-bound after plan consumption. */
@@ -17,11 +16,10 @@ export interface ArtifactFetchSpec {
   readonly fileSuffix: '.md' | '.tgz'
 }
 
-/** Four-way binding required before acquisition may touch the network. */
+/** Consumed authorization and immutable plan required before acquisition may touch the network. */
 export interface ArtifactFetchBinding {
   readonly authorization: OperationAuthorization
   readonly plan: ImmutablePlan
-  readonly catalog: VerifiedCatalog
 }
 
 /** Explicit redirect policy for integrity-pinned downloads. */
@@ -58,19 +56,10 @@ function exactUrl(value: string): URL {
 }
 
 function forbiddenHost(hostname: string): boolean {
-  const lower = hostname.toLowerCase()
-  if (lower === 'localhost' || lower.endsWith('.localhost') || lower.endsWith('.local')) return true
-  const family = isIP(lower)
-  if (family === 4) {
-    const octets = lower.split('.').map(Number)
-    return octets[0] === 10
-      || octets[0] === 127
-      || (octets[0] === 169 && octets[1] === 254)
-      || (octets[0] === 172 && (octets[1] ?? 0) >= 16 && (octets[1] ?? 0) <= 31)
-      || (octets[0] === 192 && octets[1] === 168)
-  }
-  if (family === 6) return lower === '::1' || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('fe80:')
-  return false
+  const lower = hostname.toLowerCase().replace(/\.+$/u, '')
+  const unbracketed = lower.startsWith('[') && lower.endsWith(']') ? lower.slice(1, -1) : lower
+  if (isIP(unbracketed) !== 0) return true
+  return lower === 'localhost' || lower.endsWith('.localhost') || lower.endsWith('.local')
 }
 
 function digestSpec(integrity: ArtifactFetchSpec['integrity']): Readonly<{ algorithm: 'sha256' | 'sha512'; expected: Buffer }> {
@@ -159,7 +148,9 @@ export class ArtifactFetcher {
       })
       if (![301, 302, 303, 307, 308].includes(response.status)) break
       await response.body?.cancel()
-      if (count >= this.redirects.maximumRedirects) throw new Error('artifact redirect limit exceeded')
+      if (count >= this.redirects.maximumRedirects) {
+        throw new Error(`artifact redirect limit exceeded after ${String(count)} redirects at ${current.hostname}`)
+      }
       const location = response.headers.get('location')
       if (location === null) throw new Error('artifact redirect has no location')
       const next = exactUrl(new URL(location, current).toString())
@@ -214,15 +205,23 @@ export class ArtifactFetcher {
 }
 
 function boundSpec(binding: ArtifactFetchBinding): ArtifactFetchSpec {
-  const { authorization, plan, catalog } = binding
+  const { authorization, plan } = binding
   const content = plan.content
   if (
     authorization.planId !== content.planId
     || authorization.planHash !== plan.hash
+    || authorization.origin !== content.origin
+    || authorization.candidateRef !== content.candidateRef
+    || authorization.extensionKind !== content.extensionKind
+    || authorization.extensionId !== content.extensionId
     || authorization.operationKind !== content.operationKind
     || authorization.managedObject !== content.managedObject
     || authorization.externalRuntimeAction !== content.externalRuntimeAction
     || JSON.stringify(authorization.runtimeBinding) !== JSON.stringify(content.runtimeBinding)
+    || authorization.artifactRevision !== content.artifactRevision
+    || authorization.artifactIntegrity !== content.artifactIntegrity
+    || authorization.artifactUrl !== content.artifactUrl
+    || authorization.artifactSizeBytes !== content.artifactSizeBytes
     || authorization.targetKey !== content.targetKey
     || authorization.ownerKey !== content.ownerKey
     || authorization.scopeKey !== content.scopeKey
@@ -233,25 +232,12 @@ function boundSpec(binding: ArtifactFetchBinding): ArtifactFetchSpec {
     || content.externalRuntimeAction !== 'download'
     || content.runtimeBinding !== null
   ) throw new Error('consumed plan does not authorize artifact acquisition')
-  if (catalog.envelope.revision !== content.fences.catalogRevision) {
-    throw new Error('verified catalog revision no longer matches the plan fence')
-  }
-  const entry = catalog.envelope.entries.find(candidate => candidate.candidateRef === content.candidateRef)
-  if (entry === undefined) throw new Error('plan candidate is absent from the verified catalog revision')
-  if (
-    entry.kind !== content.extensionKind
-    || entry.name !== content.extensionId
-    || entry.artifact.version !== content.artifactRevision
-    || entry.artifact.integrity !== content.artifactIntegrity
-    || entry.artifact.acquisitionUrl !== content.artifactUrl
-    || entry.artifact.sizeBytes !== content.artifactSizeBytes
-  ) throw new Error('verified catalog candidate does not match the immutable plan')
   return Object.freeze({
-    candidateRef: entry.candidateRef,
-    revision: entry.artifact.version,
-    url: entry.artifact.acquisitionUrl,
-    sizeBytes: entry.artifact.sizeBytes,
-    integrity: entry.artifact.integrity,
-    fileSuffix: entry.kind === 'skill' ? '.md' : '.tgz',
+    candidateRef: content.candidateRef,
+    revision: content.artifactRevision,
+    url: content.artifactUrl,
+    sizeBytes: content.artifactSizeBytes,
+    integrity: content.artifactIntegrity,
+    fileSuffix: content.extensionKind === 'skill' ? '.md' : '.tgz',
   })
 }

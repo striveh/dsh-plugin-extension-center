@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
-import type { VerifiedCatalog } from '../src/catalog.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
 import { ArtifactFetcher } from '../src/host/index.ts'
 import { createImmutablePlan, type ImmutablePlan, type OperationAuthorization } from '../src/plans/index.ts'
@@ -24,7 +23,6 @@ async function fixture(
   root: string
   plan: ImmutablePlan
   authorization: OperationAuthorization
-  catalog: VerifiedCatalog
 }>> {
   const root = await mkdtemp(join(tmpdir(), 'extension-artifact-'))
   roots.push(root)
@@ -32,8 +30,6 @@ async function fixture(
   entry.artifact.acquisitionUrl = url
   entry.artifact.sizeBytes = bytes.byteLength
   entry.artifact.integrity = `sha256:${createHash('sha256').update(bytes).digest('hex')}`
-  const envelope = structuredClone(BOOTSTRAP_CATALOG_ENVELOPE)
-  envelope.entries = [entry]
   const plan = createImmutablePlan({
     schemaVersion: 1,
     singleUse: true,
@@ -53,7 +49,7 @@ async function fixture(
     operationKind: 'install',
     desiredState: 'enabled',
     targetKey: 'plugin:profile:web:profile:web:dsh-capability-resolver',
-    ownerKey: 'profileTransactions',
+    ownerKey: 'managedPlugins',
     scopeKey: 'profile:web',
     profileId: 'profile:web',
     idempotencyKey: 'artifact-test',
@@ -67,10 +63,10 @@ async function fixture(
     createdAtMs: 1,
     expiresAtMs: 10_000,
     fences: {
-      catalogRevision: envelope.revision,
+      catalogRevision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
       inventoryRevision: `sha256:${'4'.repeat(64)}`,
       targetRevision: 'absent',
-      ownerRevision: 'profile:0:tree',
+      ownerRevision: 'managed-plugin:0:tree',
       scopeRevision: `sha256:${'5'.repeat(64)}`,
       profileRevision: 'profile:0:tree',
     },
@@ -108,7 +104,7 @@ async function fixture(
     recoveryExecutable: TEST_RECOVERY_EXECUTABLE_BINDING,
     authorizedAtMs: 2,
   }
-  return { root, plan, authorization, catalog: { envelope, keyIds: ['fixture'] } }
+  return { root, plan, authorization }
 }
 
 function fetcher(root: string, implementation: typeof fetch, redirects = 0, hosts: readonly string[] = []): ArtifactFetcher {
@@ -116,7 +112,7 @@ function fetcher(root: string, implementation: typeof fetch, redirects = 0, host
 }
 
 describe('approved artifact acquisition', () => {
-  it('binds authorization, plan, and current catalog before network and caches an exact .tgz', async () => {
+  it('binds consumed authorization and immutable plan before network and caches an exact .tgz', async () => {
     const bytes = Buffer.from('bound archive')
     const value = await fixture(bytes)
     const request = vi.fn<typeof fetch>(async () => new Response(bytes, {
@@ -132,22 +128,9 @@ describe('approved artifact acquisition', () => {
     const mismatches: Array<() => typeof value> = [
       () => ({ ...value, authorization: { ...value.authorization, planHash: `sha256:${'a'.repeat(64)}` } }),
       () => ({ ...value, plan: { ...value.plan, content: { ...value.plan.content, candidateRef: 'plugin:wrong@1' } } }),
-      () => ({ ...value, catalog: { ...value.catalog, envelope: { ...value.catalog.envelope, revision: value.catalog.envelope.revision + 1 } } }),
-      () => {
-        const catalog = structuredClone(value.catalog)
-        catalog.envelope.entries[0]!.artifact.version = 'different'
-        return { ...value, catalog }
-      },
-      () => {
-        const catalog = structuredClone(value.catalog)
-        catalog.envelope.entries[0]!.artifact.integrity = `sha256:${'b'.repeat(64)}`
-        return { ...value, catalog }
-      },
-      () => {
-        const catalog = structuredClone(value.catalog)
-        catalog.envelope.entries[0]!.artifact.acquisitionUrl = 'https://other.example.test/plugin.tgz'
-        return { ...value, catalog }
-      },
+      () => ({ ...value, authorization: { ...value.authorization, artifactRevision: 'different' } }),
+      () => ({ ...value, authorization: { ...value.authorization, artifactIntegrity: `sha256:${'b'.repeat(64)}` } }),
+      () => ({ ...value, authorization: { ...value.authorization, artifactUrl: 'https://other.example.test/plugin.tgz' } }),
     ]
     for (const mutate of mismatches) {
       const network = vi.fn<typeof fetch>()
@@ -163,6 +146,7 @@ describe('approved artifact acquisition', () => {
       operationKind: 'configure',
       externalRuntimeAction: 'none',
       reviewEvidence: testReviewEvidence('plugin', 'configure'),
+      restartRequired: false,
     })
     const noDownload = {
       ...value,
@@ -173,6 +157,7 @@ describe('approved artifact acquisition', () => {
         operationKind: noDownloadPlan.content.operationKind,
         externalRuntimeAction: noDownloadPlan.content.externalRuntimeAction,
         reviewEvidence: noDownloadPlan.content.reviewEvidence,
+        restartRequired: noDownloadPlan.content.restartRequired,
       },
     }
     const connectionPlan = {
@@ -208,8 +193,17 @@ describe('approved artifact acquisition', () => {
 
   it.each([
     'http://downloads.example.test/plugin.tgz',
+    'https://0.0.0.0/plugin.tgz',
     'https://127.0.0.1/plugin.tgz',
+    'https://2130706433/plugin.tgz',
+    'https://192.0.2.1/plugin.tgz',
+    'https://[::1]/plugin.tgz',
+    'https://[fc00::1]/plugin.tgz',
+    'https://[fe80::1]/plugin.tgz',
+    'https://[::ffff:7f00:1]/plugin.tgz',
+    'https://[2001:db8::1]/plugin.tgz',
     'https://localhost/plugin.tgz',
+    'https://localhost./plugin.tgz',
   ])('rejects a forbidden initial URL before network: %s', async (url) => {
     const value = await fixture(Buffer.from('exact plugin archive'), url)
     const network = vi.fn<typeof fetch>()
@@ -265,6 +259,44 @@ describe('approved artifact acquisition', () => {
       const temporary = join(value.root, 'artifacts', 'temporary')
       await expect(readdir(temporary)).resolves.toEqual([])
     }
+  })
+
+  it.each([
+    'https://[::1]/redirected.tgz',
+    'https://[::ffff:7f00:1]/redirected.tgz',
+    'https://127.0.0.1/redirected.tgz',
+    'https://localhost./redirected.tgz',
+  ])('rejects a forbidden redirect URL before a second request: %s', async (location) => {
+    const bytes = Buffer.from('forbidden redirect')
+    const value = await fixture(bytes)
+    const request = vi.fn<typeof fetch>(async () => new Response(null, {
+      status: 302,
+      headers: { location },
+    }))
+    await expect(fetcher(value.root, request, 1, ['localhost', 'localhost.'])
+      .fetch(value, new AbortController().signal)).rejects.toThrow(/HTTPS acquisition policy/)
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('follows one admitted GitHub Release asset redirect and verifies the exact bytes', async () => {
+    const bytes = Buffer.from('github release asset')
+    const value = await fixture(bytes, 'https://github.com/example/plugin/releases/download/v1/plugin.tgz')
+    const request = vi.fn<typeof fetch>(async (url) => {
+      if (url === value.plan.content.artifactUrl) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://release-assets.githubusercontent.com/release/plugin.tgz?signature=fixed' },
+        })
+      }
+      return new Response(bytes, { status: 200 })
+    })
+    await expect(fetcher(value.root, request, 1, ['release-assets.githubusercontent.com'])
+      .fetch(value, new AbortController().signal)).resolves.toMatchObject({
+        sizeBytes: bytes.byteLength,
+        integrity: value.plan.content.artifactIntegrity,
+        finalUrl: 'https://release-assets.githubusercontent.com/release/plugin.tgz?signature=fixed',
+      })
+    expect(request).toHaveBeenCalledTimes(2)
   })
 
   it('propagates cancellation without promoting a partial artifact', async () => {

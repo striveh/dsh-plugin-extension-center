@@ -8,7 +8,12 @@ import { HOST_RPC_PROTOCOL_VERSION } from './rpc-contract.ts';
 import type { IntentPlanService } from './intent-plan-service.ts';
 import { HostInventoryService } from './inventory-service.ts';
 declare const MODALITIES: readonly ["audio", "file", "image", "structured-data", "text", "video"];
-declare const ACCESS: readonly ["filesystem-read", "filesystem-write", "network", "subprocess"];
+declare const DATA_ACCESS: readonly ["filesystem-read", "filesystem-write", "network", "subprocess"];
+declare const AUTHORITY: readonly ["credentials", "filesystem-read", "filesystem-write", "model-context", "network", "subprocess"];
+/** Package-scoped model tool that resolves current or admitted capabilities. */
+export declare const EXTENSION_CENTER_RESOLVE_TOOL_NAME = "extension_center_resolve";
+/** Package-scoped model tool that creates a reviewable acquisition request. */
+export declare const EXTENSION_CENTER_REQUEST_TOOL_NAME = "extension_center_request_acquisition";
 /** Strict model input for local existing-first capability retrieval. */
 export interface ModelCapabilityNeed {
     readonly outcomeTags: readonly string[];
@@ -16,8 +21,8 @@ export interface ModelCapabilityNeed {
     readonly outputModalities: readonly (typeof MODALITIES)[number][];
     readonly scopeKey: 'profile:web' | 'user' | 'project';
     readonly profileId: string;
-    readonly requiredDataAccess: readonly (typeof ACCESS)[number][];
-    readonly maximumAuthority: readonly (typeof ACCESS)[number][];
+    readonly requiredDataAccess: readonly (typeof DATA_ACCESS)[number][];
+    readonly maximumAuthority: readonly (typeof AUTHORITY)[number][];
 }
 /** Safe, prose-free result returned to the model. */
 export interface ModelCapabilityResolution extends TaskAttemptResolutionResponse {
@@ -52,6 +57,8 @@ export declare class CapabilityAcquisitionService {
     private readonly taskAttempts;
     private readonly volatileResolutions;
     private taskAttemptInitialization;
+    private continuationReconciliationRequested;
+    private continuationReconciliation;
     constructor(state: CenterStateStore, inventory: HostInventoryService, intentPlans: IntentPlanService, plans: FilePlanStore, operations: FileOperationStore, owners: HostOwners, catalog: () => VerifiedCatalog, ttlMs?: number, taskAttempts?: FileTaskAttemptStore);
     /** Resolve current capabilities first, then the verified local catalog without exposing catalog prose. */
     resolve(value: unknown, agent: unknown, signal: AbortSignal): Promise<ModelCapabilityResolution>;
@@ -88,6 +95,10 @@ export declare class CapabilityAcquisitionService {
     /** Project operation progress without using it as the task's terminal outcome. */
     recordLifecycleResult(planHash: string, status: 'committed' | 'failed' | 'recovery-required' | 'restart-required' | 'rolled-back'): Promise<void>;
     private ensureTaskAttempts;
+    private scheduleTaskContinuationReconciliation;
+    private reconcileTaskContinuations;
+    private runTaskContinuationReconciliation;
+    private observeAcquisitionContinuationClaim;
     private agentForAttempt;
     private modelProjection;
     private projectAttempt;

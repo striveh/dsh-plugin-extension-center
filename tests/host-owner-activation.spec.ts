@@ -1,43 +1,63 @@
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+// @vitest-environment node
+
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EXTENSION_CENTER_RPC_CHANNEL } from '../src/catalog-contract.ts'
-import type { HostOwnerDefinitions } from '../src/host/index.ts'
-import { OperationRunner } from '../src/service/operation-runner.ts'
-
-const recoveryState = vi.hoisted((): {
-  invocations: number
-  mutationRoot: string
-  pending: Promise<void>
-  signals: AbortSignal[]
-} => ({
-  invocations: 0,
-  mutationRoot: '',
-  pending: Promise.resolve(),
-  signals: [],
-}))
 
 vi.mock('../src/recovery/install.ts', () => ({
-  installPackagedRecoveryExecutable: async (root: string, hostHome: string) => {
-    return Object.freeze({
+  installPackagedRecoveryExecutable: async (root: string) => Object.freeze({
+    schemaVersion: 5,
+    executablePath: join(root, 'recovery', 'break-glass.mjs'),
+    executableSha256: `sha256:${'1'.repeat(64)}`,
+    centerRoot: root,
+    packageVersion: '0.0.0-development',
+    platform: 'darwin',
+    arch: 'arm64',
+    officialDsh: {
       schemaVersion: 2,
-      executablePath: join(root, 'recovery', 'break-glass.mjs'),
-      executableSha256: `sha256:${'1'.repeat(64)}`,
-      hostCliPath: join(root, 'host', 'dsh.js'),
-      hostCliSha256: `sha256:${'2'.repeat(64)}`,
-      hostHome,
-      packageVersion: '0.0.0-development',
-      platform: 'darwin',
-      arch: 'arm64',
-    })
-  },
+      packageName: '@deepseek-ai/dsh',
+      packageVersion: '0.1.1-rc.2',
+      packageRoot: root,
+      packageTreeSha256: `sha256:${'2'.repeat(64)}`,
+      productionDependencies: [],
+      entrypointPath: join(root, 'dsh.js'),
+      entrypointSha256: `sha256:${'3'.repeat(64)}`,
+      hostHome: root,
+      timeoutMs: 120_000,
+      node: {
+        schemaVersion: 1,
+        executablePath: process.execPath,
+        executableSha256: `sha256:${'4'.repeat(64)}`,
+        version: process.version,
+      },
+      supervisorPath: join(root, 'recovery', 'supervisor.mjs'),
+      supervisorSha256: `sha256:${'5'.repeat(64)}`,
+      pnpm: {
+        schemaVersion: 1,
+        packageName: 'pnpm',
+        packageVersion: '11.7.0',
+        registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+        packageRoot: join(root, 'recovery', 'toolchains', 'fixture', 'pnpm'),
+        packageTreeSha256: `sha256:${'6'.repeat(64)}`,
+        entrypointPath: join(root, 'recovery', 'toolchains', 'fixture', 'pnpm', 'bin', 'pnpm.mjs'),
+        entrypointSha256: `sha256:${'7'.repeat(64)}`,
+        shimPath: join(root, 'recovery', 'toolchains', 'fixture', 'bin', 'pnpm'),
+        shimSha256: `sha256:${'8'.repeat(64)}`,
+        shellPath: '/bin/sh',
+        shellSha256: `sha256:${'9'.repeat(64)}`,
+        runtimeRoot: join(root, 'recovery', 'toolchains', 'fixture', 'runtime'),
+      },
+    },
+  }),
 }))
 
-const { applyWithHostOwnerDefinitions } = await import('../src/host-plugin.ts')
-
+const { apply } = await import('../src/host-plugin.ts')
+const { ManagedPluginOwner, OfficialProfileAmbiguityError } = await import('../src/internal/plugin/index.ts')
+const { InternalTaskContinuationOwner } = await import('../src/internal/continuation/index.ts')
 const roots: string[] = []
 
 afterEach(async () => {
@@ -74,77 +94,21 @@ class TestConnection extends Service {
   }
 }
 
-class TestProfileTransactions extends Service {
-  readonly protocolVersion = 1 as const
-
-  constructor(ctx: Context) {
-    super(ctx, 'profileTransactions')
-  }
-
-  async snapshot() { return {} }
-  async stage() { return {} }
-  async commit() { return {} }
-  async abort() { return false }
-  async restoreLastGood() { return {} }
-  async getRestoreReceipt() { return null }
-  async acknowledgeBoot() { return {} }
-  async list() { return {} }
-}
-
-class TestMcpConnections extends Service {
-  readonly protocolVersion = 1 as const
-
-  constructor(ctx: Context) {
-    super(ctx, 'mcpConnections')
-  }
-
-  snapshot() { return { revision: 0, connections: [], removed: [] } }
-  get() { return undefined }
-  getRemoved() { return undefined }
-  async configure() { return {} }
-  async enable() { return {} }
-  async disable() { return {} }
-  async update() { return {} }
-  async remove() { return {} }
-  async restore() { return {} }
-  async purge() { return {} }
-}
-
-class TestTaskContinuations extends Service {
-  readonly protocolVersion = 1 as const
-  readonly verifiers = new Set<unknown>()
-
-  constructor(ctx: Context) {
-    super(ctx, 'taskContinuations')
-  }
-
-  async create() { return {} }
-  async reserve() { return {} }
-  async get() { return {} }
-  async list() { return [] }
-  async cancel() { return false }
-  async supersede() { return false }
-  registerVerifier(verifier: unknown): () => void {
-    this.verifiers.add(verifier)
-    return () => { this.verifiers.delete(verifier) }
-  }
-}
-
 class TestSkills extends Service {
   readonly providers = new Set<unknown>()
-  registrationCount = 0
-  disposalCount = 0
+  registrations = 0
+  disposals = 0
 
   constructor(ctx: Context) {
     super(ctx, 'skills')
   }
 
   registerProvider(create: (control: { signal: AbortSignal; invalidate(): void }) => unknown): () => void {
-    this.registrationCount += 1
+    this.registrations += 1
     const provider = create({ signal: new AbortController().signal, invalidate() {} })
     this.providers.add(provider)
     return () => {
-      this.disposalCount += 1
+      this.disposals += 1
       this.providers.delete(provider)
     }
   }
@@ -156,40 +120,63 @@ class TestSkills extends Service {
 
 class TestTools extends Service {
   readonly definitions = new Set<unknown>()
-  readonly instanceId = Symbol('TestTools owner')
-  registrationCount = 0
-  disposalCount = 0
 
   constructor(ctx: Context) {
     super(ctx, 'tools')
   }
 
   register(definition: unknown): () => void {
-    this.registrationCount += 1
-    this.definitions.add(definition)
-    return () => {
-      this.disposalCount += 1
-      this.definitions.delete(definition)
+    const name = typeof definition === 'object' && definition !== null
+      ? (definition as Readonly<{ name?: unknown }>).name
+      : undefined
+    if (typeof name !== 'string') throw new Error('test Tool definition has no name')
+    if ([...this.definitions].some(item => (item as Readonly<{ name: string }>).name === name)) {
+      throw new Error(`tool ${JSON.stringify(name)} is already registered`)
     }
+    this.definitions.add(definition)
+    return () => { this.definitions.delete(definition) }
   }
 
   schemas() { return [] }
 }
 
 class TestLoader extends Service {
+  private next = 0
+  private readonly rows = new Map<string, never>()
+
   constructor(ctx: Context) {
     super(ctx, 'loader')
   }
 
-  async await() {}
-  * entries(): Iterable<never> {}
+  async create(): Promise<string> { return `entry:${String(++this.next)}` }
+  async update(): Promise<void> {}
+  async remove(id: string): Promise<void> { this.rows.delete(id) }
+  async await(): Promise<void> {}
+  entries(): Iterable<never> { return this.rows.values() }
 }
 
-const definitions: HostOwnerDefinitions = Object.freeze({
-  profileTransactions: TestProfileTransactions,
-  mcpConnections: TestMcpConnections,
-  taskContinuations: TestTaskContinuations,
-})
+class TestAgents extends Service {
+  constructor(ctx: Context) { super(ctx, 'agents') }
+  get() { return undefined }
+  async resume(): Promise<never> { throw new Error('unexpected continuation resume') }
+  withoutInitiator<T>(operation: () => T): T { return operation() }
+}
+
+class TestAgentPresets extends Service {
+  constructor(ctx: Context) { super(ctx, 'agentPresets') }
+  async mount(): Promise<Readonly<{ id: string }>> { return Object.freeze({ id: 'standard' }) }
+}
+
+class TestSessions extends Service {
+  constructor(ctx: Context) { super(ctx, 'sessions') }
+  get() { return undefined }
+  async flush() { return false }
+}
+
+class TestSessionPersistence extends Service {
+  constructor(ctx: Context) { super(ctx, 'sessionPersistence') }
+  async load(): Promise<never> { throw new Error('unexpected persisted Session load') }
+}
 
 async function capabilities(connection: TestConnection): Promise<Record<string, boolean>> {
   const response = await connection.call('catalog/list', { protocolVersion: 1 })
@@ -197,48 +184,217 @@ async function capabilities(connection: TestConnection): Promise<Record<string, 
   return response.value.hostCapabilities as Record<string, boolean>
 }
 
-async function acquisition(connection: TestConnection): Promise<boolean> {
-  return (await capabilities(connection)).acquisition ?? false
+async function mountOfficialServices(ctx: Context): Promise<Readonly<{
+  connection: TestConnection
+  fibers: readonly Awaited<ReturnType<Context['plugin']>>[]
+}>> {
+  const fibers = [
+    ctx.plugin(TestConnection),
+    ctx.plugin(TestSkills),
+    ctx.plugin(TestTools),
+    ctx.plugin(TestLoader),
+    ctx.plugin(TestAgentPresets),
+    ctx.plugin(TestAgents),
+    ctx.plugin(TestSessions),
+    ctx.plugin(TestSessionPersistence),
+  ]
+  await Promise.all(fibers)
+  return Object.freeze({ connection: ctx.get('connection') as TestConnection, fibers: Object.freeze(fibers) })
 }
 
-async function waitForAcquisition(connection: TestConnection, expected: boolean): Promise<void> {
-  await vi.waitFor(async () => {
-    expect(await acquisition(connection)).toBe(expected)
-  }, { timeout: 2_000, interval: 5 })
-}
+describe('independent Center owner activation', () => {
+  it('uses package-scoped acquisition Tool names beside the public resolver Tool', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-owner-tool-coexistence-'))
+    roots.push(root)
+    const ctx = new Context()
+    const mounted = await mountOfficialServices(ctx)
+    const tools = ctx.get('tools') as TestTools
+    const disposeResolver = tools.register({ name: 'capability_resolve' })
+    const centerFiber = ctx.plugin({
+      name: 'assembled-extension-center-tool-coexistence',
+      inject: ['connection'],
+      apply: (scope: Context) => apply(scope, { root }),
+    })
 
-async function expectWriteAvailability(connection: TestConnection, available: boolean): Promise<void> {
-  const response = await connection.call('operation/recover', {
-    protocolVersion: 1,
-    operationId: 'operation:owner-generation-probe',
+    await expect(centerFiber).resolves.toBeDefined()
+    await vi.waitFor(async () => {
+      expect((await capabilities(mounted.connection)).acquisition).toBe(true)
+    }, { timeout: 2_000, interval: 10 })
+    expect([...tools.definitions].map(item => (item as Readonly<{ name: string }>).name).sort()).toEqual([
+      'capability_resolve',
+      'extension_center_request_acquisition',
+      'extension_center_resolve',
+    ])
+
+    await centerFiber.dispose()
+    expect([...tools.definitions]).toEqual([{ name: 'capability_resolve' }])
+    disposeResolver()
+    await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
   })
-  expect(response).toMatchObject({
-    ok: false,
-    error: {
-      code: 'bad-request',
-      message: available
-        ? 'operation is not awaiting explicit recovery'
-        : 'Extension Center writes are unavailable because a required Host capability is absent',
-    },
+
+  it('activates recovery RPC while official Profile ambiguity keeps new Plugin planning fail-closed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-owner-ambiguity-'))
+    roots.push(root)
+    const ctx = new Context()
+    const mounted = await mountOfficialServices(ctx)
+    const initialize = vi.spyOn(ManagedPluginOwner.prototype, 'initialize')
+      .mockRejectedValue(new OfficialProfileAmbiguityError('simulated official Profile ambiguity'))
+    const centerFiber = ctx.plugin({
+      name: 'assembled-extension-center-ambiguity',
+      inject: ['connection'],
+      apply: (scope: Context) => apply(scope, { root }),
+    })
+
+    await expect(centerFiber).resolves.toBeDefined()
+    expect(mounted.connection.registered()).toBe(true)
+    await vi.waitFor(async () => {
+      expect((await capabilities(mounted.connection)).acquisition).toBe(true)
+    }, { timeout: 2_000, interval: 10 })
+    await expect(mounted.connection.call('operation/recover', {
+      protocolVersion: 1,
+      operationId: 'operation:profile-ambiguity',
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { message: 'operation is not awaiting explicit recovery' },
+    })
+    await expect(mounted.connection.call('intent/preview', {
+      protocolVersion: 1,
+      origin: 'store',
+      candidateRef: 'plugin:dsh-capability-resolver@0.1.0',
+      operationKind: 'install',
+      scopeKey: 'profile:web',
+      profileId: 'web',
+      continuationId: null,
+      targetKey: null,
+      configuration: {},
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { message: 'Extension Center operation failed' },
+    })
+    expect(initialize.mock.calls.length).toBeGreaterThanOrEqual(2)
+
+    await centerFiber.dispose()
+    await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
   })
-}
 
-async function settle(fibers: readonly (Fiber & PromiseLike<Fiber>)[]): Promise<void> {
-  const settlements = await Promise.allSettled(fibers.map(fiber => fiber.await()))
-  expect(settlements.every(settlement => settlement.status === 'fulfilled')).toBe(true)
-}
+  it('keeps lifecycle RPC fail-closed after a deferred Plugin initialization failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-owner-initialize-failure-'))
+    roots.push(root)
+    const ctx = new Context()
+    const mounted = await mountOfficialServices(ctx)
+    const initialize = vi.spyOn(ManagedPluginOwner.prototype, 'initialize')
+      .mockRejectedValue(new Error('simulated owner corruption'))
+    const centerFiber = ctx.plugin({
+      name: 'assembled-extension-center-failure',
+      inject: ['connection'],
+      apply: (scope: Context) => apply(scope, { root }),
+    })
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
-  }
-}
+    await expect(centerFiber).resolves.toBeDefined()
+    await vi.waitFor(() => { expect(initialize).toHaveBeenCalled() }, { timeout: 2_000, interval: 10 })
+    expect(mounted.connection.registered()).toBe(true)
+    await expect(mounted.connection.call('catalog/list', { protocolVersion: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: { hostCapabilities: { acquisition: false } },
+    })
+    await expect(mounted.connection.call('operation/recover', {
+      protocolVersion: 1,
+      operationId: 'operation:owner-corruption',
+    })).resolves.toMatchObject({
+      ok: false,
+      error: { message: 'Extension Center lifecycle owners are not active' },
+    })
+    await centerFiber.dispose()
+    await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
+  })
 
-describe('dynamic writable Host owner activation', () => {
-  it('keeps read RPC live, rejects a stale recovery generation, withdraws on loss, and tears down with the Center', async () => {
+  it('returns its Loader callback before deferred Plugin recovery settles', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-owner-deferred-startup-'))
+    roots.push(root)
+    const ctx = new Context()
+    const mounted = await mountOfficialServices(ctx)
+    let releaseInitialization!: () => void
+    const initialization = new Promise<void>((resolve) => { releaseInitialization = resolve })
+    const initialize = vi.spyOn(ManagedPluginOwner.prototype, 'initialize').mockReturnValue(initialization)
+    const centerFiber = ctx.plugin({
+      name: 'assembled-extension-center-deferred-startup',
+      inject: ['connection'],
+      apply: (scope: Context) => apply(scope, { root }),
+    })
+    let settledBeforeRecovery = false
+    const centerSettlement = Promise.resolve(centerFiber).then(() => { settledBeforeRecovery = true })
+
+    try {
+      await vi.waitFor(() => { expect(initialize).toHaveBeenCalled() }, { timeout: 2_000, interval: 10 })
+      await vi.waitFor(() => { expect(settledBeforeRecovery).toBe(true) }, { timeout: 2_000, interval: 10 })
+      expect(mounted.connection.registered()).toBe(true)
+      await expect(mounted.connection.call('catalog/list', { protocolVersion: 1 })).resolves.toMatchObject({
+        ok: true,
+        value: { hostCapabilities: { acquisition: false } },
+      })
+      await expect(mounted.connection.call('operation/recover', {
+        protocolVersion: 1,
+        operationId: 'operation:startup-pending',
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { message: 'Extension Center lifecycle owners are not active' },
+      })
+      releaseInitialization()
+      await vi.waitFor(async () => {
+        expect((await capabilities(mounted.connection)).acquisition).toBe(true)
+      }, { timeout: 2_000, interval: 10 })
+    } finally {
+      releaseInitialization()
+      await centerSettlement
+      await centerFiber.dispose()
+      await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
+    }
+  })
+
+  it('disposes the continuation owner concurrently with service withdrawal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-owner-continuation-teardown-'))
+    roots.push(root)
+    const ctx = new Context()
+    const mounted = await mountOfficialServices(ctx)
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const originalReconcile = InternalTaskContinuationOwner.prototype.reconcile
+    let reconciliations = 0
+    vi.spyOn(InternalTaskContinuationOwner.prototype, 'reconcile').mockImplementation(function (signal?: AbortSignal) {
+      reconciliations += 1
+      if (reconciliations === 1) return originalReconcile.call(this, signal)
+      entered.resolve()
+      return release.promise
+    })
+    const originalDispose = InternalTaskContinuationOwner.prototype.dispose
+    const dispose = vi.spyOn(InternalTaskContinuationOwner.prototype, 'dispose').mockImplementation(function () {
+      release.resolve()
+      return originalDispose.call(this)
+    })
+    const centerFiber = ctx.plugin({
+      name: 'assembled-extension-center-continuation-teardown',
+      inject: ['connection'],
+      apply: (scope: Context) => apply(scope, { root }),
+    })
+
+    try {
+      await centerFiber
+      await entered.promise
+      const outcome = await Promise.race([
+        centerFiber.dispose().then(() => 'settled' as const),
+        new Promise<'timed-out'>(resolve => { setTimeout(() => { resolve('timed-out') }, 500) }),
+      ])
+      expect(outcome).toBe('settled')
+      expect(dispose).toHaveBeenCalledTimes(1)
+      expect(ctx.get('taskContinuations')).toBeUndefined()
+    } finally {
+      release.resolve()
+      await centerFiber.dispose()
+      await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
+    }
+  })
+
+  it('activates only from internal owners plus official generic services and withdraws on dependency loss', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-owner-activation-'))
     roots.push(root)
     const ctx = new Context()
@@ -248,228 +404,86 @@ describe('dynamic writable Host owner activation', () => {
     const centerFiber = ctx.plugin({
       name: 'assembled-extension-center',
       inject: ['connection'],
-      apply: (scope: Context) => applyWithHostOwnerDefinitions(scope, { root }, definitions),
+      apply: (scope: Context) => apply(scope, { root }),
     })
     await centerFiber
-
-    expect(connectionFiber.state).toBe(2)
-    expect(centerFiber.state).toBe(2)
     expect(connection.registered()).toBe(true)
-    await waitForAcquisition(connection, false)
-
-    const continuationGate = Promise.withResolvers<void>()
-    const staleRecoveryGate = Promise.withResolvers<void>()
-    const currentRecoveryGate = Promise.withResolvers<void>()
-    recoveryState.invocations = 0
-    recoveryState.mutationRoot = root
-    recoveryState.pending = staleRecoveryGate.promise
-    recoveryState.signals = []
-    vi.spyOn(OperationRunner.prototype, 'recover').mockImplementation(async (signal) => {
-      const invocation = ++recoveryState.invocations
-      const pending = recoveryState.pending
-      recoveryState.signals.push(signal)
-      await pending
-      if (!signal.aborted) {
-        await writeFile(join(recoveryState.mutationRoot, `recovery-generation-${invocation}.mutation`), 'mutated\n')
-      }
+    await expect(connection.call('catalog/list', { protocolVersion: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: { hostCapabilities: { acquisition: false } },
     })
-    const profileFiber = ctx.plugin(TestProfileTransactions)
-    const mcpFiber = ctx.plugin(TestMcpConnections)
+
     const skillsFiber = ctx.plugin(TestSkills)
     const toolsFiber = ctx.plugin(TestTools)
     const loaderFiber = ctx.plugin(TestLoader)
-    const continuationFiber = ctx.plugin(async (scope: Context) => {
-      await continuationGate.promise
-      new TestTaskContinuations(scope)
-    })
-    const ownerSettlements = settle([
-      profileFiber,
-      mcpFiber,
+    const agentPresetsFiber = ctx.plugin(TestAgentPresets)
+    const agentsFiber = ctx.plugin(TestAgents)
+    const sessionsFiber = ctx.plugin(TestSessions)
+    const persistenceFiber = ctx.plugin(TestSessionPersistence)
+    await Promise.all([
       skillsFiber,
       toolsFiber,
       loaderFiber,
-      continuationFiber,
+      agentPresetsFiber,
+      agentsFiber,
+      sessionsFiber,
+      persistenceFiber,
     ])
-    await settle([profileFiber, mcpFiber, skillsFiber, toolsFiber, loaderFiber])
-    await waitForAcquisition(connection, false)
-    await expect(capabilities(connection)).resolves.toMatchObject({
-      profileTransaction: true,
-      dynamicMcpConnection: true,
-      durableContinuation: false,
-      skillRegistry: true,
-      toolRegistry: true,
-      loaderObservation: true,
-      acquisition: false,
-    })
-    continuationGate.resolve()
-    await ownerSettlements
-    await expect(capabilities(connection)).resolves.toMatchObject({
-      profileTransaction: true,
-      dynamicMcpConnection: true,
-      durableContinuation: true,
-      skillRegistry: true,
-      toolRegistry: true,
-      loaderObservation: true,
-      acquisition: false,
-    })
-    await expect(connection.call('inventory/list', {
-      protocolVersion: 1,
-      scopeKey: 'profile:web',
-      profileId: 'web',
-    })).resolves.toMatchObject({
-      ok: true,
-      value: {
-        hostCapabilities: { acquisition: false },
-        inventory: { complete: false },
-      },
-    })
-    expect(recoveryState.invocations).toBe(1)
-    expect(recoveryState.signals).toHaveLength(1)
-    expect(recoveryState.signals[0]?.aborted).toBe(false)
-    await expectWriteAvailability(connection, false)
 
-    const staleTools = ctx.get('tools') as TestTools
-    recoveryState.pending = currentRecoveryGate.promise
-    const staleToolsDisposal = toolsFiber.dispose()
-    await vi.waitFor(() => {
-      expect(ctx.get('tools')).toBeUndefined()
-    }, { timeout: 2_000, interval: 5 })
-    await vi.waitFor(() => {
-      expect(recoveryState.signals[0]?.aborted).toBe(true)
-    }, { timeout: 2_000, interval: 5 })
-    const replacementToolsFiber = ctx.plugin(TestTools)
-    await replacementToolsFiber
-    const currentTools = ctx.get('tools') as TestTools
-    expect(currentTools.instanceId).not.toBe(staleTools.instanceId)
-    await expect(capabilities(connection)).resolves.toMatchObject({
-      profileTransaction: true,
-      dynamicMcpConnection: true,
-      durableContinuation: true,
-      skillRegistry: true,
-      toolRegistry: true,
-      loaderObservation: true,
-      acquisition: false,
-    })
-    expect(recoveryState.invocations).toBe(1)
-
-    staleRecoveryGate.resolve()
-    await vi.waitFor(() => {
-      expect(recoveryState.invocations).toBe(2)
-    }, { timeout: 2_000, interval: 5 })
-    expect(recoveryState.signals).toHaveLength(2)
-    expect(recoveryState.signals[1]?.aborted).toBe(false)
-    await expect(exists(join(root, 'recovery-generation-1.mutation'))).resolves.toBe(false)
-    await waitForAcquisition(connection, false)
-    await expectWriteAvailability(connection, false)
-    expect(staleTools.registrationCount).toBe(0)
-    expect(staleTools.definitions.size).toBe(0)
-    expect(currentTools.registrationCount).toBe(0)
-    expect(currentTools.definitions.size).toBe(0)
-
-    currentRecoveryGate.resolve()
-    await waitForAcquisition(connection, true)
-    await expect(exists(join(root, 'recovery-generation-2.mutation'))).resolves.toBe(true)
-    await staleToolsDisposal
-    await expectWriteAvailability(connection, true)
-    await expect(connection.call('inventory/list', {
-      protocolVersion: 1,
-      scopeKey: 'profile:web',
-      profileId: 'web',
-    })).resolves.toMatchObject({
-      ok: true,
-      value: {
-        hostCapabilities: { acquisition: true },
-        inventory: { complete: true },
-      },
-    })
-
-    const continuations = ctx.get('taskContinuations') as TestTaskContinuations
+    await vi.waitFor(async () => {
+      expect(await capabilities(connection)).toEqual({
+        managedPluginLifecycle: true,
+        dynamicMcpConnection: true,
+        durableContinuation: true,
+        skillRegistry: true,
+        toolRegistry: true,
+        loaderMutation: true,
+        acquisition: true,
+        reason: null,
+      })
+    }, { timeout: 2_000, interval: 10 })
+    expect(ctx.get('profileTransactions')).toBeUndefined()
+    expect(ctx.get('mcpConnections')).toBeDefined()
+    expect(ctx.get('taskContinuations')).toBeDefined()
     const skills = ctx.get('skills') as TestSkills
     const tools = ctx.get('tools') as TestTools
-    expect(tools.instanceId).toBe(currentTools.instanceId)
-    expect(continuations.verifiers.size).toBe(2)
     expect(skills.providers.size).toBe(1)
     expect(tools.definitions.size).toBe(2)
-    expect(tools.registrationCount).toBe(2)
-    expect(staleTools.registrationCount).toBe(0)
 
-    const lifecycleGate = Promise.withResolvers<void>()
-    const lifecycleStarted = Promise.withResolvers<void>()
-    const lifecycleMutation = join(root, 'retired-lifecycle.mutation')
-    let lifecycleSignal: AbortSignal | undefined
-    vi.spyOn(OperationRunner.prototype, 'recoverOperation').mockImplementation(async (operationId, signal) => {
-      lifecycleSignal = signal
-      lifecycleStarted.resolve()
-      await lifecycleGate.promise
-      if (!signal.aborted) await writeFile(lifecycleMutation, 'mutated\n')
-      return {
+    await toolsFiber.dispose()
+    await vi.waitFor(async () => {
+      await expect(connection.call('operation/recover', {
         protocolVersion: 1,
-        operationId,
-        status: 'committed',
-        receipt: null,
-      }
-    })
-    const lifecycleCall = connection.call('operation/recover', {
-      protocolVersion: 1,
-      operationId: 'operation:owner-generation-in-flight',
-    })
-    await lifecycleStarted.promise
-    const mcpDisposal = mcpFiber.dispose()
-    let mcpDisposed = false
-    void mcpDisposal.then(() => { mcpDisposed = true })
-    await waitForAcquisition(connection, false)
-    expect(lifecycleSignal?.aborted).toBe(true)
-    await expect(capabilities(connection)).resolves.toMatchObject({
-      profileTransaction: true,
-      dynamicMcpConnection: false,
-      durableContinuation: true,
-      skillRegistry: true,
-      toolRegistry: true,
-      loaderObservation: true,
-      acquisition: false,
-    })
-    expect(continuations.verifiers.size).toBe(2)
-    expect(skills.providers.size).toBe(1)
-    expect(skills.disposalCount).toBe(1)
-    expect(tools.definitions.size).toBe(2)
-    expect(tools.disposalCount).toBe(0)
-    expect(mcpDisposed).toBe(false)
+        operationId: 'operation:dependency-loss',
+      })).resolves.toMatchObject({
+        ok: false,
+        error: { message: 'Extension Center lifecycle owners are not active' },
+      })
+    }, { timeout: 2_000, interval: 10 })
+    expect(skills.providers.size).toBe(0)
 
-    const replacementMcpFiber = ctx.plugin(TestMcpConnections)
-    await replacementMcpFiber
-    expect(recoveryState.invocations).toBe(2)
-    await expect(exists(lifecycleMutation)).resolves.toBe(false)
-    lifecycleGate.resolve()
-    await expect(lifecycleCall).resolves.toMatchObject({
-      ok: false,
-      error: { code: 'cancelled' },
-    })
-    await mcpDisposal
-    expect(mcpDisposed).toBe(true)
-    await waitForAcquisition(connection, true)
-    expect(recoveryState.invocations).toBe(3)
-    await expect(exists(lifecycleMutation)).resolves.toBe(false)
-    expect(continuations.verifiers.size).toBe(2)
+    const replacementToolsFiber = ctx.plugin(TestTools)
+    await replacementToolsFiber
+    await vi.waitFor(async () => {
+      expect((await capabilities(connection)).acquisition).toBe(true)
+    }, { timeout: 2_000, interval: 10 })
     expect(skills.providers.size).toBe(1)
-    expect(skills.disposalCount).toBe(2)
-    expect(tools.definitions.size).toBe(2)
-    expect(tools.disposalCount).toBe(2)
+    expect((ctx.get('tools') as TestTools).definitions.size).toBe(2)
 
     await centerFiber.dispose()
     expect(connection.registered()).toBe(false)
-    expect(continuations.verifiers.size).toBe(0)
     expect(skills.providers.size).toBe(0)
-    expect(skills.disposalCount).toBe(3)
-    expect(tools.definitions.size).toBe(0)
-    expect(tools.disposalCount).toBe(4)
+    expect(ctx.get('mcpConnections')).toBeUndefined()
+    expect(ctx.get('taskContinuations')).toBeUndefined()
 
     await Promise.all([
-      replacementMcpFiber.dispose(),
       replacementToolsFiber.dispose(),
-      continuationFiber.dispose(),
+      persistenceFiber.dispose(),
+      sessionsFiber.dispose(),
+      agentsFiber.dispose(),
+      agentPresetsFiber.dispose(),
       loaderFiber.dispose(),
       skillsFiber.dispose(),
-      profileFiber.dispose(),
       connectionFiber.dispose(),
     ])
   })

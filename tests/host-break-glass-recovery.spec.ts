@@ -1,100 +1,273 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
-import { installRecoveryExecutable } from '../src/recovery/install.ts'
+import { canonicalJson, canonicalSha256 } from '../src/domain/index.ts'
+import { captureCurrentProcessIdentity, type ManagedTargetRecord, type ManagedVersion } from '../src/host/index.ts'
 import {
   createOperationJournal,
   transitionOperation,
   type OperationAuthorization,
   type OperationJournal,
 } from '../src/operations/index.ts'
+import { managedStateDigest } from '../src/providers/records.ts'
+import { installRecoveryExecutable } from '../src/recovery/install.ts'
+import { prepareProfileMetadataCache } from '../src/recovery/profile-metadata-cache.ts'
 import { FileOperationStore } from '../src/storage/operation-store.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
 const roots: string[] = []
 const OPERATION_ID = 'operation:break-glass:plugin:1'
-const RECOVERY_MUTATION_ID = `extension-center-recovery-${createHash('sha256').update(OPERATION_ID).digest('hex')}`
-const TARGET_KEY = 'plugin:web:profile:web:dsh-example'
-const CANDIDATE_GENERATION = '11111111-1111-4111-8111-111111111111'
-const RECOVERY_GENERATION = '22222222-2222-4222-8222-222222222222'
+const PROFILE_ID = 'web'
+const SCOPE_KEY = 'profile:web'
+const EXTENSION_ID = 'dsh-example'
+const TARGET_KEY = `plugin:${PROFILE_ID}:${SCOPE_KEY}:${EXTENSION_ID}`
 
-type HostBehavior = 'restore' | 'noop-restore' | 'old-rc2' | 'lost-restore-output' | 'lost-restore-output-before-ack'
-
-interface JsonRecord {
-  readonly [key: string]: unknown
+interface Fixture {
+  readonly root: string
+  readonly cliPath: string
+  readonly dshEntrypoint: string
+  readonly dshPackageRoot: string
+  readonly officialCliLog: string
+  readonly hostHome: string
+  readonly profileStore: string
+  readonly profilePath: string
+  readonly operationDirectory: string
+  readonly managedPath: string
+  readonly sidecarPath: string
+  readonly transactionPath: string
+  readonly before: ManagedTargetRecord | null
 }
 
-interface JournalFixture {
-  readonly root: string
-  readonly hostHome: string
-  readonly ambientHostHome: string
-  readonly cliPath: string
-  readonly hostCliPath: string
-  readonly callsPath: string
-  readonly statePath: string
-  readonly operationDirectory: string
-  readonly planEvidence: JsonRecord
-  readonly beforeDigest: string
-  readonly events: JsonRecord[]
+interface RetainedVersion {
+  readonly managed: ManagedVersion
+  readonly artifactPath: string
 }
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number') {
-    return JSON.stringify(value)
+function storageKey(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function fileSha256(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+}
+
+async function retainedVersion(root: string, name: string): Promise<RetainedVersion> {
+  const manifest = {
+    name: EXTENSION_ID,
+    version: name,
+    dsh: { bundle: { patch: 'cordis.yml' } },
   }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
-}
-
-function jsonDigest(value: unknown): string {
-  return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`
-}
-
-function bytesDigest(value: string | Buffer): string {
-  return `sha256:${createHash('sha256').update(value).digest('hex')}`
-}
-
-function event(
-  sequence: number,
-  previousDigest: string | null,
-  entry: JsonRecord,
-  atMs = 1_000 + sequence,
-): JsonRecord {
-  const unsigned = {
+  const files = [
+    { path: 'cordis.yml', bytes: Buffer.from(`plugins:\n  example-${name}: {}\n`) },
+    { path: 'package.json', bytes: Buffer.from(`${JSON.stringify(manifest)}\n`) },
+  ].sort((left, right) => left.path.localeCompare(right.path))
+  const artifact = {
+    packageName: EXTENSION_ID,
+    version: name,
+    files: files.map(file => ({ path: file.path, content: file.bytes.toString('base64') })),
+  }
+  const artifactBytes = Buffer.from(`${canonicalJson(artifact)}\n`)
+  const integrity = fileSha256(artifactBytes)
+  const artifactPath = join(root, 'artifacts', `${EXTENSION_ID}-${name}.tgz`)
+  const materialPath = join(root, 'material', 'plugins', storageKey(TARGET_KEY), storageKey(integrity))
+  await mkdir(materialPath, { recursive: true })
+  await mkdir(dirname(artifactPath), { recursive: true })
+  await writeFile(artifactPath, artifactBytes)
+  for (const file of files) await writeFile(join(materialPath, file.path), file.bytes)
+  await writeCanonical(`${materialPath}.owner.json`, {
     schemaVersion: 1,
-    operationId: OPERATION_ID,
     targetKey: TARGET_KEY,
-    sequence,
-    previousDigest,
-    atMs,
-    entry,
+    packageName: EXTENSION_ID,
+    version: name,
+    integrity,
+    artifactPath,
+    artifactSizeBytes: artifactBytes.length,
+    artifactSha256: fileSha256(artifactBytes),
+    manifestDigest: canonicalSha256(manifest),
+    files: files.map(file => ({ path: file.path, sizeBytes: file.bytes.length, sha256: fileSha256(file.bytes) })),
+  })
+  return {
+    artifactPath,
+    managed: {
+      candidateRef: `plugin:${EXTENSION_ID}@${name}`,
+      artifactRevision: name,
+      artifactIntegrity: integrity,
+      materialPath,
+      configuration: { value: name },
+      enabled: true,
+      ownerRevision: `managed-plugin:${name}`,
+      kindState: {
+        packageName: EXTENSION_ID,
+        restartToken: `managed:${name}`,
+        treeDigest: canonicalSha256({ tree: name }),
+        loaderPhase: 'active',
+        consumerObserved: true,
+        restartObserved: true,
+        runtimeEvidence: { entryId: `loader:${name}`, moduleName: EXTENSION_ID, fiberPhase: 'active' },
+      },
+    },
   }
-  return { ...unsigned, digest: jsonDigest(unsigned) }
 }
 
-function phase(from: string, to: string, reason: string | null = null, evidenceDigest: string | null = null): JsonRecord {
-  return { type: 'phase-transition', from, to, evidenceDigest, reason }
+function managed(root: string, revision: number, operationId: string, current: ManagedVersion): ManagedTargetRecord {
+  return {
+    schemaVersion: 1,
+    kind: 'plugin',
+    extensionId: EXTENSION_ID,
+    targetKey: TARGET_KEY,
+    scopeKey: SCOPE_KEY,
+    profileId: PROFILE_ID,
+    revision,
+    lastOperationId: operationId,
+    current,
+    lastGood: null,
+    removed: null,
+    pending: null,
+    updatedAtMs: 1_000 + revision,
+  }
 }
 
-function summary(generation: string, treeDigest: string): JsonRecord {
-  return { generation, treeDigest, mutationId: null, mutation: null }
+function sidecar(record: ManagedTargetRecord) {
+  return {
+    schemaVersion: 1,
+    profileId: PROFILE_ID,
+    packageName: EXTENSION_ID,
+    targetKey: TARGET_KEY,
+    revision: record.revision,
+    lastOperationId: record.lastOperationId,
+    managed: record,
+    loaderEntryId: 'loader:current',
+    loaderName: EXTENSION_ID,
+    restartPending: false,
+    lastGoodMaterialPath: record.lastGood?.materialPath ?? null,
+    tombstoneMaterialPath: record.removed?.materialPath ?? null,
+  }
 }
 
-async function compileStandaloneCli(root: string): Promise<Readonly<{ path: string; source: string }>> {
+async function writeCanonical(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  await writeFile(path, `${canonicalJson(value)}\n`, { mode: 0o600 })
+}
+
+async function createOfficialDshFixture(root: string): Promise<Readonly<{
+  entrypointPath: string
+  packageRoot: string
+  hostHome: string
+  logPath: string
+  storeDir: string
+}>> {
+  const packageRoot = join(root, 'official-host', 'node_modules', '@deepseek-ai', 'dsh')
+  const entrypointPath = join(packageRoot, 'lib', 'bin.js')
+  const hostHome = join(root, 'bound-dsh-home')
+  const logPath = join(root, 'official-cli-invocations.jsonl')
+  const storeDir = join(root, 'profile-store', 'v11')
+  await mkdir(dirname(entrypointPath), { recursive: true })
+  await mkdir(hostHome, { recursive: true })
+  await mkdir(storeDir, { recursive: true })
+  await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify({
+    name: '@deepseek-ai/dsh',
+    version: '0.1.1-rc.2',
+    type: 'module',
+    bin: { dsh: 'lib/bin.js' },
+  })}\n`)
+  await writeFile(entrypointPath, `#!/usr/bin/env node
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join } from 'node:path'
+
+const args = process.argv.slice(2)
+const profileArg = args.find(value => value.startsWith('--profile='))
+const storeIndex = args.lastIndexOf('--store-dir')
+const configuredStore = storeIndex < 0 ? undefined : args[storeIndex + 1]
+if (args[0] !== 'plugin' || profileArg === undefined || !isAbsolute(process.env.DSH_HOME ?? '')
+  || configuredStore === undefined || !isAbsolute(configuredStore)) process.exit(2)
+const storeDir = basename(configuredStore) === 'v11' ? configuredStore : join(configuredStore, 'v11')
+await mkdir(storeDir, { recursive: true })
+await appendFile(${JSON.stringify(logPath)}, JSON.stringify({ argv: args, pnpmStore: process.env.pnpm_config_store_dir }) + '\\n')
+const profileId = profileArg.slice('--profile='.length)
+const actionIndex = args.findIndex(value => value === 'add' || value === 'remove')
+const action = args[actionIndex]
+const operand = args[actionIndex + 1]
+if (actionIndex < 0 || operand === undefined) process.exit(2)
+const profile = join(process.env.DSH_HOME, 'profiles', profileId)
+const manifestPath = join(profile, 'package.json')
+await mkdir(join(profile, 'node_modules'), { recursive: true })
+await writeFile(join(profile, 'node_modules', '.modules.yaml'), JSON.stringify({
+  layoutVersion: 5,
+  nodeLinker: 'hoisted',
+  packageManager: 'pnpm@11.21.0',
+  hoistedLocations: {},
+  registries: { default: 'https://registry.npmjs.org/' },
+  storeDir,
+  virtualStoreDir: '.pnpm',
+}) + '\\n')
+await writeFile(join(profile, 'pnpm-workspace.yaml'), 'packages:\\n  - .\\n\\nnodeLinker: hoisted\\nautoInstallPeers: false\\n')
+let manifest
+try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')) } catch { manifest = { name: 'profile-' + profileId } }
+manifest.dependencies ??= {}
+manifest.dsh ??= {}
+manifest.dsh.profile ??= {}
+manifest.dsh.profile.bundles ??= []
+if (action === 'add') {
+  const archive = JSON.parse(await readFile(operand, 'utf8'))
+  manifest.dependencies[archive.packageName] = 'file:' + operand
+  if (!manifest.dsh.profile.bundles.includes(archive.packageName)) manifest.dsh.profile.bundles.push(archive.packageName)
+  const installed = join(profile, 'node_modules', ...archive.packageName.split('/'))
+  await rm(installed, { recursive: true, force: true })
+  for (const file of archive.files) {
+    const destination = join(installed, ...file.path.split('/'))
+    await mkdir(dirname(destination), { recursive: true })
+    await writeFile(destination, Buffer.from(file.content, 'base64'))
+  }
+} else {
+  delete manifest.dependencies[operand]
+  manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(value => value !== operand)
+  await rm(join(profile, 'node_modules', ...operand.split('/')), { recursive: true, force: true })
+}
+await writeFile(manifestPath, JSON.stringify(manifest) + '\\n')
+await writeFile(join(profile, 'pnpm-lock.yaml'), JSON.stringify({
+  lockfileVersion: '9.0',
+  importers: { '.': { dependencies: Object.fromEntries(Object.entries(manifest.dependencies).map(([name, specifier]) => [name, { specifier, version: specifier }])) } },
+  packages: {},
+  snapshots: {},
+}) + '\\n')
+`, { mode: 0o500 })
+  return {
+    entrypointPath: await realpath(entrypointPath),
+    packageRoot: await realpath(packageRoot),
+    hostHome: await realpath(hostHome),
+    logPath: await realpath(logPath).catch(() => logPath),
+    storeDir: await realpath(storeDir),
+  }
+}
+
+async function runOfficialFixture(entrypoint: string, hostHome: string, arguments_: readonly string[]): Promise<void> {
+  await new Promise<void>((accept, reject) => {
+    const child = spawn(process.execPath, [entrypoint, ...arguments_], {
+      env: { ...process.env, DSH_HOME: hostHome },
+      stdio: 'ignore',
+    })
+    child.once('error', reject)
+    child.once('close', (code, signal) => {
+      if (code === 0 && signal === null) accept()
+      else reject(new Error(`fake official DSH failed: exit=${String(code)} signal=${String(signal)}`))
+    })
+  })
+}
+
+async function compileStandaloneCli(root: string): Promise<string> {
   const source = await readFile(join(process.cwd(), 'src', 'recovery', 'break-glass.ts'), 'utf8')
   const imports = [...source.matchAll(/from '([^']+)'/g)].map(match => match[1])
   expect(imports.length).toBeGreaterThan(0)
   expect(imports.every(specifier => specifier?.startsWith('node:'))).toBe(true)
-  expect(source).not.toContain("from '../index")
+  expect(source).not.toContain("from '../")
   const transpiled = ts.transpileModule(source, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
@@ -104,242 +277,124 @@ async function compileStandaloneCli(root: string): Promise<Readonly<{ path: stri
     reportDiagnostics: true,
     fileName: 'break-glass.ts',
   })
-  const errors = transpiled.diagnostics?.filter(diagnostic => diagnostic.category === ts.DiagnosticCategory.Error) ?? []
-  expect(errors).toEqual([])
-  const path = join(root, 'break-glass.mjs')
-  await writeFile(path, transpiled.outputText, { mode: 0o600 })
-  return { path: await realpath(path), source }
+  expect(transpiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error) ?? []).toEqual([])
+  const path = join(root, 'compiled-break-glass.mjs')
+  await writeFile(path, transpiled.outputText, { mode: 0o500 })
+  return await realpath(path)
 }
 
-async function writeHostCli(root: string, hostHome: string, behavior: HostBehavior): Promise<Readonly<{
-  path: string
-  callsPath: string
-  statePath: string
-}>> {
-  const path = join(root, 'host-cli.mjs')
-  const statePath = join(hostHome, 'host-inventory.json')
-  const callsPath = join(hostHome, 'host-calls.json')
-  const candidateDigest = jsonDigest({ generation: CANDIDATE_GENERATION })
-  const recoveryDigest = jsonDigest({ generation: RECOVERY_GENERATION })
-  const restoreFromRollback = behavior === 'lost-restore-output-before-ack'
-  await writeFile(statePath, `${JSON.stringify({
-    snapshot: {
-      profile: 'web',
-      revision: 7,
-      treeDigest: candidateDigest,
-      effectivePath: join(hostHome, 'profiles', CANDIDATE_GENERATION),
-      activeGeneration: CANDIDATE_GENERATION,
-      lastGoodGeneration: restoreFromRollback ? CANDIDATE_GENERATION : RECOVERY_GENERATION,
-      rollbackGeneration: restoreFromRollback ? RECOVERY_GENERATION : null,
-      bootStatus: restoreFromRollback ? 'verified' : 'pending-restart',
+async function compileStandaloneSupervisor(root: string): Promise<string> {
+  const source = await readFile(join(process.cwd(), 'src', 'recovery', 'supervisor.ts'), 'utf8')
+  const imports = [...source.matchAll(/from '([^']+)'/g)].map(match => match[1])
+  expect(imports.every(specifier => specifier?.startsWith('node:'))).toBe(true)
+  const transpiled = ts.transpileModule(source, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+      verbatimModuleSyntax: true,
     },
-    active: summary(CANDIDATE_GENERATION, candidateDigest),
-    staged: [],
-    recoverable: [summary(RECOVERY_GENERATION, recoveryDigest)],
-  }, null, 2)}\n`)
-  await writeFile(path, `
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-
-const root = process.env.DSH_HOME
-if (root === undefined || root.length === 0) throw new Error('DSH_HOME is required')
-const statePath = join(root, 'host-inventory.json')
-const callsPath = join(root, 'host-calls.json')
-const receiptPath = join(root, 'host-restore-receipt.json')
-const args = process.argv.slice(2)
-const prior = existsSync(callsPath) ? JSON.parse(readFileSync(callsPath, 'utf8')) : []
-prior.push(args)
-writeFileSync(callsPath, JSON.stringify(prior))
-if ((args.length !== 4 && args.length !== 6) || args[0] !== 'plugin' || args[1] !== '--profile' || args[2] !== 'web') {
-  process.stderr.write('unsupported rc2 invocation\\n')
-  process.exitCode = 2
-} else if (args[3] === 'restore-receipt') {
-  if (${JSON.stringify(behavior)} === 'old-rc2') {
-    process.stderr.write('unsupported rc2 operation\\n')
-    process.exitCode = 2
-  } else if (args.length !== 6 || args[4] !== '--mutation-id' || args[5] !== ${JSON.stringify(RECOVERY_MUTATION_ID)}) {
-    process.stderr.write('missing exact restore receipt mutation id\\n')
-    process.exitCode = 2
-  } else {
-    const receipt = existsSync(receiptPath) ? JSON.parse(readFileSync(receiptPath, 'utf8')) : null
-    process.stdout.write(JSON.stringify({
-      profile: 'web',
-      mutationId: args[5],
-      status: receipt === null ? 'not-found' : 'committed',
-      receipt,
-    }, null, 2) + '\\n')
-  }
-} else if (args[3] === 'list') {
-  if (${JSON.stringify(behavior)} === 'old-rc2') {
-    process.stdout.write('Legend: production dependency, optional only, dev only\\n')
-  } else {
-    process.stdout.write(JSON.stringify(JSON.parse(readFileSync(statePath, 'utf8')), null, 2) + '\\n')
-  }
-} else if (args[3] === 'restore') {
-  if (args.length !== 6 || args[4] !== '--mutation-id' || args[5] !== ${JSON.stringify(RECOVERY_MUTATION_ID)}) {
-    process.stderr.write('missing exact restore mutation id\\n')
-    process.exitCode = 2
-  } else {
-  const state = JSON.parse(readFileSync(statePath, 'utf8'))
-  const targetGeneration = state.snapshot.activeGeneration !== state.snapshot.lastGoodGeneration
-    ? state.snapshot.lastGoodGeneration
-    : state.snapshot.rollbackGeneration
-  const target = state.recoverable.find(item => item.generation === targetGeneration)
-  if (target === undefined) {
-    process.stderr.write('no recovery target\\n')
-    process.exitCode = 2
-  } else {
-    if (${JSON.stringify(behavior)} === 'restore' || ${JSON.stringify(behavior)} === 'lost-restore-output'
-      || ${JSON.stringify(behavior)} === 'lost-restore-output-before-ack') {
-      const before = structuredClone(state.snapshot)
-      const priorActive = state.active
-      state.snapshot.revision += 1
-      state.snapshot.activeGeneration = target.generation
-      state.snapshot.treeDigest = target.treeDigest
-      state.snapshot.effectivePath = join(root, 'profiles', target.generation)
-      state.snapshot.bootStatus = target.generation === state.snapshot.lastGoodGeneration ? 'verified' : 'pending-restart'
-      state.active = target
-      state.staged = [...state.staged, priorActive]
-      state.recoverable = []
-      writeFileSync(statePath, JSON.stringify(state, null, 2) + '\\n')
-      writeFileSync(receiptPath, JSON.stringify({
-        mutationId: args[5],
-        status: 'committed',
-        operation: 'restore',
-        before,
-        after: state.snapshot,
-        restartRequired: true,
-      }, null, 2) + '\\n')
-      if (${JSON.stringify(behavior)} === 'lost-restore-output'
-        || ${JSON.stringify(behavior)} === 'lost-restore-output-before-ack') process.kill(process.pid, 'SIGKILL')
-    }
-    process.stdout.write('dsh: restored generation ' + target.generation + '; restart required\\n')
-  }
-  }
-} else {
-  process.stderr.write('unsupported rc2 operation\\n')
-  process.exitCode = 2
-}
-`, { mode: 0o600 })
-  return { path: await realpath(path), callsPath, statePath }
+    reportDiagnostics: true,
+    fileName: 'supervisor.ts',
+  })
+  expect(transpiled.diagnostics?.filter(item => item.category === ts.DiagnosticCategory.Error) ?? []).toEqual([])
+  const path = join(root, 'compiled-supervisor.mjs')
+  await writeFile(path, transpiled.outputText, { mode: 0o500 })
+  return await realpath(path)
 }
 
-function evidence(root: string, recoveryExecutable: JsonRecord): JsonRecord {
-  return {
-    origin: 'store',
-    candidateRef: 'store:dsh-example@2.0.0',
-    extensionKind: 'plugin',
-    extensionId: 'dsh-example',
-    artifactRevision: '2.0.0',
-    artifactIntegrity: jsonDigest({ artifact: 2 }),
-    artifactUrl: 'https://example.invalid/dsh-example-2.0.0.tgz',
-    artifactSizeBytes: 100,
-    desiredState: 'enabled',
-    ownerKey: 'profileTransactions',
-    scopeKey: 'profile:web',
-    profileId: 'web',
-    idempotencyKey: 'break-glass-idempotency',
-    authorityDigest: jsonDigest({ root, authority: true }),
-    configurationDigest: jsonDigest({ root, configuration: true }),
-    retentionDigest: jsonDigest({ root, retention: true }),
-    reviewEvidence: testReviewEvidence('plugin', 'update', {
-      generation: RECOVERY_GENERATION,
-      treeDigest: jsonDigest({ generation: RECOVERY_GENERATION }),
-    }),
-    mutationDigest: jsonDigest({ root, mutation: true }),
-    verificationDigest: jsonDigest({ root, verification: true }),
-    restartRequired: true,
-    fences: {
-      catalogRevision: 1,
-      inventoryRevision: jsonDigest({ root, inventory: true }),
-      targetRevision: 'plugin:1',
-      ownerRevision: 'profile:7:tree',
-      scopeRevision: 'profile:web:7',
-      profileRevision: 'profile:7:tree',
-    },
-    recoveryExecutable,
-  }
-}
-
-function authorization(planEvidence: JsonRecord): OperationAuthorization {
+function authorization(
+  recoveryExecutable: OperationAuthorization['recoveryExecutable'],
+  beforeDigest: `sha256:${string}`,
+  ownerKey = 'managedPlugins',
+): OperationAuthorization {
   return {
     operationId: OPERATION_ID,
     planId: 'plan:break-glass:1',
-    planHash: jsonDigest({ plan: 1 }),
-    origin: planEvidence.origin as 'store',
-    candidateRef: planEvidence.candidateRef as string,
+    planHash: canonicalSha256({ plan: 1 }),
+    origin: 'store',
+    candidateRef: `plugin:${EXTENSION_ID}@2.0.0`,
     extensionKind: 'plugin',
-    extensionId: planEvidence.extensionId as string,
+    extensionId: EXTENSION_ID,
     operationKind: 'update',
     managedObject: 'artifact',
     externalRuntimeAction: 'download',
     runtimeBinding: null,
-    artifactRevision: planEvidence.artifactRevision as string,
-    artifactIntegrity: planEvidence.artifactIntegrity as `sha256:${string}`,
-    artifactUrl: planEvidence.artifactUrl as string,
-    artifactSizeBytes: planEvidence.artifactSizeBytes as number,
+    artifactRevision: '2.0.0',
+    artifactIntegrity: canonicalSha256({ artifact: 2 }),
+    artifactUrl: 'https://example.invalid/dsh-example-2.0.0.tgz',
+    artifactSizeBytes: 1024,
     desiredState: 'enabled',
     targetKey: TARGET_KEY,
-    ownerKey: 'profileTransactions',
-    scopeKey: 'profile:web',
-    profileId: 'web',
-    idempotencyKey: planEvidence.idempotencyKey as string,
-    authorityDigest: planEvidence.authorityDigest as `sha256:${string}`,
-    configurationDigest: planEvidence.configurationDigest as `sha256:${string}`,
-    retentionDigest: planEvidence.retentionDigest as `sha256:${string}`,
-    mutationDigest: planEvidence.mutationDigest as `sha256:${string}`,
-    verificationDigest: planEvidence.verificationDigest as `sha256:${string}`,
-    reviewEvidence: planEvidence.reviewEvidence as OperationAuthorization['reviewEvidence'],
+    ownerKey,
+    scopeKey: SCOPE_KEY,
+    profileId: PROFILE_ID,
+    idempotencyKey: 'break-glass-idempotency',
+    authorityDigest: canonicalSha256({ authority: 1 }),
+    configurationDigest: canonicalSha256({ configuration: 2 }),
+    retentionDigest: canonicalSha256({ retention: 1 }),
+    mutationDigest: canonicalSha256({ mutation: 2 }),
+    verificationDigest: canonicalSha256({ verification: 2 }),
+    reviewEvidence: testReviewEvidence('plugin', 'update', {
+      generation: '22222222-2222-4222-8222-222222222222',
+      treeDigest: beforeDigest,
+    }),
     restartRequired: true,
-    fences: planEvidence.fences as OperationAuthorization['fences'],
-    recoveryExecutable: planEvidence.recoveryExecutable as OperationAuthorization['recoveryExecutable'],
+    fences: {
+      catalogRevision: 1,
+      inventoryRevision: canonicalSha256({ inventory: 1 }),
+      targetRevision: 'plugin:1',
+      ownerRevision: 'managed-plugin:1',
+      scopeRevision: 'profile:web:1',
+      profileRevision: 'managed-plugin:1',
+    },
+    recoveryExecutable,
     authorizedAtMs: 1_000,
   }
 }
 
-async function persistJournal(root: string, events: readonly JsonRecord[]): Promise<string> {
-  const operationDirectory = join(root, 'operations', createHash('sha256').update(OPERATION_ID).digest('hex'))
-  await mkdir(operationDirectory, { recursive: true, mode: 0o700 })
-  for (const value of events) {
-    const sequence = value.sequence as number
-    const digest = value.digest as string
-    const filename = `${String(sequence).padStart(10, '0')}-${digest.slice('sha256:'.length)}.json`
-    await writeFile(join(operationDirectory, filename), `${canonicalJson(value)}\n`, { mode: 0o600 })
-  }
-  const head = events.at(-1)!
-  await writeFile(join(operationDirectory, 'CURRENT.json'), `${canonicalJson({
-    schemaVersion: 1,
-    operationId: OPERATION_ID,
-    targetKey: TARGET_KEY,
-    eventCount: events.length,
-    headDigest: head.digest,
-  })}\n`, { mode: 0o600 })
-  return operationDirectory
-}
-
-async function fixture(behavior: HostBehavior = 'restore'): Promise<JournalFixture> {
-  const created = await mkdtemp(join(tmpdir(), 'extension-break-glass-'))
-  const root = await realpath(created)
+async function fixture(input: Readonly<{
+  absentBefore?: boolean
+  ownerKey?: string
+}> = {}): Promise<Fixture> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'extension-break-glass-')))
   roots.push(root)
-  const hostHomePath = join(root, 'host-home')
-  const ambientHostHomePath = join(root, 'wrong-ambient-host-home')
-  await mkdir(hostHomePath, { mode: 0o700 })
-  await mkdir(ambientHostHomePath, { mode: 0o700 })
-  const hostHome = await realpath(hostHomePath)
-  const ambientHostHome = await realpath(ambientHostHomePath)
-  const cli = await compileStandaloneCli(root)
-  const host = await writeHostCli(root, hostHome, behavior)
+  await writeCanonical(join(root, 'manifest.json'), {
+    schemaVersion: 1,
+    centerId: randomUUID(),
+    createdAtMs: 1_000,
+  })
+  const v1 = await retainedVersion(root, '1.0.0')
+  const v2 = await retainedVersion(root, '2.0.0')
+  const officialRoot = await realpath(await mkdtemp(join(tmpdir(), 'extension-break-glass-host-')))
+  roots.push(officialRoot)
+  const official = await createOfficialDshFixture(officialRoot)
+  await runOfficialFixture(official.entrypointPath, official.hostHome, [
+    'plugin', `--profile=${PROFILE_ID}`, 'add', v2.artifactPath,
+    '--offline', '--ignore-scripts', '--save-exact', '--store-dir', official.storeDir,
+  ])
+  const compiled = await compileStandaloneCli(root)
+  const supervisor = await compileStandaloneSupervisor(root)
   const recoveryExecutable = await installRecoveryExecutable({
     root,
-    hostHome,
     packageVersion: '1.0.0',
-    cliPath: cli.path,
-    hostCliPath: host.path,
+    cliPath: compiled,
+    supervisorPath: supervisor,
+    officialDsh: {
+      entrypointPath: official.entrypointPath,
+      hostHome: official.hostHome,
+      timeoutMs: 10_000,
+    },
   })
-  const planEvidence = evidence(root, recoveryExecutable as unknown as JsonRecord)
-  const beforeDigest = jsonDigest({ before: CANDIDATE_GENERATION })
+  const metadataCache = await prepareProfileMetadataCache(recoveryExecutable.officialDsh, PROFILE_ID)
+  const before = input.absentBefore === true ? null : managed(root, 4, 'operation:prior', v1.managed)
+  const after = managed(root, before === null ? 1 : 5, OPERATION_ID, v2.managed)
+  const beforeDigest = managedStateDigest(before)
   const store = new FileOperationStore(root)
-  let journal: OperationJournal = createOperationJournal(authorization(planEvidence), beforeDigest, 1_001)
+  let journal: OperationJournal = createOperationJournal(
+    authorization(recoveryExecutable, beforeDigest, input.ownerKey),
+    beforeDigest,
+    1_001,
+  )
   await store.persist(journal)
   for (const [to, reason] of [
     ['staging', null],
@@ -347,30 +402,59 @@ async function fixture(behavior: HostBehavior = 'restore'): Promise<JournalFixtu
     ['rolling-back', null],
     ['recovery-required', 'rollback-failed'],
   ] as const) {
-    journal = transitionOperation(journal, to, null, reason, journal.events.length + 1_001)
+    journal = transitionOperation(journal, to, null, reason, 1_001 + journal.events.length)
     await store.persist(journal)
   }
-  const events = journal.events as unknown as JsonRecord[]
-  const operationDirectory = join(root, 'operations', createHash('sha256').update(OPERATION_ID).digest('hex'))
+  const managedPath = join(root, 'state', 'managed', `${storageKey(TARGET_KEY)}.json`)
+  const sidecarPath = join(root, 'plugin', 'profiles', storageKey(PROFILE_ID), 'packages', `${storageKey(TARGET_KEY)}.json`)
+  const transactionPath = join(root, 'recovery', 'transactions', `${storageKey(OPERATION_ID)}.json`)
+  await writeCanonical(managedPath, after)
+  await writeCanonical(sidecarPath, sidecar(after))
+  await writeCanonical(join(root, 'state', 'provider-snapshots', `${storageKey(OPERATION_ID)}.json`), {
+    schemaVersion: 1,
+    operationId: OPERATION_ID,
+    targetKey: TARGET_KEY,
+    before,
+    beforeDigest,
+    recoveryPoint: {
+      kind: 'plugin',
+      snapshot: {
+        profileId: PROFILE_ID,
+        revision: 4,
+        digest: canonicalSha256({ profile: 4 }),
+        materialRoot: join(root, 'material', 'plugins'),
+        bootStatus: 'verified',
+        ownerRevision: `managed-plugin:4:${canonicalSha256({ profile: 4 })}`,
+      },
+      artifactPath: null,
+      metadataCache,
+    },
+  })
   return {
     root,
-    hostHome,
-    ambientHostHome,
     cliPath: recoveryExecutable.executablePath,
-    hostCliPath: host.path,
-    callsPath: host.callsPath,
-    statePath: host.statePath,
-    operationDirectory,
-    planEvidence,
-    beforeDigest,
-    events,
+    dshEntrypoint: official.entrypointPath,
+    dshPackageRoot: official.packageRoot,
+    officialCliLog: official.logPath,
+    hostHome: official.hostHome,
+    profileStore: official.storeDir,
+    profilePath: join(official.hostHome, 'profiles', PROFILE_ID),
+    operationDirectory: join(root, 'operations', storageKey(OPERATION_ID)),
+    managedPath,
+    sidecarPath,
+    transactionPath,
+    before,
   }
 }
 
-function runCli(value: JournalFixture): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>> {
+function runCli(
+  value: Fixture,
+  root = value.root,
+  environment: Readonly<Record<string, string>> = {},
+): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [value.cliPath, value.root, OPERATION_ID], {
-      env: { ...process.env, DSH_HOME: value.ambientHostHome },
+    const child = spawn(process.execPath, [value.cliPath, root, OPERATION_ID], {
+      env: { PATH: '/definitely-not-used', ...environment },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const stdout: Buffer[] = []
@@ -379,322 +463,526 @@ function runCli(value: JournalFixture): Promise<Readonly<{ stdout: string; stder
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
     child.once('error', reject)
     child.once('close', (code, signal) => {
-      if (code === null || signal !== null) {
-        reject(new Error('break-glass CLI did not exit normally'))
-        return
-      }
-      resolvePromise({
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-        exitCode: code,
-      })
+      if (code === null || signal !== null) return reject(new Error('break-glass CLI did not exit normally'))
+      resolvePromise({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), exitCode: code })
     })
   })
 }
 
-async function rewritePointer(value: JournalFixture, patch: (pointer: Record<string, unknown>) => void): Promise<void> {
-  const path = join(value.operationDirectory, 'CURRENT.json')
-  const pointer = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
-  patch(pointer)
-  await writeFile(path, `${canonicalJson(pointer)}\n`)
+async function profileState(value: Fixture): Promise<Readonly<{
+  dependency: string | undefined
+  bundles: readonly string[]
+  installedVersion: string | null
+}>> {
+  const manifest = JSON.parse(await readFile(join(value.profilePath, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+    dsh?: { profile?: { bundles?: string[] } }
+  }
+  let installedVersion: string | null = null
+  try {
+    const installed = JSON.parse(await readFile(
+      join(value.profilePath, 'node_modules', EXTENSION_ID, 'package.json'),
+      'utf8',
+    )) as { version?: unknown }
+    installedVersion = typeof installed.version === 'string' ? installed.version : null
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  return {
+    dependency: manifest.dependencies?.[EXTENSION_ID],
+    bundles: manifest.dsh?.profile?.bundles ?? [],
+    installedVersion,
+  }
 }
 
-describe('standalone Host break-glass recovery', () => {
-  it('verifies pinned journal and executables, restores through the exact Host owner, and leaves reconciliation pending', async () => {
+describe('standalone Center break-glass recovery', () => {
+  it('uses the bound official CLI to restore Profile v1 before committing Center state', async () => {
     const value = await fixture()
+
+    await expect(profileState(value)).resolves.toMatchObject({
+      dependency: expect.stringContaining('2.0.0.tgz'),
+      bundles: [EXTENSION_ID],
+      installedVersion: '2.0.0',
+    })
 
     const result = await runCli(value)
 
     expect(result).toEqual({
-      stdout: 'profile restored; Center journal reconciliation pending\n',
+      stdout: 'Official Profile and Center state restored; restart verification pending\n',
       stderr: '',
       exitCode: 0,
     })
-    expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-    ])
-    await expect(readFile(join(value.ambientHostHome, 'host-calls.json'), 'utf8'))
-      .rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(profileState(value)).resolves.toMatchObject({
+      dependency: expect.stringContaining('1.0.0.tgz'),
+      bundles: [EXTENSION_ID],
+      installedVersion: '1.0.0',
+    })
+    const restored = JSON.parse(await readFile(value.managedPath, 'utf8')) as ManagedTargetRecord
+    expect(restored).toMatchObject({
+      revision: 6,
+      lastOperationId: OPERATION_ID,
+      current: value.before!.current,
+      pending: null,
+    })
+    const owner = JSON.parse(await readFile(value.sidecarPath, 'utf8')) as Record<string, unknown>
+    expect(owner).toMatchObject({
+      revision: 6,
+      lastOperationId: OPERATION_ID,
+      managed: restored,
+      loaderEntryId: null,
+      loaderName: null,
+      restartPending: true,
+    })
+    expect(JSON.parse(await readFile(value.transactionPath, 'utf8'))).toMatchObject({
+      status: 'committed',
+      sourceManaged: expect.objectContaining({ revision: 5 }),
+      sourceSidecar: expect.objectContaining({ revision: 5, packageName: EXTENSION_ID }),
+    })
+    expect(JSON.parse(await readFile(
+      join(value.root, 'plugin', 'break-glass-restores', `${storageKey(OPERATION_ID)}.json`),
+      'utf8',
+    ))).toMatchObject({
+      operationId: OPERATION_ID,
+      targetKey: TARGET_KEY,
+      providerSnapshotDigest: expect.stringMatching(/^sha256:/),
+      beforeDigest: managedStateDigest(value.before),
+      restoredManagedDigest: managedStateDigest(value.before),
+      restoredRevision: 6,
+      status: 'settled',
+    })
+    const invocations = (await readFile(value.officialCliLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line)) as Array<{
+      argv: string[]
+      pnpmStore: string
+    }>
+    expect(invocations.at(-1)?.argv.slice(-2)).toEqual(['--store-dir', value.profileStore])
+    expect(invocations.at(-1)?.pnpmStore).toBe(value.profileStore)
+  }, 15_000)
+
+  it('rejects corrupt and unsafe installed Profile store metadata before break-glass mutation', async () => {
+    const corrupt = await fixture()
+    const corruptMetadata = join(corrupt.profilePath, 'node_modules', '.modules.yaml')
+    await writeFile(corruptMetadata, '{')
+
+    const corruptResult = await runCli(corrupt)
+
+    expect(corruptResult.exitCode).toBe(1)
+    expect(corruptResult.stderr).toContain('modules metadata is invalid JSON')
+
+    const unsafe = await fixture()
+    const unsafeMetadata = join(unsafe.profilePath, 'node_modules', '.modules.yaml')
+    await writeFile(unsafeMetadata, JSON.stringify({
+      layoutVersion: 5,
+      nodeLinker: 'hoisted',
+      packageManager: 'pnpm@11.21.0',
+      storeDir: 'relative/v11',
+      virtualStoreDir: '.pnpm',
+    }))
+
+    const unsafeResult = await runCli(unsafe)
+
+    expect(unsafeResult.exitCode).toBe(1)
+    expect(unsafeResult.stderr).toContain('metadata storeDir is unsafe')
+  }, 15_000)
+
+  it('uses the provider-bound pre-mutation cache after a partial mutation changes the current lockfile', async () => {
+    const value = await fixture()
+    await writeFile(join(value.profilePath, 'pnpm-lock.yaml'), '{ partial-mutation: true }\n')
+
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
+    await expect(profileState(value)).resolves.toMatchObject({ installedVersion: '1.0.0' })
   })
 
-  it('rejects a non-canonical pinned Host home before invoking either ambient or pinned Host state', async () => {
+  it('rejects a tampered provider-bound cache before running recovery mutation', async () => {
     const value = await fixture()
-    const opened = value.events[0]!
-    const openedEntry = structuredClone(opened.entry) as Record<string, unknown>
-    const planEvidence = openedEntry.planEvidence as Record<string, unknown>
-    ;(planEvidence.recoveryExecutable as Record<string, unknown>).hostHome = `${value.hostHome}/../host-home`
-    const rebuilt = [event(1, null, openedEntry)]
-    for (const prior of value.events.slice(1)) {
-      rebuilt.push(event(rebuilt.length + 1, rebuilt.at(-1)!.digest as string, prior.entry as JsonRecord))
+    const snapshotPath = join(value.root, 'state', 'provider-snapshots', `${storageKey(OPERATION_ID)}.json`)
+    const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8')) as {
+      recoveryPoint: { metadataCache: { manifestPath: string } }
     }
-    await rm(value.operationDirectory, { recursive: true })
-    await persistJournal(value.root, rebuilt)
+    const beforeLog = await readFile(value.officialCliLog, 'utf8')
+    await writeFile(
+      snapshot.recoveryPoint.metadataCache.manifestPath,
+      Buffer.concat([await readFile(snapshot.recoveryPoint.metadataCache.manifestPath), Buffer.from(' ')]),
+    )
 
     const result = await runCli(value)
 
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain('Host home path is not its canonical real directory')
-    await expect(readFile(value.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(join(value.ambientHostHome, 'host-calls.json'), 'utf8'))
+    expect(result.stderr).toContain('metadata cache manifest digest changed')
+    await expect(readFile(value.officialCliLog, 'utf8')).resolves.toEqual(beforeLog)
+  })
+
+  it('ignores an invoking-process DSH_HOME override and mutates only the bound Host home', async () => {
+    const value = await fixture()
+    const attackerHome = join(value.root, 'attacker-selected-home')
+    await mkdir(attackerHome)
+
+    await expect(runCli(value, value.root, { DSH_HOME: attackerHome })).resolves.toMatchObject({ exitCode: 0 })
+
+    await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
+    await expect(readFile(join(attackerHome, 'profiles', PROFILE_ID, 'package.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('fails closed on a changed event chain or CURRENT head before invoking the Host CLI', async () => {
-    const changedEvent = await fixture()
-    const second = (await readdir(changedEvent.operationDirectory)).find(name => name.startsWith('0000000002-'))!
-    const secondPath = join(changedEvent.operationDirectory, second)
-    const record = JSON.parse(await readFile(secondPath, 'utf8')) as Record<string, unknown>
-    ;(record.entry as Record<string, unknown>).to = 'failed'
-    await writeFile(secondPath, `${canonicalJson(record)}\n`)
+  it('accepts the strict rollback marker when standalone recovery reads a managed Plugin version', async () => {
+    const value = await fixture()
+    const source = JSON.parse(await readFile(value.managedPath, 'utf8')) as ManagedTargetRecord
+    const current = source.current as ManagedVersion
+    const marked = {
+      ...source,
+      current: {
+        ...current,
+        kindState: { ...(current.kindState as Record<string, unknown>), rollbackOperationId: OPERATION_ID },
+      },
+    } as ManagedTargetRecord
+    await writeCanonical(value.managedPath, marked)
+    await writeCanonical(value.sidecarPath, sidecar(marked))
 
-    const eventResult = await runCli(changedEvent)
-    expect(eventResult.exitCode).toBe(1)
-    expect(eventResult.stdout).toBe('')
-    expect(eventResult.stderr).toContain('digest does not match its content')
-    await expect(readFile(changedEvent.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
+  })
 
-    const changedPointer = await fixture()
-    await rewritePointer(changedPointer, pointer => { pointer.headDigest = jsonDigest({ attacker: true }) })
-    const pointerResult = await runCli(changedPointer)
+  it('replays a committed recovery without advancing the revision again', async () => {
+    const value = await fixture()
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
+    const firstManaged = await readFile(value.managedPath, 'utf8')
+    const firstSidecar = await readFile(value.sidecarPath, 'utf8')
+    const firstTransaction = await readFile(value.transactionPath, 'utf8')
+
+    const replay = await runCli(value)
+
+    expect(replay.exitCode).toBe(0)
+    expect(await readFile(value.managedPath, 'utf8')).toBe(firstManaged)
+    expect(await readFile(value.sidecarPath, 'utf8')).toBe(firstSidecar)
+    expect(await readFile(value.transactionPath, 'utf8')).toBe(firstTransaction)
+    await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
+  })
+
+  it('finishes a prepared transaction after only the owner sidecar reached restored state', async () => {
+    const value = await fixture()
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
+    const transaction = JSON.parse(await readFile(value.transactionPath, 'utf8')) as Record<string, unknown>
+    transaction.status = 'prepared'
+    transaction.committedAtMs = null
+    await writeCanonical(value.transactionPath, transaction)
+    await writeCanonical(value.managedPath, transaction.sourceManaged)
+
+    const replay = await runCli(value)
+
+    expect(replay.exitCode).toBe(0)
+    expect(JSON.parse(await readFile(value.managedPath, 'utf8'))).toEqual(transaction.restoredManaged)
+    expect(JSON.parse(await readFile(value.transactionPath, 'utf8'))).toMatchObject({ status: 'committed' })
+  })
+
+  it('removes the official dependency, bundle, installed target, and Center records when before-state was absent', async () => {
+    const value = await fixture({ absentBefore: true })
+
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
+
+    await expect(profileState(value)).resolves.toEqual({ dependency: undefined, bundles: [], installedVersion: null })
+    await expect(readFile(value.managedPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(value.sidecarPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(value.transactionPath, 'utf8'))).toMatchObject({
+      status: 'committed',
+      sourceManaged: expect.objectContaining({ revision: 1 }),
+      sourceSidecar: expect.objectContaining({ revision: 1 }),
+      restoredManaged: null,
+      restoredSidecar: null,
+    })
+    expect(JSON.parse(await readFile(
+      join(value.root, 'plugin', 'absent-rollbacks', `${storageKey(OPERATION_ID)}.json`),
+      'utf8',
+    ))).toMatchObject({
+      operationId: OPERATION_ID,
+      targetKey: TARGET_KEY,
+      sourceRevision: 1,
+      restartRequired: true,
+      status: 'settled',
+    })
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
+  })
+
+  it('rejects a changed dependency spec and duplicate bundle membership after commit', async () => {
+    const dependency = await fixture()
+    await expect(runCli(dependency)).resolves.toMatchObject({ exitCode: 0 })
+    const dependencyManifestPath = join(dependency.profilePath, 'package.json')
+    const dependencyManifest = JSON.parse(await readFile(dependencyManifestPath, 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    dependencyManifest.dependencies[EXTENSION_ID] = 'file:/attacker/replacement.tgz'
+    await writeFile(dependencyManifestPath, `${JSON.stringify(dependencyManifest)}\n`)
+    const dependencyReplay = await runCli(dependency)
+    expect(dependencyReplay.exitCode).toBe(1)
+    expect(dependencyReplay.stderr).toContain('Profile diverged from the committed recovery transaction')
+
+    const duplicate = await fixture()
+    await expect(runCli(duplicate)).resolves.toMatchObject({ exitCode: 0 })
+    const duplicateManifestPath = join(duplicate.profilePath, 'package.json')
+    const duplicateManifest = JSON.parse(await readFile(duplicateManifestPath, 'utf8')) as {
+      dsh: { profile: { bundles: string[] } }
+    }
+    duplicateManifest.dsh.profile.bundles.push(EXTENSION_ID)
+    await writeFile(duplicateManifestPath, `${JSON.stringify(duplicateManifest)}\n`)
+    const duplicateReplay = await runCli(duplicate)
+    expect(duplicateReplay.exitCode).toBe(1)
+    expect(duplicateReplay.stderr).toContain('Profile diverged from the committed recovery transaction')
+  }, 15_000)
+
+  it('reclaims a dead shared Profile lease before restoring', async () => {
+    const value = await fixture()
+    const lease = join(
+      value.hostHome,
+      '.extension-center-plugin-coordination',
+      'leases',
+      storageKey(PROFILE_ID),
+    )
+    const currentIdentity = await captureCurrentProcessIdentity()
+    await writeCanonical(join(lease, 'owner.json'), {
+      schemaVersion: 2,
+      profileId: PROFILE_ID,
+      ownerId: 'break-glass:dead-owner',
+      leaseId: `lease:${randomUUID()}`,
+      processIdentity: {
+        ...currentIdentity,
+        pid: 2_147_483_647,
+        birthDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      acquiredAtMs: 1,
+    })
+
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
+    await expect(profileState(value)).resolves.toMatchObject({ installedVersion: '1.0.0' })
+  })
+
+  it('continues a dead break-glass claimant from a retired takeover gate and exact quarantine', async () => {
+    const value = await fixture()
+    const coordination = join(value.hostHome, '.extension-center-plugin-coordination')
+    const key = storageKey(PROFILE_ID)
+    const quarantineId = `quarantine:${randomUUID()}`
+    const leaseId = `lease:${randomUUID()}`
+    const currentIdentity = await captureCurrentProcessIdentity()
+    const owner = {
+      schemaVersion: 2,
+      profileId: PROFILE_ID,
+      ownerId: 'break-glass:dead-claimant',
+      leaseId,
+      processIdentity: {
+        ...currentIdentity,
+        pid: 2_147_483_647,
+        birthDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      acquiredAtMs: 1,
+    }
+    const quarantineRoot = join(coordination, 'lease-quarantine', key)
+    const quarantine = join(quarantineRoot, quarantineId.slice('quarantine:'.length))
+    const takeoverRoot = join(coordination, 'lease-takeovers')
+    const retired = join(takeoverRoot, `.retired-${randomUUID()}`)
+    await writeCanonical(join(quarantine, 'owner.json'), owner)
+    await writeCanonical(join(retired, 'record.json'), {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      sourceLeaseId: leaseId,
+      sourceOwnerDigest: canonicalSha256(owner),
+      quarantineId,
+      takeoverId: `takeover:${randomUUID()}`,
+      claimantOwnerId: owner.ownerId,
+      claimantProcessIdentity: owner.processIdentity,
+      claimedAtMs: 1,
+    })
+
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
+
+    await expect(readdir(takeoverRoot)).resolves.toEqual([])
+    await expect(readdir(quarantineRoot)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readdir(join(coordination, 'leases'))).resolves.toEqual([])
+  })
+
+  it('fails closed without removing a lease whose process may still own a live subtree', async () => {
+    const value = await fixture()
+    const ownerPath = join(
+      value.hostHome,
+      '.extension-center-plugin-coordination',
+      'leases',
+      storageKey(PROFILE_ID),
+      'owner.json',
+    )
+    await writeCanonical(ownerPath, {
+      schemaVersion: 2,
+      profileId: PROFILE_ID,
+      ownerId: 'break-glass:live-owner',
+      leaseId: `lease:${randomUUID()}`,
+      processIdentity: await captureCurrentProcessIdentity(),
+      acquiredAtMs: 1,
+    })
+
+    const result = await runCli(value)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('profile is busy')
+    await expect(readFile(ownerPath, 'utf8')).resolves.toContain('break-glass:live-owner')
+  })
+
+  it('clears only an exact operation-bound ambiguity quarantine after settled recovery', async () => {
+    const value = await fixture()
+    const quarantine = join(
+      value.hostHome,
+      '.extension-center-plugin-coordination',
+      'quarantine',
+      `${storageKey(PROFILE_ID)}.json`,
+    )
+    await writeCanonical(quarantine, {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      packageName: EXTENSION_ID,
+      operationId: OPERATION_ID,
+      targetKey: TARGET_KEY,
+      centerRoot: value.root,
+      beforeDigest: canonicalSha256({ before: 1 }),
+      afterDigest: canonicalSha256({ after: 1 }),
+      reason: 'interrupted official Profile observation',
+      createdAtMs: 1,
+    })
+    await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
+    await expect(readFile(quarantine, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const mismatch = await fixture()
+    const mismatchedPath = join(
+      mismatch.hostHome,
+      '.extension-center-plugin-coordination',
+      'quarantine',
+      `${storageKey(PROFILE_ID)}.json`,
+    )
+    await writeCanonical(mismatchedPath, {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      packageName: EXTENSION_ID,
+      operationId: 'operation:foreign',
+      targetKey: TARGET_KEY,
+      centerRoot: mismatch.root,
+      beforeDigest: canonicalSha256({ before: 1 }),
+      afterDigest: canonicalSha256({ after: 1 }),
+      reason: 'foreign operation',
+      createdAtMs: 1,
+    })
+    const result = await runCli(mismatch)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('quarantine does not bind this recovery operation')
+    await expect(readFile(mismatchedPath, 'utf8')).resolves.toContain('operation:foreign')
+  })
+
+  it('fails closed when the bound official CLI entrypoint or package tree changes', async () => {
+    const entrypoint = await fixture()
+    await chmod(entrypoint.dshEntrypoint, 0o700)
+    await writeFile(entrypoint.dshEntrypoint, `${await readFile(entrypoint.dshEntrypoint, 'utf8')}\n// tampered\n`, { mode: 0o500 })
+    const entrypointResult = await runCli(entrypoint)
+    expect(entrypointResult.exitCode).toBe(1)
+    expect(entrypointResult.stderr).toContain('official DSH recovery entrypoint hash does not match its pin')
+
+    const tree = await fixture()
+    await writeFile(join(tree.dshPackageRoot, 'injected.js'), 'export default true\n')
+    const treeResult = await runCli(tree)
+    expect(treeResult.exitCode).toBe(1)
+    expect(treeResult.stderr).toContain('official DSH recovery package tree does not match its pin')
+  })
+
+  it('fails closed on executable pin, journal chain, and CURRENT tampering', async () => {
+    const executable = await fixture()
+    await chmod(executable.cliPath, 0o700)
+    await writeFile(executable.cliPath, `${await readFile(executable.cliPath, 'utf8')}\n// tampered\n`, { mode: 0o500 })
+    const pinResult = await runCli(executable)
+    expect(pinResult.exitCode).toBe(1)
+    expect(pinResult.stderr).toContain('recovery executable hash does not match its pin')
+
+    const chain = await fixture()
+    const second = (await readdir(chain.operationDirectory)).find(name => name.startsWith('0000000002-'))!
+    const secondPath = join(chain.operationDirectory, second)
+    const event = JSON.parse(await readFile(secondPath, 'utf8')) as Record<string, unknown>
+    ;(event.entry as Record<string, unknown>).to = 'failed'
+    await writeCanonical(secondPath, event)
+    const chainResult = await runCli(chain)
+    expect(chainResult.exitCode).toBe(1)
+    expect(chainResult.stderr).toContain('digest does not match its content')
+
+    const pointer = await fixture()
+    const pointerPath = join(pointer.operationDirectory, 'CURRENT.json')
+    const current = JSON.parse(await readFile(pointerPath, 'utf8')) as Record<string, unknown>
+    current.headDigest = canonicalSha256({ attacker: true })
+    await writeCanonical(pointerPath, current)
+    const pointerResult = await runCli(pointer)
     expect(pointerResult.exitCode).toBe(1)
     expect(pointerResult.stderr).toContain('headDigest does not match')
-    await expect(readFile(changedPointer.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('rejects a fully rehashed backward clock or non-terminal evidence before invoking the Host CLI', async () => {
-    const backwardClock = await fixture()
-    const rebuiltTime: JsonRecord[] = []
-    for (const [index, prior] of backwardClock.events.entries()) {
-      rebuiltTime.push(event(
-        index + 1,
-        index === 0 ? null : rebuiltTime.at(-1)!.digest as string,
-        structuredClone(prior.entry) as JsonRecord,
-        index === 2 ? 1_000 : prior.atMs as number,
-      ))
+  it('rejects current-state drift before recovery and after a committed replay', async () => {
+    const before = await fixture()
+    const managedValue = JSON.parse(await readFile(before.managedPath, 'utf8')) as Record<string, unknown>
+    managedValue.lastOperationId = 'operation:attacker'
+    await writeCanonical(before.managedPath, managedValue)
+    const beforeResult = await runCli(before)
+    expect(beforeResult.exitCode).toBe(1)
+    expect(beforeResult.stderr).toContain('state and owner sidecar diverged')
+
+    const after = await fixture()
+    await expect(runCli(after)).resolves.toMatchObject({ exitCode: 0 })
+    const restored = JSON.parse(await readFile(after.managedPath, 'utf8')) as Record<string, unknown>
+    restored.updatedAtMs = (restored.updatedAtMs as number) + 1
+    await writeCanonical(after.managedPath, restored)
+    const replay = await runCli(after)
+    expect(replay.exitCode).toBe(1)
+    expect(replay.stderr).toContain('diverged from the committed recovery transaction')
+  })
+
+  it('rejects retained artifact drift and committed Profile tree drift', async () => {
+    const artifact = await fixture()
+    const source = JSON.parse(await readFile(artifact.managedPath, 'utf8')) as ManagedTargetRecord
+    const sourceMarkerPath = `${source.current!.materialPath}.owner.json`
+    const sourceMarker = JSON.parse(await readFile(sourceMarkerPath, 'utf8')) as { artifactPath: string }
+    await writeFile(sourceMarker.artifactPath, 'tampered retained archive\n')
+    const artifactResult = await runCli(artifact)
+    expect(artifactResult.exitCode).toBe(1)
+    expect(artifactResult.stderr).toContain('retained artifact')
+
+    const profile = await fixture()
+    await expect(runCli(profile)).resolves.toMatchObject({ exitCode: 0 })
+    await writeFile(join(profile.profilePath, 'node_modules', EXTENSION_ID, 'cordis.yml'), 'tampered runtime\n')
+    const profileResult = await runCli(profile)
+    expect(profileResult.exitCode).toBe(1)
+    expect(profileResult.stderr).toContain('Profile diverged from the committed recovery transaction')
+  })
+
+  it('rejects a non-Center Plugin owner and a non-canonical root', async () => {
+    const wrongOwner = await fixture({ ownerKey: 'profileTransactions' })
+    const ownerResult = await runCli(wrongOwner)
+    expect(ownerResult.exitCode).toBe(1)
+    expect(ownerResult.stderr).toContain('Center-owned managedPlugins')
+
+    const wrongRoot = await fixture()
+    const nonCanonical = `${wrongRoot.root}/../${basename(wrongRoot.root)}`
+    const rootResult = await runCli(wrongRoot, nonCanonical)
+    expect(rootResult.exitCode).toBe(1)
+    expect(rootResult.stderr).toContain('canonical absolute path')
+  })
+
+  it('rejects recovery roots overlapping official Profile or package state before creating recovery files', async () => {
+    const cliRoot = await realpath(await mkdtemp(join(tmpdir(), 'extension-break-glass-cli-')))
+    const officialRoot = await realpath(await mkdtemp(join(tmpdir(), 'extension-break-glass-overlap-')))
+    roots.push(cliRoot, officialRoot)
+    const official = await createOfficialDshFixture(officialRoot)
+    const cliPath = await compileStandaloneCli(cliRoot)
+    const supervisorPath = await compileStandaloneSupervisor(cliRoot)
+    const profileRoot = join(official.hostHome, 'profiles', PROFILE_ID, 'extension-center')
+    await mkdir(profileRoot, { recursive: true })
+    for (const root of [official.hostHome, profileRoot, official.packageRoot]) {
+      await expect(installRecoveryExecutable({
+        root,
+        packageVersion: '1.0.0',
+        cliPath,
+        supervisorPath,
+        officialDsh: {
+          entrypointPath: official.entrypointPath,
+          hostHome: official.hostHome,
+          timeoutMs: 10_000,
+        },
+      })).rejects.toThrow('overlaps official DSH Profile or package state')
+      await expect(readFile(join(root, 'recovery', '1.0.0', `${process.platform}-${process.arch}`, 'break-glass.mjs')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
     }
-    await rm(backwardClock.operationDirectory, { recursive: true })
-    await persistJournal(backwardClock.root, rebuiltTime)
-
-    const backwardResult = await runCli(backwardClock)
-    expect(backwardResult.exitCode).toBe(1)
-    expect(backwardResult.stderr).toContain('journal time moved backwards')
-    await expect(readFile(backwardClock.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-
-    const nonTerminalEvidence = await fixture()
-    const rebuiltEvidence: JsonRecord[] = []
-    for (const [index, prior] of nonTerminalEvidence.events.entries()) {
-      const entry = structuredClone(prior.entry) as Record<string, unknown>
-      if (index === 1) entry.evidenceDigest = jsonDigest({ forged: 'non-terminal' })
-      rebuiltEvidence.push(event(
-        index + 1,
-        index === 0 ? null : rebuiltEvidence.at(-1)!.digest as string,
-        entry,
-        prior.atMs as number,
-      ))
-    }
-    await rm(nonTerminalEvidence.operationDirectory, { recursive: true })
-    await persistJournal(nonTerminalEvidence.root, rebuiltEvidence)
-
-    const evidenceResult = await runCli(nonTerminalEvidence)
-    expect(evidenceResult.exitCode).toBe(1)
-    expect(evidenceResult.stderr).toContain('non-terminal journal transitions cannot publish final evidence')
-    await expect(readFile(nonTerminalEvidence.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('verifies a present receipt digest before refusing a non-recovery journal', async () => {
-    const value = await fixture()
-    const opened = value.events[0]!
-    const failed = event(2, opened.digest as string, phase('authorized', 'failed', 'owner-failed', value.beforeDigest))
-    const body = {
-      schemaVersion: 1,
-      operationId: OPERATION_ID,
-      planId: 'plan:break-glass:1',
-      planHash: jsonDigest({ plan: 1 }),
-      operationKind: 'update',
-      managedObject: 'artifact',
-      externalRuntimeAction: 'download',
-      runtimeBinding: null,
-      planEvidence: value.planEvidence,
-      targetKey: TARGET_KEY,
-      outcome: 'failed',
-      beforeDigest: value.beforeDigest,
-      afterDigest: value.beforeDigest,
-      mutationDigests: [],
-      verificationDigests: [],
-      evidence: {
-        checksActuallyRun: (value.planEvidence.reviewEvidence as { checks: unknown }).checks,
-        mutation: 'not-required',
-        verification: 'not-required',
-        rollback: { attempted: false, status: 'not-required' },
-        restart: { required: false, status: 'not-required' },
-        recovery: { attempts: 0, status: 'not-required' },
-        notProven: [],
-      },
-      journalEventCount: 2,
-      journalHeadDigest: failed.digest,
-      issuedAtMs: 1_003,
-    }
-    const receipt = event(3, failed.digest as string, {
-      type: 'receipt-issued',
-      receipt: { body, digest: jsonDigest({ wrong: true }) },
-    })
-    await rm(value.operationDirectory, { recursive: true })
-    await persistJournal(value.root, [opened, failed, receipt])
-
-    const result = await runCli(value)
-    expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain('receipt digest does not match its body')
-    await expect(readFile(value.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('rejects a mismatched self pin and a mismatched regular Host CLI pin before execution', async () => {
-    const selfMismatch = await fixture()
-    const opened = selfMismatch.events[0]!
-    const openedEntry = structuredClone(opened.entry) as Record<string, unknown>
-    const planEvidence = openedEntry.planEvidence as Record<string, unknown>
-    ;(planEvidence.recoveryExecutable as Record<string, unknown>).executableSha256 = jsonDigest({ wrong: 'self' })
-    const replacement = event(1, null, openedEntry)
-    const rebuilt = [replacement]
-    for (const prior of selfMismatch.events.slice(1)) {
-      rebuilt.push(event(rebuilt.length + 1, rebuilt.at(-1)!.digest as string, prior.entry as JsonRecord))
-    }
-    await rm(selfMismatch.operationDirectory, { recursive: true })
-    await persistJournal(selfMismatch.root, rebuilt)
-    const selfResult = await runCli(selfMismatch)
-    expect(selfResult.exitCode).toBe(1)
-    expect(selfResult.stderr).toContain('recovery executable hash does not match its pin')
-
-    const hostMismatch = await fixture()
-    await writeFile(hostMismatch.hostCliPath, `${await readFile(hostMismatch.hostCliPath, 'utf8')}\n// changed after pin\n`)
-    const hostResult = await runCli(hostMismatch)
-    expect(hostResult.exitCode).toBe(1)
-    expect(hostResult.stderr).toContain('Host CLI hash does not match its pin')
-    await expect(readFile(hostMismatch.callsPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-  })
-
-  it('fails closed when the Host lacks the exact restore-receipt protocol', async () => {
-    const value = await fixture('old-rc2')
-
-    const result = await runCli(value)
-
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout).toBe('')
-    expect(result.stderr).toContain('Host CLI restore-receipt probe failed with exit code 2')
-    expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-    ])
-  })
-
-  it('rejects a current recovery selector that drifted from the immutable generation and tree pin', async () => {
-    const value = await fixture()
-    const inventory = JSON.parse(await readFile(value.statePath, 'utf8')) as Record<string, unknown>
-    const snapshot = inventory.snapshot as Record<string, unknown>
-    snapshot.lastGoodGeneration = '33333333-3333-4333-8333-333333333333'
-    await writeFile(value.statePath, `${JSON.stringify(inventory, null, 2)}\n`)
-
-    const result = await runCli(value)
-
-    expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain('current recovery selector drifted from the journal pin')
-    expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-    ])
-  })
-
-  it('fails closed when the post-restore owner inventory does not prove the target generation', async () => {
-    const value = await fixture('noop-restore')
-
-    const result = await runCli(value)
-
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout).toBe('')
-    expect(result.stderr).toContain('does not prove the exact restored generation')
-    expect(JSON.parse(await readFile(value.callsPath, 'utf8'))).toEqual([
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-    ])
-  })
-
-  it('recognizes the committed receipt after SIGKILL loses restore stdout and does not advance revision again', async () => {
-    const value = await fixture('lost-restore-output')
-
-    const interrupted = await runCli(value)
-    expect(interrupted.exitCode).toBe(1)
-    expect(interrupted.stdout).toBe('')
-    expect(interrupted.stderr).toContain('Host CLI restore ended without an exit code')
-
-    const retried = await runCli(value)
-    expect(retried).toEqual({
-      stdout: 'profile restored; Center journal reconciliation pending\n',
-      stderr: '',
-      exitCode: 0,
-    })
-    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
-      snapshot: { revision: number; activeGeneration: string; treeDigest: string }
-    }
-    expect(state.snapshot).toMatchObject({
-      revision: 8,
-      activeGeneration: RECOVERY_GENERATION,
-      treeDigest: jsonDigest({ generation: RECOVERY_GENERATION }),
-    })
-    const calls = JSON.parse(await readFile(value.callsPath, 'utf8')) as string[][]
-    expect(calls).toEqual([
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-      ['plugin', '--profile', 'web', 'restore', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', RECOVERY_MUTATION_ID],
-      ['plugin', '--profile', 'web', 'list'],
-    ])
-    expect(calls.filter(args => args[3] === 'restore')).toHaveLength(1)
-  })
-
-  it('recognizes the same committed receipt after the restored generation is acknowledged', async () => {
-    const value = await fixture('lost-restore-output-before-ack')
-
-    const interrupted = await runCli(value)
-    expect(interrupted.exitCode).toBe(1)
-    expect(interrupted.stderr).toContain('Host CLI restore ended without an exit code')
-    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
-      snapshot: Record<string, unknown>
-    }
-    state.snapshot.revision = 9
-    state.snapshot.lastGoodGeneration = RECOVERY_GENERATION
-    state.snapshot.rollbackGeneration = CANDIDATE_GENERATION
-    state.snapshot.bootStatus = 'verified'
-    await writeFile(value.statePath, `${JSON.stringify(state, null, 2)}\n`)
-
-    const retried = await runCli(value)
-
-    expect(retried).toEqual({
-      stdout: 'profile restored; Center journal reconciliation pending\n',
-      stderr: '',
-      exitCode: 0,
-    })
-    const calls = JSON.parse(await readFile(value.callsPath, 'utf8')) as string[][]
-    expect(calls.filter(args => args[3] === 'restore')).toHaveLength(1)
-  })
-
-  it('rejects unrelated snapshot drift after a committed restore receipt', async () => {
-    const value = await fixture('lost-restore-output-before-ack')
-    await runCli(value)
-    const state = JSON.parse(await readFile(value.statePath, 'utf8')) as {
-      snapshot: Record<string, unknown>
-    }
-    state.snapshot.revision = 9
-    state.snapshot.lastGoodGeneration = RECOVERY_GENERATION
-    state.snapshot.rollbackGeneration = '33333333-3333-4333-8333-333333333333'
-    state.snapshot.bootStatus = 'verified'
-    await writeFile(value.statePath, `${JSON.stringify(state, null, 2)}\n`)
-
-    const retried = await runCli(value)
-
-    expect(retried.exitCode).toBe(1)
-    expect(retried.stderr).toContain('current inventory diverged from the committed restore receipt')
   })
 })

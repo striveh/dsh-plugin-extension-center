@@ -1,20 +1,28 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from 'node:fs/promises'
+import { join, relative, resolve, sep } from 'node:path'
 
-/** Exact published Host package used by the first Store Acceptance Red. */
+/** Exact published, unmodified Host package used by the Store UI acceptance. */
 export const TARGET_DSH_VERSION = '0.1.1-rc.2'
+
+/** Registry integrity of the exact published Host package admitted by both packed lanes. */
+export const TARGET_DSH_REGISTRY_INTEGRITY = 'sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg=='
+
+/** Registry used to resolve the independently installed official Host. */
+export const OFFICIAL_NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 /** Source commit from which the exact published Host contract was audited. */
 export const TARGET_DSH_COMMIT = 'b150a551b8d465e31e418e1b2eaf5e79bbb7d28e'
 
-/** Stable first failure expected before the Extension Store is implemented. */
-export const STORE_SURFACE_MISSING = 'RED-B-STORE-SURFACE-MISSING'
+/** Stable failure when the packed Client does not expose the Store entry. */
+export const STORE_UI_SURFACE_MISSING = 'STORE-UI-SURFACE-MISSING'
 
-/** Stable product failure after an entry exists without the Store-default shell. */
-export const STORE_SHELL_MISSING = 'RED-B-STORE-SHELL-MISSING'
+/** Stable failure when the Store entry does not provide its ordinary-user shell. */
+export const STORE_UI_SHELL_MISSING = 'STORE-UI-SHELL-MISSING'
 
 /** Stable failure for a browser or Host request that leaves loopback. */
-export const EXTERNAL_NETWORK_OBSERVED = 'RED-B-EXTERNAL-NETWORK'
+export const STORE_UI_EXTERNAL_NETWORK_OBSERVED = 'STORE-UI-EXTERNAL-NETWORK'
 
 /** Error with a stable acceptance code. */
 export class AcceptanceFailure extends Error {
@@ -27,6 +35,117 @@ export class AcceptanceFailure extends Error {
     this.name = 'AcceptanceFailure'
     this.code = code
   }
+}
+
+/**
+ * Extract one exact package integrity from a pnpm lockfile.
+ * @param {string} lockfile Generated pnpm lockfile text.
+ * @param {string} packageName Exact package name.
+ * @param {string} version Exact package version.
+ * @returns {string} Registry integrity bound to the package snapshot.
+ */
+export function parsePnpmRegistryIntegrity(lockfile, packageName, version) {
+  if (typeof lockfile !== 'string' || typeof packageName !== 'string' || typeof version !== 'string'
+    || packageName.length === 0 || version.length === 0) {
+    throw new TypeError('pnpm registry integrity lookup requires non-empty strings')
+  }
+  const escaped = `${packageName}@${version}`.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+  const matches = [...lockfile.matchAll(
+    new RegExp(`^  ['"]?${escaped}['"]?:\\r?\\n(?: {4}[^\\r\\n]*\\r?\\n){0,8}? {4}resolution: \\{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\\}$`, 'gmu'),
+  )]
+  if (matches.length !== 1 || matches[0]?.[1] === undefined) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-LOCK-INTEGRITY',
+      `pnpm lockfile did not contain exactly one registry integrity for ${packageName}@${version}`,
+    )
+  }
+  return matches[0][1]
+}
+
+/**
+ * Require the Host executable and package to resolve inside the isolated root and outside the source project.
+ * @param {{hostRoot: string, projectRoot: string, dshBin: string, packageRoot: string}} paths Candidate paths.
+ */
+export function assertIsolatedOfficialHostPaths(paths) {
+  const hostRoot = resolve(paths.hostRoot)
+  const projectRoot = resolve(paths.projectRoot)
+  for (const [label, path] of [['DSH executable', paths.dshBin], ['DSH package', paths.packageRoot]]) {
+    const resolved = resolve(path)
+    if (!isInside(hostRoot, resolved) || isInside(projectRoot, resolved)) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-NOT-ISOLATED',
+        `${label} did not resolve inside the independent temporary Host root`,
+      )
+    }
+  }
+}
+
+/**
+ * Install and identify the exact official DSH package in an independent temporary project.
+ * @param {{hostRoot: string, projectRoot: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs?: number}} options Installation options.
+ * @returns {Promise<{dshBin: string, packageRoot: string, registry: string, registryIntegrity: string, packageTreeDigest: string, version: string}>} Bound Host identity.
+ */
+export async function installOfficialDshHost(options) {
+  await mkdir(options.hostRoot, { recursive: false, mode: 0o700 })
+  await writeFile(join(options.hostRoot, 'package.json'), `${JSON.stringify({ private: true }, null, 2)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  })
+  await runChecked('pnpm', [
+    '--dir', options.hostRoot,
+    'add', `@deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
+    '--save-exact', '--ignore-scripts',
+    '--config.enable-global-virtual-store=false',
+    `--registry=${OFFICIAL_NPM_REGISTRY}`,
+  ], {
+    cwd: options.cwd,
+    env: options.env,
+    timeoutMs: options.timeoutMs ?? 240_000,
+  })
+  const lockfile = await readFile(join(options.hostRoot, 'pnpm-lock.yaml'), 'utf8')
+  const registryIntegrity = parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', TARGET_DSH_VERSION)
+  if (registryIntegrity !== TARGET_DSH_REGISTRY_INTEGRITY) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-REGISTRY-INTEGRITY',
+      `official DSH registry integrity changed: ${registryIntegrity}`,
+    )
+  }
+  const packageRoot = await realpath(join(options.hostRoot, 'node_modules', '@deepseek-ai', 'dsh'))
+  const dshBin = await realpath(join(options.hostRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'dsh.cmd' : 'dsh'))
+  assertIsolatedOfficialHostPaths({
+    hostRoot: await realpath(options.hostRoot),
+    projectRoot: await realpath(options.projectRoot),
+    dshBin,
+    packageRoot,
+    registry: OFFICIAL_NPM_REGISTRY,
+  })
+  const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
+  if (manifest.name !== '@deepseek-ai/dsh' || manifest.version !== TARGET_DSH_VERSION || manifest.bin?.dsh !== 'lib/bin.js') {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-PACKAGE-IDENTITY',
+      'installed Host manifest did not match the admitted official DSH package identity',
+    )
+  }
+  return Object.freeze({
+    dshBin,
+    packageRoot,
+    registry: OFFICIAL_NPM_REGISTRY,
+    registryIntegrity,
+    packageTreeDigest: await immutablePackageTreeDigest(packageRoot),
+    version: manifest.version,
+  })
+}
+
+/**
+ * Hash one package tree without following nested symbolic links.
+ * @param {string} packageRoot Real package directory.
+ * @returns {Promise<string>} SHA-256 content-tree digest.
+ */
+export async function immutablePackageTreeDigest(packageRoot) {
+  const root = await realpath(packageRoot)
+  const hash = createHash('sha256')
+  await hashImmutableTree(root, root, hash)
+  return `sha256:${hash.digest('hex')}`
 }
 
 /**
@@ -101,7 +220,7 @@ export function parseReadyUrl(output) {
   if (match?.[1] === undefined) return undefined
   const url = new URL(match[1])
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.port === '') {
-    throw new AcceptanceFailure('RED-B-NON-LOOPBACK-WEB', `DSH Web announced a non-loopback URL: ${url.href}`)
+    throw new AcceptanceFailure('STORE-UI-NON-LOOPBACK-WEB', `DSH Web announced a non-loopback URL: ${url.href}`)
   }
   return url.origin
 }
@@ -258,4 +377,31 @@ function waitForChildClose(child, timeoutMs) {
     }, timeoutMs)
     child.once('close', onClose)
   })
+}
+
+function isInside(root, path) {
+  const offset = relative(root, path)
+  return offset === '' || offset !== '..' && !offset.startsWith(`..${sep}`)
+}
+
+async function hashImmutableTree(root, path, hash) {
+  const info = await lstat(path)
+  const name = relative(root, path).replaceAll('\\', '/') || '.'
+  if (info.isSymbolicLink()) {
+    hash.update(`link:${name}:${await readlink(path)}\0`)
+    return
+  }
+  if (info.isFile()) {
+    hash.update(`file:${name}:${String(info.size)}\0`)
+    hash.update(await readFile(path))
+    return
+  }
+  if (!info.isDirectory()) {
+    hash.update(`other:${name}\0`)
+    return
+  }
+  hash.update(`dir:${name}\0`)
+  const entries = (await readdir(path, { withFileTypes: true }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+  for (const entry of entries) await hashImmutableTree(root, join(path, entry.name), hash)
 }

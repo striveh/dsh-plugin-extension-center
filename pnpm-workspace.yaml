@@ -1,4 +1,5 @@
 autoInstallPeers: true
+nodeLinker: hoisted
 
 allowBuilds:
   # Match the reviewed build-script policy of the exact rc.2 Host release.

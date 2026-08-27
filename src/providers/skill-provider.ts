@@ -433,8 +433,8 @@ export class SkillLifecycleProvider implements LifecycleProvider {
       mutationDigest: canonicalSha256({ operationId: request.authorization.operationId, after: managedStateDigest(after) }),
       afterDigest: managedStateDigest(after),
       restartRequired: false,
-      profileGeneration: null,
-      rollbackRestart: false,
+      restartToken: null,
+      rollbackRestartRequired: false,
     })
   }
 
@@ -443,6 +443,32 @@ export class SkillLifecycleProvider implements LifecycleProvider {
     const operation = applied.prepared.request.plan.operationKind
     if (operation === 'uninstall' || operation === 'purge') {
       if (current?.current !== null) throw new Error('removed Skill remains active in center inventory')
+      const removed = operation === 'uninstall'
+        ? applied.prepared.before?.current
+        : applied.prepared.before?.removed ?? applied.prepared.before?.lastGood
+      if (removed !== null && removed !== undefined) {
+        const metadata = state(removed)
+        const config = configuration(removed.configuration)
+        const options = config.projectRoot === null ? {} : { cwd: config.projectRoot }
+        const snapshot = await this.skills.snapshot(options)
+        if (!snapshot.complete) throw new Error('Skill registry snapshot is incomplete')
+        const winner = snapshot.skills.find((item) => {
+          if (typeof item !== 'object' || item === null) return false
+          return (item as { name?: unknown }).name === metadata.skillName
+        }) as { provider?: unknown } | undefined
+        const definition = await this.skills.get(metadata.skillName, options) as { provider?: unknown } | undefined
+        if (winner?.provider === 'extension-center' || definition?.provider === 'extension-center') {
+          throw new Error('removed Skill still contributes to the merged registry')
+        }
+        return Object.freeze({
+          digest: canonicalSha256({
+            current: null,
+            skillName: metadata.skillName,
+            winnerProvider: typeof winner?.provider === 'string' ? winner.provider : null,
+            definitionProvider: typeof definition?.provider === 'string' ? definition.provider : null,
+          }),
+        })
+      }
       return Object.freeze({ digest: canonicalSha256({ current: null, provider: 'extension-center' }) })
     }
     const version = current?.current
@@ -603,8 +629,8 @@ export class SkillLifecycleProvider implements LifecycleProvider {
       mutationDigest: canonicalSha256({ operationId: request.authorization.operationId, after: managedStateDigest(current) }),
       afterDigest: managedStateDigest(current),
       restartRequired: false,
-      profileGeneration: null,
-      rollbackRestart: false,
+      restartToken: null,
+      rollbackRestartRequired: false,
     })
   }
 

@@ -7,7 +7,6 @@ import type { RpcJson } from '../service/rpc-contract.ts';
 export interface ProviderOperationRequest {
     readonly authorization: OperationAuthorization;
     readonly plan: PlanContent;
-    readonly entry: CatalogEntry;
     readonly payload: LifecyclePayload;
     readonly artifactPath: string | null;
     readonly signal: AbortSignal;
@@ -20,14 +19,14 @@ export interface PreparedProviderOperation {
     readonly stagingPath: string | null;
     readonly prepared: unknown;
 }
-/** Authoritative mutation result requiring owner verification or restart acknowledgement. */
+/** Authoritative mutation result; restart fields remain stable across process rehydration and rollback recovery. */
 export interface AppliedProviderOperation {
     readonly prepared: PreparedProviderOperation;
     readonly mutationDigest: Sha256Digest;
     readonly afterDigest: Sha256Digest;
     readonly restartRequired: boolean;
-    readonly profileGeneration: string | null;
-    readonly rollbackRestart: boolean;
+    readonly restartToken: string | null;
+    readonly rollbackRestartRequired: boolean;
 }
 /** Provider verification result bound into the operation journal. */
 export interface ProviderVerification {

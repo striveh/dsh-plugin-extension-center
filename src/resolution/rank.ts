@@ -9,6 +9,13 @@ import type {
 } from './types.ts'
 
 const TAG = /^[a-z0-9]+(?:[./-][a-z0-9]+)*$/
+const PERMISSION_KINDS = new Set(['credentials', 'filesystem', 'model-context', 'network', 'subprocess'])
+const PERMISSION_ACCESS = new Set(['execute', 'none', 'read', 'send', 'write'])
+
+interface RankedCandidate {
+  readonly projection: RetrievedCandidate
+  readonly materialIdentityDigest: `sha256:${string}`
+}
 
 function normalizedTags(values: readonly string[]): readonly string[] {
   return Object.freeze([...new Set(values.map(value => value.trim().toLowerCase()).filter(value => TAG.test(value)))].sort())
@@ -26,11 +33,13 @@ function canonicalNeed(value: CapabilityNeed): CapabilityNeed {
 }
 
 function existingSatisfies(need: CapabilityNeed, capability: ExistingCapability): boolean {
-  if (!capability.visible || !capability.observationComplete) return false
+  if (!capability.visible || !capability.observationComplete || !capability.authorityKnown) return false
   const tags = new Set(normalizedTags(capability.outcomeTags))
   const access = new Set(capability.dataAccess)
+  const maximum = new Set(need.maximumAuthority)
   return need.outcomeTags.every(tag => tags.has(tag))
     && need.requiredDataAccess.every(item => access.has(item))
+    && capability.authority.every(item => maximum.has(item))
 }
 
 function managementAction(row: InventoryRow): 'configure' | 'enable' | 'update' | 'restore' | undefined {
@@ -48,13 +57,16 @@ function managementAction(row: InventoryRow): 'configure' | 'enable' | 'update' 
 function inventoryMatches(need: CapabilityNeed, row: InventoryRow): boolean {
   if (row.candidateRef === null) return false
   const tags = normalizedTags(row.candidateRef.split(/[:@/_-]/u))
-  return need.outcomeTags.some(tag => tags.includes(tag))
+  return need.outcomeTags.every(tag => tags.includes(tag))
 }
 
-function authorityFlags(entry: CapabilityResolutionInput['catalog'][number]): readonly string[] {
-  return Object.freeze([...new Set(entry.permissions
-    .filter(permission => permission.access !== 'none')
-    .map(permission => `${permission.kind}:${permission.access}`))].sort())
+function authorityFlags(entry: CapabilityResolutionInput['catalog'][number]): readonly string[] | null {
+  const flags: string[] = []
+  for (const permission of entry.permissions) {
+    if (!PERMISSION_KINDS.has(permission.kind) || !PERMISSION_ACCESS.has(permission.access)) return null
+    if (permission.access !== 'none') flags.push(`${permission.kind}:${permission.access}`)
+  }
+  return Object.freeze([...new Set(flags)].sort())
 }
 
 function maximumAllows(need: CapabilityNeed, flags: readonly string[]): boolean {
@@ -64,20 +76,31 @@ function maximumAllows(need: CapabilityNeed, flags: readonly string[]): boolean 
     if (flag === 'filesystem:read') return maximum.has('filesystem-read')
     if (flag === 'filesystem:write') return maximum.has('filesystem-write')
     if (flag.startsWith('subprocess:')) return maximum.has('subprocess')
-    return true
+    if (flag.startsWith('credentials:')) return maximum.has('credentials')
+    if (flag.startsWith('model-context:')) return maximum.has('model-context')
+    return false
   })
 }
 
-function retrieve(input: CapabilityResolutionInput, need: CapabilityNeed): RetrievedCandidate[] {
-  const values: RetrievedCandidate[] = []
+function requiredAccessSatisfied(need: CapabilityNeed, flags: readonly string[]): boolean {
+  return need.requiredDataAccess.every((required) => {
+    if (required === 'network') return flags.some(flag => flag.startsWith('network:'))
+    if (required === 'filesystem-read') return flags.includes('filesystem:read') || flags.includes('filesystem:write')
+    if (required === 'filesystem-write') return flags.includes('filesystem:write')
+    return flags.some(flag => flag.startsWith('subprocess:'))
+  })
+}
+
+function retrieve(input: CapabilityResolutionInput, need: CapabilityNeed): RankedCandidate[] {
+  const values: RankedCandidate[] = []
   for (const entry of input.catalog) {
     const policy = input.policy.get(entry.candidateRef)
     if (policy?.status !== 'eligible' || !entry.compatibility.platforms.includes(need.platform)) continue
     const flags = authorityFlags(entry)
-    if (!maximumAllows(need, flags)) continue
+    if (flags === null || !maximumAllows(need, flags) || !requiredAccessSatisfied(need, flags)) continue
     const tags = normalizedTags(entry.tags)
     const matchedTags = need.outcomeTags.filter(tag => tags.includes(tag))
-    if (matchedTags.length === 0) continue
+    if (matchedTags.length !== need.outcomeTags.length) continue
     const requiredAccessCoverage = need.requiredDataAccess.filter((required) => {
       if (required === 'network') return flags.some(flag => flag.startsWith('network:'))
       if (required === 'filesystem-read') return flags.includes('filesystem:read') || flags.includes('filesystem:write')
@@ -89,24 +112,33 @@ function retrieve(input: CapabilityResolutionInput, need: CapabilityNeed): Retri
       + (entry.scopes.length === 1 ? 5 : 0)
       - flags.length
     values.push(Object.freeze({
-      candidateRef: entry.candidateRef,
-      kind: entry.kind,
-      artifactRevision: entry.artifact.version,
-      matchedTags: Object.freeze(matchedTags),
-      score,
-      authorityFlags: flags,
-      scopes: Object.freeze([...entry.scopes].sort()),
-      policy,
+      projection: Object.freeze({
+        candidateRef: entry.candidateRef,
+        kind: entry.kind,
+        artifactRevision: entry.artifact.version,
+        matchedTags: Object.freeze(matchedTags),
+        score,
+        authorityFlags: flags,
+        scopes: Object.freeze([...entry.scopes].sort()),
+        policy,
+      }),
+      materialIdentityDigest: canonicalSha256({
+        publisher: entry.publisher,
+        source: entry.source,
+        artifact: entry.artifact,
+      }),
     }))
   }
   return values.sort((left, right) =>
-    right.score - left.score || left.candidateRef.localeCompare(right.candidateRef))
+    right.projection.score - left.projection.score
+      || left.projection.candidateRef.localeCompare(right.projection.candidateRef))
 }
 
-function materiallyDifferent(left: RetrievedCandidate, right: RetrievedCandidate): boolean {
-  return left.kind !== right.kind
-    || left.authorityFlags.join('\u0000') !== right.authorityFlags.join('\u0000')
-    || left.scopes.join('\u0000') !== right.scopes.join('\u0000')
+function materiallyDifferent(left: RankedCandidate, right: RankedCandidate): boolean {
+  return left.projection.kind !== right.projection.kind
+    || left.projection.authorityFlags.join('\u0000') !== right.projection.authorityFlags.join('\u0000')
+    || left.projection.scopes.join('\u0000') !== right.projection.scopes.join('\u0000')
+    || left.materialIdentityDigest !== right.materialIdentityDigest
 }
 
 /**
@@ -144,9 +176,13 @@ export function resolveCapability(input: CapabilityResolutionInput): CapabilityR
   if (candidates.length === 0) return Object.freeze({ decision: 'no-eligible-candidate', needDigest })
   const best = candidates[0]!
   const alternatives = candidates.slice(1).filter(candidate =>
-    candidate.score * 1.25 >= best.score && materiallyDifferent(best, candidate))
+    candidate.projection.score * 1.25 >= best.projection.score && materiallyDifferent(best, candidate))
   if (alternatives.length > 0) {
-    return Object.freeze({ decision: 'choice-required', needDigest, candidates: Object.freeze([best, ...alternatives]) })
+    return Object.freeze({
+      decision: 'choice-required',
+      needDigest,
+      candidates: Object.freeze([best, ...alternatives].map(candidate => candidate.projection)),
+    })
   }
-  return Object.freeze({ decision: 'acquisition-candidate', needDigest, candidate: best })
+  return Object.freeze({ decision: 'acquisition-candidate', needDigest, candidate: best.projection })
 }

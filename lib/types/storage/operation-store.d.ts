@@ -1,6 +1,19 @@
 import { type Sha256Digest } from '../domain/index.ts';
 import { type JournalCheckpoint, type OperationJournal, type OperationProjection, type OperationReceipt } from '../operations/index.ts';
 declare const STORE_SCHEMA_VERSION: 1;
+/** @internal Fixed persistence seam used only by deterministic fault acceptance. */
+export type OperationStoreFaultPoint = 'journal-event-before-write' | 'journal-event-durable-before-current';
+/** @internal Exact Center-owned journal write observed by deterministic fault acceptance. */
+export interface OperationStoreFaultContext {
+    readonly operationId: string;
+    readonly targetKey: string;
+    readonly phase: OperationProjection['phase'];
+    readonly eventSequence: number;
+    readonly operationDirectory: string;
+    readonly currentPath: string;
+}
+/** @internal Optional deterministic failure callback; production Hosts do not supply one. */
+export type OperationStoreFaultInjector = (point: OperationStoreFaultPoint, context: OperationStoreFaultContext) => void | Promise<void>;
 /** Durable zero-mutation reservation spanning plan consumption and the first journal event. */
 export interface OperationReservation {
     readonly schemaVersion: typeof STORE_SCHEMA_VERSION;
@@ -32,12 +45,13 @@ export interface StoredReceipt {
  */
 export declare class FileOperationStore {
     private readonly root;
+    private readonly faultInjector?;
     private readonly queues;
     /**
      * Create a store below one center-owned data directory.
      * @param root Exact durable data directory.
      */
-    constructor(root: string);
+    constructor(root: string, faultInjector?: OperationStoreFaultInjector | undefined);
     /** Exact Center root passed to the pinned standalone recovery executable. */
     centerRoot(): string;
     /** Persist the exact pre-consumption reservation before the plan becomes single-use. */

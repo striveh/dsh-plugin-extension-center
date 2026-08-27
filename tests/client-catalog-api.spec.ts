@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { catalogListResponse, verifyBootstrapCatalog } from '../src/catalog.ts'
 import { createExtensionCatalogClient, parseCatalogListResponse } from '../src/client/catalog-api.ts'
 
-const response = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-25T10:15:00.000Z')))
+const response = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-27T00:00:01.000Z')))
 
 describe('catalog Client wire validation', () => {
   it('calls the catalog endpoint and deeply accepts the verified projection', async () => {
@@ -55,12 +55,12 @@ describe('catalog Client wire validation', () => {
 
     const enabled = structuredClone(response)
     enabled.hostCapabilities = {
-      profileTransaction: true,
+      managedPluginLifecycle: true,
       dynamicMcpConnection: true,
       durableContinuation: true,
       skillRegistry: true,
       toolRegistry: true,
-      loaderObservation: true,
+      loaderMutation: true,
       acquisition: true,
       reason: null,
     }

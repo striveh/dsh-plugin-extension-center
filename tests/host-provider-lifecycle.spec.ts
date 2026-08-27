@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -7,8 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
 import { CenterStateStore } from '../src/host/index.ts'
+import { operationRestartRequired } from '../src/policy/index.ts'
 import {
-  buildCapabilityResolverPatch,
   inspectNpmArchive,
   LoaderPluginRuntimeProbe,
   McpLifecycleProvider,
@@ -18,10 +18,12 @@ import {
   type AdmittedMcpRuntime,
   type AppliedProviderOperation,
   type LifecycleProvider,
+  type ManagedPluginLoader,
   type ProviderOperationRequest,
 } from '../src/providers/index.ts'
 import type { RpcJson } from '../src/service/rpc-contract.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
+import { ProfilePluginCli } from './support/managed-plugin-cli.ts'
 
 const roots: string[] = []
 
@@ -31,6 +33,9 @@ afterEach(async () => {
 
 class SkillRegistry {
   private provider: any
+  private frozenSnapshot: any | undefined
+  private readonly frozenDefinitions = new Map<string, any>()
+  useFrozenView = false
 
   registerProvider(create: (control: { signal: AbortSignal; invalidate(): void }) => any): () => void {
     this.provider = create({ signal: new AbortController().signal, invalidate() {} })
@@ -38,8 +43,9 @@ class SkillRegistry {
   }
 
   async snapshot(options?: unknown) {
+    if (this.useFrozenView && this.frozenSnapshot !== undefined) return structuredClone(this.frozenSnapshot)
     const candidates: any[] = this.provider === undefined ? [] : await this.provider.list(options)
-    return {
+    const snapshot = {
       complete: true,
       skills: candidates.map(({ name, description, whenToUse, invocation, source, provider, resourceBase }) => ({
         name,
@@ -51,14 +57,21 @@ class SkillRegistry {
         ...(resourceBase === undefined ? {} : { resourceBase }),
       })),
     }
+    this.frozenSnapshot = structuredClone(snapshot)
+    return snapshot
   }
 
   async list(options?: unknown) { return (await this.snapshot(options)).skills }
 
   async get(name: string, options?: unknown) {
+    if (this.useFrozenView && this.frozenDefinitions.has(name)) {
+      return structuredClone(this.frozenDefinitions.get(name))
+    }
     const candidates: any[] = this.provider === undefined ? [] : await this.provider.list(options)
     const candidate = candidates.find((item: any) => item.name === name)
-    return candidate === undefined ? undefined : await this.provider.get(candidate, options)
+    const definition = candidate === undefined ? undefined : await this.provider.get(candidate, options)
+    if (definition !== undefined) this.frozenDefinitions.set(name, structuredClone(definition))
+    return definition
   }
 }
 
@@ -75,10 +88,19 @@ class McpOwner {
   freezeNextToolGeneration = false
   readonly active = new Map<string, McpRow>()
   readonly removed = new Map<string, any>()
+  readonly residualToolNames = new Set<string>()
 
   snapshot() { return { revision: this.revision, connections: [...this.active.values()], removed: [...this.removed.values()] } }
   get(id: string) { return this.active.get(id) }
   getRemoved(id: string) { return this.removed.get(id) }
+  registeredToolNames(id: string, exactNames: readonly string[] = []) {
+    const prefix = `mcp__${id}__`
+    return [...new Set([
+      ...(this.active.get(id)?.tools.names ?? []),
+      ...this.residualToolNames,
+      ...exactNames.filter(name => this.residualToolNames.has(name)),
+    ])].filter(name => name.startsWith(prefix)).sort()
+  }
 
   async configure(request: any) {
     if (this.active.has(request.desired.id) || request.expectedRevision !== 0) throw new Error('configure conflict')
@@ -149,7 +171,7 @@ class McpOwner {
       tools: {
         generation: revision,
         digest: canonicalSha256({ id, revision, enabled }),
-        names: enabled ? [`${id}/read`] : [],
+        names: enabled ? [`mcp__${id}__read`] : [],
       },
     }
   }
@@ -160,103 +182,60 @@ class McpOwner {
   }
 }
 
-class ProfileOwner {
-  private state: any
-  private readonly generations = new Map<string, { treeDigest: string; path: string }>()
+interface LoaderRow {
+  readonly id: string
+  readonly options: Readonly<{ id?: string; name: string; config?: unknown; group?: boolean }>
+  readonly disabled: boolean
+  readonly refresh: () => Promise<void>
+  readonly fiber?: Readonly<{ state: number; await: () => Promise<void> }>
+}
 
-  constructor(private readonly root: string) {
-    this.state = {
-      profile: 'web', revision: 0, treeDigest: 'tree:0', effectivePath: join(root, 'profile-live'),
-      activeGeneration: null, lastGoodGeneration: null, rollbackGeneration: null, bootStatus: 'live',
-    }
+class MemoryLoader implements ManagedPluginLoader {
+  readonly rows = new Map<string, LoaderRow>()
+
+  async create(options: Readonly<{ name: string; config?: unknown }>): Promise<string> {
+    const id = `row-${String(this.rows.size + 1)}`
+    this.rows.set(id, {
+      id, options, disabled: false, refresh: async () => {}, fiber: { state: 2, await: async () => {} },
+    })
+    return id
   }
 
-  async initialize() {
-    await mkdir(this.state.effectivePath, { recursive: true })
-    await writeFile(join(this.state.effectivePath, 'cordis.patch.yml'), '[]\n', 'utf8')
+  async remove(id: string): Promise<void> {
+    this.rows.delete(id)
   }
 
-  async snapshot() { return structuredClone(this.state) }
-
-  async stage(request: any) {
-    if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-      throw new Error('Profile stage fence conflict')
-    }
-    const generation = `generation:${request.mutationId}`
-    const path = join(this.root, generation)
-    await mkdir(path, { recursive: true })
-    const currentPatch = await readFile(join(this.state.effectivePath, 'cordis.patch.yml'), 'utf8')
-    const patch = request.mutation.operation === 'configure' ? request.mutation.patch.nextUtf8 : currentPatch
-    await writeFile(join(path, 'cordis.patch.yml'), patch, 'utf8')
-    const treeDigest = canonicalSha256({ generation, mutation: request.mutation, patch })
-    this.generations.set(generation, { treeDigest, path })
-    return {
-      profile: request.profile,
-      mutationId: request.mutationId,
-      generation,
-      basedOnRevision: request.expectedRevision,
-      basedOnTreeDigest: request.expectedTreeDigest,
-      treeDigest,
-      mutation: request.mutation,
-    }
+  async update(id: string, options: Readonly<{ config?: unknown }>): Promise<void> {
+    const row = this.rows.get(id)
+    if (row === undefined) throw new Error(`missing loader row: ${id}`)
+    this.rows.set(id, { ...row, options: { ...row.options, ...options } })
   }
 
-  async commit(request: any) {
-    const generation = this.generations.get(request.generation)
-    if (generation === undefined) throw new Error('Profile generation is absent')
-    if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-      throw new Error('Profile commit fence conflict')
-    }
-    const before = structuredClone(this.state)
-    this.state = {
-      ...this.state,
-      revision: this.state.revision + 1,
-      treeDigest: generation.treeDigest,
-      effectivePath: generation.path,
-      activeGeneration: request.generation,
-      bootStatus: 'pending-restart',
-    }
-    return { operation: 'commit', before, after: structuredClone(this.state), restartRequired: true }
+  seed(name: string): void {
+    const id = `seed-${String(this.rows.size + 1)}`
+    this.rows.set(id, {
+      id, options: { name }, disabled: false, refresh: async () => {}, fiber: { state: 2, await: async () => {} },
+    })
   }
 
-  async abort() { return false }
-
-  async restoreLastGood(request: any) {
-    if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-      throw new Error('Profile restore fence conflict')
-    }
-    const target = this.state.rollbackGeneration ?? this.state.lastGoodGeneration
-    const generation = target === null ? undefined : this.generations.get(target)
-    if (target === null || generation === undefined) throw new Error('Profile recovery generation is absent')
-    const before = structuredClone(this.state)
-    this.state = {
-      ...this.state,
-      revision: this.state.revision + 1,
-      treeDigest: generation.treeDigest,
-      effectivePath: generation.path,
-      activeGeneration: target,
-      bootStatus: 'pending-restart',
-    }
-    return { operation: 'restore', before, after: structuredClone(this.state), restartRequired: true }
+  entries(): Iterable<LoaderRow> {
+    return this.rows.values()
   }
 
-  markBootVerified(generation: string) {
-    if (this.state.activeGeneration !== generation) throw new Error('wrong active generation')
-    if (this.state.lastGoodGeneration !== generation) {
-      this.state = {
-        ...this.state,
-        revision: this.state.revision + 1,
-        rollbackGeneration: this.state.lastGoodGeneration,
-        lastGoodGeneration: generation,
-        bootStatus: 'verified',
-      }
-    } else {
-      this.state = { ...this.state, bootStatus: 'verified' }
-    }
+  await(): Promise<void> {
+    return Promise.resolve()
   }
+}
 
-  async acknowledgeBoot() { return { before: this.state, after: this.state, restartRequired: false } }
-  async list() { return { snapshot: this.state, active: null, staged: [], recoverable: [] } }
+async function profileWithCordis(hostHome: string): Promise<string> {
+  const profile = join(hostHome, 'profiles', 'web')
+  const cordis = join(profile, 'node_modules', '@deepseek-ai', 'cordis')
+  await mkdir(cordis, { recursive: true })
+  await writeFile(join(cordis, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/cordis', version: '4.0.1', type: 'module', main: './index.js',
+  }))
+  await writeFile(join(cordis, 'index.js'), 'export const fixture = true\n')
+  return profile
 }
 
 function octal(value: number, length: number): Buffer {
@@ -283,17 +262,21 @@ function tarEntry(name: string, content: Buffer): Buffer {
 }
 
 async function pluginArchive(root: string): Promise<string> {
+  await mkdir(root, { recursive: true })
   const patch = Buffer.from('plugins:\n  dsh-capability-resolver: {}\n')
   const manifest = Buffer.from(JSON.stringify({
     name: 'dsh-capability-resolver',
     version: '0.1.0',
-    dsh: { bundle: { patch: './cordis.patch.yml' } },
+    type: 'module',
+    main: './index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web', inject: [] } },
+    peerDependencies: { '@deepseek-ai/cordis': '4.0.1' },
     scripts: { build: 'tsc', test: 'vitest run' },
     devDependencies: { typescript: '^6.0.0' },
   }))
   const archive = Buffer.concat([
     tarEntry('package/package.json', manifest),
-    tarEntry('package/index.js', Buffer.from('export default function apply() {}\n')),
+    tarEntry('package/index.js', Buffer.from("import '@deepseek-ai/cordis'\nexport default function apply() {}\n")),
     tarEntry('package/cordis.patch.yml', patch),
     Buffer.alloc(1024),
   ])
@@ -317,8 +300,10 @@ function request(input: Readonly<{
   mutationDigest?: `sha256:${string}`
   ownerRevision?: string
   reviewEvidence?: ProviderOperationRequest['plan']['reviewEvidence']
+  candidateRef?: string
 }>): ProviderOperationRequest {
-  const entry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === input.kind)!
+  const entry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === input.kind
+    && (input.candidateRef === undefined || candidate.candidateRef === input.candidateRef))!
   const profileId = input.profileId ?? 'web'
   const targetKey = `${input.kind}:${profileId}:${input.scopeKey}:${entry.name}`
   const runtimeBinding = input.runtimeBinding ?? null
@@ -335,7 +320,7 @@ function request(input: Readonly<{
       externalRuntimeAction,
       runtimeBinding,
       targetKey,
-      ownerKey: input.kind === 'plugin' ? 'profileTransactions' : input.kind === 'mcp' ? 'mcpConnections' : 'skills',
+      ownerKey: input.kind === 'plugin' ? 'managedPlugins' : input.kind === 'mcp' ? 'mcpConnections' : 'skills',
       scopeKey: input.scopeKey,
       profileId,
       authorizedAtMs: Date.now(),
@@ -359,14 +344,17 @@ function request(input: Readonly<{
       operationKind: input.operationKind,
       desiredState: input.desiredState,
       targetKey,
-      ownerKey: input.kind === 'plugin' ? 'profileTransactions' : input.kind === 'mcp' ? 'mcpConnections' : 'skills',
+      ownerKey: input.kind === 'plugin' ? 'managedPlugins' : input.kind === 'mcp' ? 'mcpConnections' : 'skills',
       scopeKey: input.scopeKey,
       profileId,
       idempotencyKey: `idem:${input.operationId}`,
       authorityDigest: canonicalSha256({ authority: input.operationId }),
+      configurationDigest: canonicalSha256(input.configuration),
+      retentionDigest: canonicalSha256({ candidateRef: entry.candidateRef, retainedData: entry.retainedData }),
       reviewEvidence: input.reviewEvidence ?? testReviewEvidence(input.kind, input.operationKind),
       mutationDigest: input.mutationDigest ?? canonicalSha256({ mutation: input.operationId }),
       verificationDigest: canonicalSha256({ verification: input.operationId }),
+      restartRequired: operationRestartRequired(entry, input.operationKind),
       createdAtMs: 1,
       expiresAtMs: 1_000_000,
       fences: {
@@ -374,7 +362,7 @@ function request(input: Readonly<{
         inventoryRevision: canonicalSha256({ inventory: input.operationId }),
         targetRevision: 'fixture',
         ownerRevision: input.ownerRevision ?? (input.kind === 'plugin'
-          ? (input.profileRevision ?? 'profile:0:tree:0')
+          ? (input.profileRevision ?? 'managed-plugin:0:tree:0')
           : input.kind === 'mcp'
             ? 'mcp:0'
             : 'skills:fixture'),
@@ -389,7 +377,6 @@ function request(input: Readonly<{
         profileRevision: input.profileRevision ?? 'profile:0:tree:0',
       },
     },
-    entry,
     payload: {
       configuration: input.configuration,
       continuationId: null,
@@ -477,18 +464,32 @@ describe('real provider lifecycle sequences', () => {
 
     await execute(provider, operation('update', 'update', 'enabled', config, updated, updatedIntegrity, originalBody, updatedBody))
     expect(await registry.get('documentation-writer')).toMatchObject({ description: 'Updated' })
-    await execute(provider, operation('uninstall', 'uninstall', 'removed', config, null, originalIntegrity, updatedBody))
+    const uninstallPrepared = await provider.prepare(operation(
+      'uninstall', 'uninstall', 'removed', config, null, originalIntegrity, updatedBody,
+    ))
+    registry.useFrozenView = true
+    const uninstallApplied = await provider.apply(uninstallPrepared)
+    await expect(provider.verify(uninstallApplied)).rejects.toThrow('still contributes')
+    registry.useFrozenView = false
+    await expect(provider.verify(uninstallApplied)).resolves.not.toBeNull()
+    await provider.cleanup(uninstallPrepared)
     expect(await registry.list()).toEqual([])
-    const restored = await execute(provider, operation('restore', 'restore', 'enabled', config, null, originalIntegrity, updatedBody))
+    const restored = await execute(provider, operation('restore', 'restore', 'enabled', config, null, updatedIntegrity, updatedBody))
     expect(await registry.get('documentation-writer')).toMatchObject({ description: 'Updated' })
     await expect(provider.rollback(restored)).resolves.toBe(restored.prepared.beforeDigest)
     expect(await registry.list()).toEqual([])
     const retained = (await store.getManaged(restored.prepared.request.plan.targetKey))?.removed?.materialPath
     expect(retained).toBeDefined()
     await expect(readFile(retained!, 'utf8')).resolves.toContain('Updated body.')
-    await execute(provider, operation('restore-again', 'restore', 'enabled', config, null, originalIntegrity, updatedBody))
+    await execute(provider, operation('restore-again', 'restore', 'enabled', config, null, updatedIntegrity, updatedBody))
     await execute(provider, operation('uninstall-again', 'uninstall', 'removed', config, null, originalIntegrity, updatedBody))
-    await execute(provider, operation('purge', 'purge', 'removed', config))
+    const purgePrepared = await provider.prepare(operation('purge', 'purge', 'removed', config))
+    registry.useFrozenView = true
+    const purgeApplied = await provider.apply(purgePrepared)
+    await expect(provider.verify(purgeApplied)).rejects.toThrow('still contributes')
+    registry.useFrozenView = false
+    await expect(provider.verify(purgeApplied)).resolves.not.toBeNull()
+    await provider.cleanup(purgePrepared)
     expect(await store.getManaged(operation('view', 'purge', 'removed', config).plan.targetKey)).toMatchObject({
       current: null, removed: null, lastGood: null,
     })
@@ -504,6 +505,8 @@ describe('real provider lifecycle sequences', () => {
     await chmod(executable, 0o700)
     const canonicalExecutable = await realpath(executable)
     const entry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'mcp')!
+    const nextEntry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'mcp'
+      && candidate.candidateRef !== entry.candidateRef)!
     const runtime: AdmittedMcpRuntime = {
       transport: 'stdio',
       runtimeRef: 'fixture-runtime',
@@ -514,25 +517,59 @@ describe('real provider lifecycle sequences', () => {
       fixedArgs: ['--stdio'],
       workingDirectory: await realpath(root),
     }
+    const nextRuntime: AdmittedMcpRuntime = {
+      ...runtime,
+      runtimeRef: 'fixture-runtime-next',
+      candidateRef: nextEntry.candidateRef,
+      version: nextEntry.artifact.version,
+      fixedArgs: ['--stdio', '--next'],
+    }
     const owner = new McpOwner()
-    const provider = new McpLifecycleProvider(store, owner as any, [runtime])
+    const provider = new McpLifecycleProvider(store, owner as any, [runtime, nextRuntime])
     const config = {
       transport: 'stdio', connectionId: 'filesystem', runtimeRef: runtime.runtimeRef, roots: [await realpath(root)], toolCallTimeoutMs: 5_000,
       reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 1_000, maxAttempts: 3 },
     }
     const preflight = await provider.preflight(entry.candidateRef, config)
+    const nextConfig = { ...config, runtimeRef: nextRuntime.runtimeRef }
+    const nextPreflight = await provider.preflight(nextEntry.candidateRef, nextConfig)
     const binding = { runtimeRef: runtime.runtimeRef, version: runtime.version, descriptorDigest: preflight!.descriptorDigest }
     const mcpEvidence = (kind: ProviderOperationRequest['plan']['operationKind']) => ({
       ...testReviewEvidence('mcp', kind),
       descriptor: preflight!.reviewDescriptor,
       runtime: { ownership: 'host' as const, version: runtime.version, digest: preflight!.runtimeDigest, action: 'none' as const },
     })
-    const operation = (id: string, kind: ProviderOperationRequest['plan']['operationKind'], desired: 'enabled' | 'disabled' | 'removed') => request({
-      kind: 'mcp', operationId: `operation:mcp-${id}`, operationKind: kind, desiredState: desired,
-      scopeKey: 'profile:web', configuration: config, runtimeBinding: binding,
-      ownerRevision: `mcp:${String(owner.get(config.connectionId)?.revision ?? owner.getRemoved(config.connectionId)?.revision ?? owner.revision)}`,
-      reviewEvidence: mcpEvidence(kind),
-    })
+    const operation = (
+      id: string,
+      kind: ProviderOperationRequest['plan']['operationKind'],
+      desired: 'enabled' | 'disabled' | 'removed',
+      selected: 'current' | 'next' = 'current',
+    ) => {
+      const selectedEntry = selected === 'current' ? entry : nextEntry
+      const selectedRuntime = selected === 'current' ? runtime : nextRuntime
+      const selectedConfiguration = selected === 'current' ? config : nextConfig
+      const selectedPreflight = selected === 'current' ? preflight! : nextPreflight!
+      return request({
+        kind: 'mcp', operationId: `operation:mcp-${id}`, operationKind: kind, desiredState: desired,
+        scopeKey: 'profile:web', configuration: selectedConfiguration, candidateRef: selectedEntry.candidateRef,
+        runtimeBinding: {
+          runtimeRef: selectedRuntime.runtimeRef,
+          version: selectedRuntime.version,
+          descriptorDigest: selectedPreflight.descriptorDigest,
+        },
+        ownerRevision: `mcp:${String(owner.get(config.connectionId)?.revision ?? owner.getRemoved(config.connectionId)?.revision ?? owner.revision)}`,
+        reviewEvidence: {
+          ...testReviewEvidence('mcp', kind),
+          descriptor: selectedPreflight.reviewDescriptor,
+          runtime: {
+            ownership: 'host' as const,
+            version: selectedRuntime.version,
+            digest: selectedPreflight.runtimeDigest,
+            action: 'none' as const,
+          },
+        },
+      })
+    }
 
     await expect(provider.prepare(request({
       kind: 'mcp', operationId: 'operation:mcp-stale-owner', operationKind: 'install', desiredState: 'disabled',
@@ -580,10 +617,34 @@ describe('real provider lifecycle sequences', () => {
     expect(owner.get('filesystem')).toMatchObject({ desired: { enabled: false }, tools: { names: [] } })
 
     await execute(provider, operation('enable', 'enable', 'enabled'))
-    expect(owner.get('filesystem')?.tools.names).toEqual(['filesystem/read'])
+    expect(owner.get('filesystem')?.tools.names).toEqual(['mcp__filesystem__read'])
+    await execute(provider, operation('update-next', 'update', 'enabled', 'next'))
+    expect(await store.getManaged(operation('view-next', 'update', 'enabled', 'next').plan.targetKey)).toMatchObject({
+      current: { candidateRef: nextEntry.candidateRef, configuration: nextConfig },
+      lastGood: { candidateRef: entry.candidateRef, configuration: config },
+    })
+    expect(owner.get('filesystem')?.desired.transport).toMatchObject({ args: ['--stdio', '--next', await realpath(root)] })
+    await execute(provider, operation('restore-active', 'restore', 'enabled'))
+    expect(await store.getManaged(operation('view-restored', 'restore', 'enabled').plan.targetKey)).toMatchObject({
+      current: { candidateRef: entry.candidateRef, configuration: config },
+      lastGood: { candidateRef: nextEntry.candidateRef, configuration: nextConfig },
+    })
+    expect(owner.get('filesystem')?.desired.transport).toMatchObject({ args: ['--stdio', await realpath(root)] })
+    await execute(provider, operation('disable-before-enabled-restore', 'disable', 'disabled'))
+    await execute(provider, operation('restore-enabled-state', 'restore', 'enabled'))
+    expect(owner.get('filesystem')).toMatchObject({ desired: { enabled: true }, observed: { state: 'ready' } })
     await execute(provider, operation('disable', 'disable', 'disabled'))
-    await execute(provider, operation('update', 'update', 'disabled'))
-    await execute(provider, operation('uninstall', 'uninstall', 'removed'))
+    await execute(provider, operation('enable-after-disable', 'enable', 'enabled'))
+    await execute(provider, operation('update', 'update', 'enabled'))
+    const priorToolName = owner.get('filesystem')!.tools.names[0]!
+    const uninstallPrepared = await provider.prepare(operation('uninstall', 'uninstall', 'removed'))
+    expect((uninstallPrepared.prepared as { ownerToolNames: readonly string[] }).ownerToolNames).toEqual([priorToolName])
+    const uninstallApplied = await provider.apply(uninstallPrepared)
+    owner.residualToolNames.add(priorToolName)
+    await expect(provider.verify(uninstallApplied)).rejects.toThrow('still exposes Tool registry entries')
+    owner.residualToolNames.clear()
+    await expect(provider.verify(uninstallApplied)).resolves.not.toBeNull()
+    await provider.cleanup(uninstallPrepared)
     expect(owner.getRemoved('filesystem')).toBeDefined()
     const restored = await execute(provider, operation('restore', 'restore', 'disabled'))
     expect(owner.get('filesystem')).toBeDefined()
@@ -592,7 +653,14 @@ describe('real provider lifecycle sequences', () => {
     expect(owner.getRemoved('filesystem')).toBeDefined()
     await execute(provider, operation('restore-again', 'restore', 'disabled'))
     await execute(provider, operation('uninstall-again', 'uninstall', 'removed'))
-    const purged = await execute(provider, operation('purge', 'purge', 'removed'))
+    owner.residualToolNames.add(priorToolName)
+    const purgePrepared = await provider.prepare(operation('purge', 'purge', 'removed'))
+    expect((purgePrepared.prepared as { ownerToolNames: readonly string[] }).ownerToolNames).toEqual([priorToolName])
+    const purged = await provider.apply(purgePrepared)
+    await expect(provider.verify(purged)).rejects.toThrow('still exposes Tool registry entries')
+    owner.residualToolNames.clear()
+    await expect(provider.verify(purged)).resolves.not.toBeNull()
+    await provider.cleanup(purgePrepared)
     expect(owner.getRemoved('filesystem')).toBeUndefined()
     await expect(provider.rollback(purged)).resolves.toBe(purged.prepared.beforeDigest)
     expect(owner.get('filesystem')).toBeUndefined()
@@ -617,22 +685,24 @@ describe('real provider lifecycle sequences', () => {
     await expect(probe.observe('dsh-capability-resolver', 'uninstall')).resolves.toMatchObject({ fiberPhase: 'absent' })
   })
 
-  it('runs Plugin install/configure/update/uninstall/restore only through Profile generations and boot evidence', async () => {
+  it('runs Plugin lifecycle through Center state, the official Profile CLI, and restart rehydration', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-plugin-lifecycle-'))
     roots.push(root)
-    const store = new CenterStateStore(root)
-    await store.initialize()
-    const owner = new ProfileOwner(root)
-    await owner.initialize()
-    const provider = new PluginLifecycleProvider(store, owner as any, {
-      observe: async (_packageName: string, operationKind: string) => ({
-        entryId: 'dsh-capability-resolver', moduleName: 'dsh-capability-resolver',
-        fiberPhase: operationKind === 'uninstall' ? 'absent' : 'active',
-      }),
-    })
-    const archive = await pluginArchive(root)
+    const centerRoot = join(root, 'center')
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), '{"name":"official-profile","dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
+    await writeFile(join(profile, 'cordis.patch.yml'), '[]\n')
+    const archive = await pluginArchive(join(centerRoot, 'artifacts', 'sha256'))
+    const archiveIntegrity = `sha256:${createHash('sha256').update(await readFile(archive)).digest('hex')}` as const
     const archiveInspection = await inspectNpmArchive(archive, null)
     const pluginEntry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'plugin')!
+    let store = new CenterStateStore(centerRoot)
+    let loader = new MemoryLoader()
+    const cli = new ProfilePluginCli(hostHome)
+    let provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await store.initialize()
+    await provider.initialize()
     const config = {
       freshCacheMs: 5_000, staleCacheMs: 30_000, fetchTimeoutMs: 10_000,
       maxCatalogBytes: 1_048_576, maxCatalogEntries: 2_000, maxTaskChars: 4_000,
@@ -646,13 +716,11 @@ describe('real provider lifecycle sequences', () => {
       configuration: RpcJson,
       artifactPath: string | null = null,
     ) => {
-      const snapshot = await owner.snapshot()
-      const profileRevision = `profile:${String(snapshot.revision)}:${snapshot.treeDigest}`
-      let mutationDigest: `sha256:${string}` | undefined
-      if (kind === 'configure') {
-        const patch = buildCapabilityResolverPatch(await readFile(join(snapshot.effectivePath, 'cordis.patch.yml'), 'utf8'), configuration)
-        mutationDigest = pluginConfigurationMutationDigest(patch, profileRevision)
-      }
+      const snapshot = await provider.snapshot('web')
+      const profileRevision = snapshot.ownerRevision
+      const mutationDigest = kind === 'configure'
+        ? pluginConfigurationMutationDigest(configuration, profileRevision)
+        : undefined
       const baseReview = testReviewEvidence('plugin', kind)
       const reviewEvidence = {
         ...baseReview,
@@ -668,45 +736,170 @@ describe('real provider lifecycle sequences', () => {
         dependencies: Object.entries(archiveInspection.peerDependencies).map(([id, afterVersion]) => ({
           id, kind: 'peer' as const, beforeVersion: null, afterVersion, required: true,
         })),
-        bundles: archiveInspection.bundlePatch === null ? [] : [{
-          id: pluginEntry.artifact.id,
-          action: kind === 'install' ? 'add' as const : 'update' as const,
-          patchDigest: archiveInspection.bundlePatch.digest,
-          patchBody: archiveInspection.bundlePatch.body,
-        }],
+        managedMaterial: {
+          ...baseReview.managedMaterial,
+          packageName: archiveInspection.name,
+          afterVersion: archiveInspection.version,
+          targetIntegrity: archiveIntegrity,
+        },
+        packageMetadata: {
+          bundlePatch: archiveInspection.bundlePatch === null ? null : {
+            path: 'cordis.patch.yml' as const,
+            patchDigest: archiveInspection.bundlePatch.digest,
+            patchBody: archiveInspection.bundlePatch.body,
+          },
+        },
+        activation: {
+          ...baseReview.activation,
+          profileDependency: kind === 'install' ? 'add' as const
+            : kind === 'update' ? 'replace' as const
+              : kind === 'uninstall' ? 'remove' as const
+                : kind === 'restore' ? 'restore' as const : 'retain' as const,
+          loaderEntry: kind === 'install' ? 'create' as const
+            : kind === 'update' ? 'replace' as const
+              : kind === 'uninstall' ? 'remove' as const
+                : kind === 'restore' ? 'restore' as const
+                  : kind === 'configure' ? 'replace' as const : 'retain' as const,
+          packageName: archiveInspection.name,
+        },
         scripts: { ...baseReview.scripts, after: archiveInspection.scripts },
       }
       return request({
         kind: 'plugin', operationId: `operation:plugin-${id}`, operationKind: kind, desiredState: desired,
-        scopeKey: 'profile:web', configuration, artifactPath, profileRevision, mutationDigest, reviewEvidence,
+        scopeKey: 'profile:web', configuration, artifactPath, artifactIntegrity: archiveIntegrity,
+        profileRevision, mutationDigest, reviewEvidence,
       })
-    }
-    const boot = async (applied: AppliedProviderOperation) => {
-      owner.markBootVerified(applied.profileGeneration!)
-      await provider.acknowledgeBoot({
-        operationId: applied.prepared.request.authorization.operationId,
-        targetKey: applied.prepared.request.plan.targetKey,
-        profileId: 'web',
-        generation: applied.profileGeneration!,
-      })
-      await expect(provider.verify(applied)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
     }
     const mutate = async (value: ProviderOperationRequest) => {
       const prepared = await provider.prepare(value)
+      await store.putProviderSnapshot({
+        schemaVersion: 1,
+        operationId: value.authorization.operationId,
+        targetKey: value.plan.targetKey,
+        before: prepared.before,
+        beforeDigest: prepared.beforeDigest,
+        recoveryPoint: provider.recoveryPoint(prepared),
+      })
       const applied = await provider.apply(prepared)
+      const restartRequired = value.plan.operationKind !== 'configure'
+      expect(applied.restartRequired).toBe(restartRequired)
+      if (!restartRequired) {
+        await expect(provider.verify(applied)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+        return applied
+      }
       await expect(provider.verify(applied)).resolves.toBeNull()
-      await boot(applied)
-      return applied
+      store = new CenterStateStore(centerRoot)
+      await store.initialize()
+      loader = new MemoryLoader()
+      const review = value.plan.reviewEvidence
+      if (review.kind !== 'plugin') throw new Error('Plugin fixture has no Plugin review evidence')
+      if (value.plan.desiredState === 'enabled') loader.seed(review.manifest.packageName)
+      provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+      await provider.initialize()
+      const recovered = await provider.recover(value)
+      expect(recovered).toMatchObject({
+        restartRequired: true,
+        rollbackRestartRequired: false,
+        restartToken: applied.restartToken,
+      })
+      await expect(provider.acknowledgeBoot({
+        operationId: value.authorization.operationId,
+        targetKey: value.plan.targetKey,
+        profileId: 'web',
+        restartToken: applied.restartToken!,
+      })).resolves.toBeUndefined()
+      await expect(provider.verify(recovered!)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+      return recovered!
     }
 
     await mutate(await operation('install', 'install', 'enabled', {}, archive))
+    const installed = join(profile, 'node_modules', 'dsh-capability-resolver')
+    expect((await lstat(installed)).isSymbolicLink()).toBe(false)
+    expect([...loader.rows.values()].map(row => row.options.name)).toEqual(['dsh-capability-resolver'])
     await mutate(await operation('configure', 'configure', 'enabled', config))
-    expect(await readFile(join((await owner.snapshot()).effectivePath, 'cordis.patch.yml'), 'utf8'))
-      .toContain('freshCacheMs: 5000')
+    expect((await store.getManaged(`plugin:web:profile:web:${pluginEntry.name}`))?.current?.configuration).toEqual(config)
+    const cliCallsBeforeConfigureRollback = cli.calls.length
+    const rejectedConfiguration = { ...config, maxResults: 4 }
+    const rejectedConfigure = await operation('configure-rollback', 'configure', 'enabled', rejectedConfiguration)
+    const rejectedPrepared = await provider.prepare(rejectedConfigure)
+    await store.putProviderSnapshot({
+      schemaVersion: 1,
+      operationId: rejectedConfigure.authorization.operationId,
+      targetKey: rejectedConfigure.plan.targetKey,
+      before: rejectedPrepared.before,
+      beforeDigest: rejectedPrepared.beforeDigest,
+      recoveryPoint: provider.recoveryPoint(rejectedPrepared),
+    })
+    const rejectedApplied = await provider.apply(rejectedPrepared)
+    await expect(provider.rollback(rejectedApplied)).resolves.toBe(rejectedPrepared.beforeDigest)
+    const liveRollback = await provider.recover(rejectedConfigure)
+    expect(liveRollback).toMatchObject({
+      restartRequired: false,
+      rollbackRestartRequired: false,
+      restartToken: null,
+    })
+    await expect(provider.verify(liveRollback!)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+    await provider.finalizeRollback(liveRollback!)
+    const configureRollbackFinalization = {
+      operationId: rejectedConfigure.authorization.operationId,
+      targetKey: rejectedConfigure.plan.targetKey,
+      beforeDigest: rejectedPrepared.beforeDigest,
+    }
+    await expect(provider.finalizeDurableRollback(configureRollbackFinalization)).resolves.toBe(true)
+    expect((await store.getManaged(`plugin:web:profile:web:${pluginEntry.name}`))?.current?.configuration).toEqual(config)
+    expect(cli.calls).toHaveLength(cliCallsBeforeConfigureRollback)
+    expect(JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))).toMatchObject({
+      name: 'official-profile', dependencies: { 'dsh-capability-resolver': `file:${archive}` },
+    })
+    expect(await readFile(join(profile, 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
     await mutate(await operation('update', 'update', 'enabled', config, archive))
     await mutate(await operation('uninstall', 'uninstall', 'removed', config))
+    await expect(lstat(installed)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(loader.rows.size).toBe(0)
     const restored = await mutate(await operation('restore', 'restore', 'enabled', config))
     expect((await store.getManaged(restored.prepared.request.plan.targetKey))?.current).not.toBeNull()
+    expect((await lstat(installed)).isSymbolicLink()).toBe(false)
+    expect([...loader.rows.values()].map(row => row.options.name)).toEqual(['dsh-capability-resolver'])
+    expect(cli.calls.map(call => call.kind)).toEqual(['add', 'remove', 'add'])
+    await expect(provider.finalizeDurableRollback(configureRollbackFinalization)).resolves.toBe(false)
     await expect(provider.prepare(await operation('purge', 'purge', 'removed', config))).rejects.toThrow('purge is unavailable')
+
+    const driftedConfigure = await operation(
+      'configure-rollback-core-drift',
+      'configure',
+      'enabled',
+      { ...config, maxResults: 4 },
+    )
+    const driftedPrepared = await provider.prepare(driftedConfigure)
+    await store.putProviderSnapshot({
+      schemaVersion: 1,
+      operationId: driftedConfigure.authorization.operationId,
+      targetKey: driftedConfigure.plan.targetKey,
+      before: driftedPrepared.before,
+      beforeDigest: driftedPrepared.beforeDigest,
+      recoveryPoint: provider.recoveryPoint(driftedPrepared),
+    })
+    const driftedApplied = await provider.apply(driftedPrepared)
+    await expect(provider.rollback(driftedApplied)).resolves.toBe(driftedPrepared.beforeDigest)
+    const driftedRecovery = await provider.recover(driftedConfigure)
+    expect(driftedRecovery).not.toBeNull()
+    const rolledBack = await store.getManaged(driftedConfigure.plan.targetKey)
+    if (rolledBack?.current === null || rolledBack === undefined) throw new Error('Plugin rollback fixture is absent')
+    await store.putManaged({
+      ...rolledBack,
+      revision: rolledBack.revision + 1,
+      current: {
+        ...rolledBack.current,
+        configuration: { ...config, maxResults: 99 },
+      },
+      updatedAtMs: Date.now(),
+    }, rolledBack.revision)
+    await expect(provider.verifyRollbackFinalization(driftedRecovery!))
+      .rejects.toThrow('has no exact restored state')
+    await expect(provider.finalizeDurableRollback({
+      operationId: driftedConfigure.authorization.operationId,
+      targetKey: driftedConfigure.plan.targetKey,
+      beforeDigest: driftedPrepared.beforeDigest,
+    })).resolves.toBe(false)
   })
 })

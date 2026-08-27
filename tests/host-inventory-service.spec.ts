@@ -7,10 +7,34 @@ import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { verifyBootstrapCatalog } from '../src/catalog.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
 import { CenterStateStore, storageKey, type HostOwners } from '../src/host/index.ts'
+import { SKILL_CANDIDATES } from '../src/kind-candidates.ts'
 import { HostInventoryService } from '../src/service/inventory-service.ts'
 import { McpLifecycleProvider } from '../src/providers/mcp-provider.ts'
 
 const roots: string[] = []
+
+function managedPluginSnapshots(
+  observe: (profileId: string) => Readonly<{
+    profileId: string
+    revision: number
+    digest: `sha256:${string}`
+    materialRoot: string
+    bootStatus: 'live' | 'pending-restart' | 'verified'
+    ownerRevision: string
+  }> = profileId => {
+    const digest = canonicalSha256({ profileId, managedPlugins: [] })
+    return {
+      profileId,
+      revision: 0,
+      digest,
+      materialRoot: '/managed-plugins',
+      bootStatus: 'live',
+      ownerRevision: `managed-plugin:0:${digest}`,
+    }
+  },
+) {
+  return { snapshot: async (profileId: string) => observe(profileId) }
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -32,14 +56,17 @@ function ownerFixture(failedSkill?: string): Readonly<{ owners: HostOwners; skil
   }]
   const removed = [{ id: 'beta', revision: 3 }]
   const loaderEntries = [{
-    id: 'z-plugin', options: { id: 'z-plugin', name: 'z-plugin' }, disabled: false, fiber: { state: 2 },
+    id: 'z-plugin', options: { id: 'z-plugin', name: 'z-plugin' }, disabled: false,
+    refresh: async () => {}, fiber: { state: 2, await: async () => {} },
   }, {
-    id: 'system-core', options: { id: 'system-core', name: '@deepseek-ai/system-core' }, disabled: false, fiber: { state: 2 },
+    id: 'system-core', options: { id: 'system-core', name: '@deepseek-ai/system-core' }, disabled: false,
+    refresh: async () => {}, fiber: { state: 2, await: async () => {} },
   }, {
-    id: 'group-child', options: { id: 'group-child', name: 'group-child', group: true }, disabled: false, fiber: { state: 2 },
+    id: 'group-child', options: { id: 'group-child', name: 'group-child', group: true }, disabled: false,
+    refresh: async () => {}, fiber: { state: 2, await: async () => {} },
   }]
   const owners: HostOwners = {
-    profileTransactions: {} as never,
+    managedPlugins: managedPluginSnapshots(),
     mcpConnections: {
       snapshot: () => {
         reverse = !reverse
@@ -97,7 +124,7 @@ describe('Host inventory owner normalization', () => {
     await state.initialize()
     const fixture = ownerFixture()
     const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
-    const inventory = new HostInventoryService(state, fixture.owners, () => catalog)
+    const inventory = new HostInventoryService(state, fixture.owners, () => catalog, managedPluginSnapshots())
 
     const first = await inventory.list('profile:web', 'web')
     const second = await inventory.list('profile:web', 'web')
@@ -123,7 +150,7 @@ describe('Host inventory owner normalization', () => {
     await state.initialize()
     const fixture = ownerFixture()
     const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
-    const inventory = new HostInventoryService(state, fixture.owners, () => catalog)
+    const inventory = new HostInventoryService(state, fixture.owners, () => catalog, managedPluginSnapshots())
 
     const user = await inventory.list('user', 'web')
     expect(user.rows.map(row => `${row.kind}:${row.extensionId}`)).toEqual([
@@ -150,7 +177,7 @@ describe('Host inventory owner normalization', () => {
     await state.initialize()
     const fixture = ownerFixture('documentation-writer')
     const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
-    const inventory = new HostInventoryService(state, fixture.owners, () => catalog)
+    const inventory = new HostInventoryService(state, fixture.owners, () => catalog, managedPluginSnapshots())
 
     const snapshot = await inventory.list('user', 'web')
     expect(snapshot.rows.find(row => row.extensionId === 'documentation-writer')).toMatchObject({
@@ -177,6 +204,7 @@ describe('Host inventory owner normalization', () => {
     const executableSha256 = `sha256:${createHash('sha256').update(executable).digest('hex')}` as const
     const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
     const source = catalog.envelope.entries.find(entry => entry.kind === 'mcp')!
+    const update = catalog.envelope.entries.find(entry => entry.kind === 'mcp' && entry.artifact.version === '1.3.0')!
     const runtime = {
       transport: 'stdio' as const,
       runtimeRef: 'runtime:filesystem-mcp:test',
@@ -204,7 +232,7 @@ describe('Host inventory owner normalization', () => {
       snapshot: () => ({ revision: 4, connections: [active], removed: [] }),
     }
     const owners: HostOwners = {
-      profileTransactions: null,
+      managedPlugins: null,
       mcpConnections: mcpOwner as never,
       taskContinuations: null,
       skills: null,
@@ -245,11 +273,21 @@ describe('Host inventory owner normalization', () => {
       updatedAtMs: 1,
     }, 0)
     const provider = new McpLifecycleProvider(state, mcpOwner as never, [runtime])
-    const inventory = new HostInventoryService(state, owners, () => catalog, version => provider.inspect(version))
+    const inventory = new HostInventoryService(
+      state,
+      owners,
+      () => catalog,
+      managedPluginSnapshots(),
+      version => provider.inspect(version),
+    )
 
     await expect(inventory.list('profile:web', 'web')).resolves.toMatchObject({
       rows: [{
         effective: 'active', agentVisibility: 'visible', verification: 'runtime',
+        updateObservation: {
+          status: 'available', candidateRef: update.candidateRef,
+          revision: update.artifact.version, integrity: update.artifact.integrity,
+        },
         evidence: { descriptorMatches: true, descriptorDigest: canonicalSha256(runtime), observedLifecycle: 'ready', qualifiedTools: ['filesystem/read'] },
       }],
     })
@@ -268,40 +306,24 @@ describe('Host inventory owner normalization', () => {
     })
   })
 
-  it('finds a distinct signed update by target identity instead of the old versioned candidateRef', async () => {
+  it('finds only the exact package-reviewed successor for an older managed Skill', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-inventory-update-'))
     roots.push(root)
     const state = new CenterStateStore(root)
     await state.initialize()
-    const material = 'managed v1\n'
-    const currentIntegrity = `sha256:${createHash('sha256').update(material).digest('hex')}`
-    const targetKey = 'skill:web:user:documentation-writer'
-    const materialPath = join(root, 'material', 'skills', storageKey(targetKey), storageKey(currentIntegrity), 'SKILL.md')
+    const [v1Identity, v2Identity] = SKILL_CANDIDATES.slice(1)
+    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const v1 = catalog.envelope.entries.find(entry => entry.candidateRef === v1Identity.candidateRef)!
+    const v2 = catalog.envelope.entries.find(entry => entry.candidateRef === v2Identity.candidateRef)!
+    const material = v1Identity.reviewBody!
+    const targetKey = 'skill:web:user:wiki-page-writer'
+    const materialPath = join(root, 'material', 'skills', storageKey(targetKey), storageKey(v1.artifact.integrity), 'SKILL.md')
     await mkdir(dirname(materialPath), { recursive: true })
     await writeFile(materialPath, material)
-    const baseCatalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
-    const source = baseCatalog.envelope.entries.find(entry => entry.kind === 'skill')!
-    const v1 = {
-      ...source,
-      candidateRef: 'skill:github-awesome-copilot/documentation-writer@v1',
-      artifact: { ...source.artifact, version: 'v1', integrity: currentIntegrity },
-    }
-    const v2 = {
-      ...source,
-      candidateRef: 'skill:github-awesome-copilot/documentation-writer@v2',
-      artifact: { ...source.artifact, version: 'v2', integrity: `sha256:${'2'.repeat(64)}` },
-    }
-    let catalog = {
-      ...baseCatalog,
-      envelope: {
-        ...baseCatalog.envelope,
-        entries: [...baseCatalog.envelope.entries.filter(entry => entry.kind !== 'skill'), v1, v2],
-      },
-    }
     await state.putManaged({
       schemaVersion: 1,
       kind: 'skill',
-      extensionId: 'documentation-writer',
+      extensionId: 'wiki-page-writer',
       targetKey,
       scopeKey: 'user',
       profileId: 'web',
@@ -316,7 +338,7 @@ describe('Host inventory owner normalization', () => {
         enabled: true,
         ownerRevision: 'skills:1',
         kindState: {
-          skillName: 'documentation-writer', description: 'Managed',
+          skillName: 'wiki-page-writer', description: 'Managed',
           modelInvocable: true, userInvocable: true,
         },
       },
@@ -326,42 +348,132 @@ describe('Host inventory owner normalization', () => {
       updatedAtMs: 1,
     }, 0)
     const owners: HostOwners = {
-      profileTransactions: {} as never,
+      managedPlugins: managedPluginSnapshots(),
       mcpConnections: {} as never,
       taskContinuations: {} as never,
       skills: {
         snapshot: async () => ({
           complete: true,
           skills: [{
-            name: 'documentation-writer', provider: 'extension-center',
+            name: 'wiki-page-writer', provider: 'extension-center',
             resourceBase: { kind: 'directory', path: dirname(materialPath) },
             invocation: { modelInvocable: true, userInvocable: true },
           }],
         }),
         get: async () => ({
-          name: 'documentation-writer', provider: 'extension-center', path: materialPath,
+          name: 'wiki-page-writer', provider: 'extension-center', path: materialPath,
           content: material, invocation: { modelInvocable: true, userInvocable: true },
         }),
       } as never,
       tools: {} as never,
       loader: {} as never,
     }
-    const inventory = new HostInventoryService(state, owners, () => catalog as never)
+    const inventory = new HostInventoryService(state, owners, () => catalog, managedPluginSnapshots())
 
     const available = await inventory.list('user', 'web')
     expect(available.rows[0]).toMatchObject({
-      updateObservation: { status: 'available', candidateRef: v2.candidateRef, revision: 'v2' },
+      updateObservation: {
+        status: 'available',
+        candidateRef: v2.candidateRef,
+        revision: v2.artifact.version,
+        integrity: v2.artifact.integrity,
+      },
       evidence: { winningProvider: 'extension-center', winningPath: materialPath, definitionLoaded: true },
     })
+  })
 
-    const v3 = {
-      ...source,
-      candidateRef: 'skill:github-awesome-copilot/documentation-writer@v3',
-      artifact: { ...source.artifact, version: 'v3', integrity: `sha256:${'3'.repeat(64)}` },
+  it('projects only an exact catalog-bound last-good version as an active restore target', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-inventory-restore-'))
+    roots.push(root)
+    const state = new CenterStateStore(root)
+    await state.initialize()
+    const [v1Identity, v2Identity] = SKILL_CANDIDATES.slice(1)
+    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const v1 = catalog.envelope.entries.find(entry => entry.candidateRef === v1Identity.candidateRef)!
+    const v2 = catalog.envelope.entries.find(entry => entry.candidateRef === v2Identity.candidateRef)!
+    const targetKey = 'skill:web:user:wiki-page-writer'
+    const v1Path = join(root, 'material', 'skills', storageKey(targetKey), storageKey(v1.artifact.integrity), 'SKILL.md')
+    const v2Path = join(root, 'material', 'skills', storageKey(targetKey), storageKey(v2.artifact.integrity), 'SKILL.md')
+    await mkdir(dirname(v1Path), { recursive: true })
+    await mkdir(dirname(v2Path), { recursive: true })
+    await writeFile(v1Path, v1Identity.reviewBody!)
+    await writeFile(v2Path, v2Identity.reviewBody!)
+    const configuration = { modelInvocable: true, userInvocable: true, projectRoot: null }
+    const version = (entry: typeof v1, materialPath: string, description: string) => ({
+      candidateRef: entry.candidateRef,
+      artifactRevision: entry.artifact.version,
+      artifactIntegrity: entry.artifact.integrity,
+      materialPath,
+      configuration,
+      enabled: true,
+      ownerRevision: 'skills:2',
+      kindState: {
+        skillName: 'wiki-page-writer', description,
+        modelInvocable: true, userInvocable: true,
+      },
+    })
+    const managed = {
+      schemaVersion: 1 as const,
+      kind: 'skill' as const,
+      extensionId: 'wiki-page-writer',
+      targetKey,
+      scopeKey: 'user',
+      profileId: 'web',
+      revision: 1,
+      lastOperationId: 'operation:test-update',
+      current: version(v2, v2Path, 'Current'),
+      lastGood: version(v1, v1Path, 'Retained'),
+      removed: null,
+      pending: null,
+      updatedAtMs: 2,
     }
-    catalog = { ...catalog, envelope: { ...catalog.envelope, entries: [...catalog.envelope.entries, v3] } }
+    await state.putManaged(managed, 0)
+    const owners: HostOwners = {
+      managedPlugins: managedPluginSnapshots(),
+      mcpConnections: {} as never,
+      taskContinuations: {} as never,
+      skills: {
+        snapshot: async () => ({ complete: true, skills: [{
+          name: 'wiki-page-writer', provider: 'extension-center',
+          resourceBase: { kind: 'directory', path: dirname(v2Path) },
+          invocation: { modelInvocable: true, userInvocable: true },
+        }] }),
+        get: async () => ({
+          name: 'wiki-page-writer', provider: 'extension-center', path: v2Path,
+          content: v2Identity.reviewBody!, invocation: { modelInvocable: true, userInvocable: true },
+        }),
+      } as never,
+      tools: {} as never,
+      loader: {} as never,
+    }
+    let projectedCatalog = catalog
+    const inventory = new HostInventoryService(state, owners, () => projectedCatalog, managedPluginSnapshots())
+
     await expect(inventory.list('user', 'web')).resolves.toMatchObject({
-      rows: [{ updateObservation: { status: 'unknown' } }],
+      rows: [{
+        candidateRef: v2.candidateRef,
+        restoreObservation: {
+          status: 'available',
+          candidateRef: v1.candidateRef,
+          revision: v1.artifact.version,
+          integrity: v1.artifact.integrity,
+        },
+        actions: { restore: { status: 'available' } },
+      }],
+    })
+
+    projectedCatalog = {
+      ...catalog,
+      envelope: {
+        ...catalog.envelope,
+        entries: catalog.envelope.entries.filter(entry => entry.candidateRef !== v1.candidateRef),
+      },
+    }
+    await expect(inventory.list('user', 'web')).resolves.toMatchObject({
+      rows: [{
+        restoreObservation: { status: 'unknown' },
+        actions: { restore: { status: 'unavailable', reason: 'no-exact-restore' } },
+      }],
     })
   })
 
@@ -405,7 +517,7 @@ describe('Host inventory owner normalization', () => {
     await state.putManaged(managed, 0)
     let failLoad = false
     const owners: HostOwners = {
-      profileTransactions: {} as never,
+      managedPlugins: managedPluginSnapshots(),
       mcpConnections: {} as never,
       taskContinuations: {} as never,
       skills: {
@@ -425,7 +537,7 @@ describe('Host inventory owner normalization', () => {
       tools: {} as never,
       loader: {} as never,
     }
-    const inventory = new HostInventoryService(state, owners, () => catalog)
+    const inventory = new HostInventoryService(state, owners, () => catalog, managedPluginSnapshots())
 
     await expect(inventory.verify('user', 'web', targetKey)).resolves.toMatchObject({
       rows: [{ effective: 'inactive', agentVisibility: 'not-visible', evidence: { definitionLoaded: true } }],
@@ -444,7 +556,7 @@ describe('Host inventory owner normalization', () => {
     })
   })
 
-  it('re-reads Profile and Loader owners so a managed Plugin cannot stay falsely active after drift', async () => {
+  it('re-reads the managed Plugin snapshot and Loader so a Plugin cannot stay falsely active after drift', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-inventory-plugin-drift-'))
     roots.push(root)
     const state = new CenterStateStore(root)
@@ -470,14 +582,14 @@ describe('Host inventory owner normalization', () => {
         materialPath: root,
         configuration: {},
         enabled: true,
-        ownerRevision: `profile:4:${treeDigest}`,
+        ownerRevision: `managed-plugin:4:${treeDigest}`,
         kindState: {
           packageName: source.artifact.id,
-          profileGeneration: generation,
+          restartToken: generation,
           treeDigest,
           loaderPhase: 'active',
           consumerObserved: true,
-          externalRestartObserved: true,
+          restartObserved: true,
           runtimeEvidence: {
             entryId: source.artifact.id,
             moduleName: source.artifact.id,
@@ -490,15 +602,18 @@ describe('Host inventory owner normalization', () => {
       pending: null,
       updatedAtMs: 1,
     }, 0)
-    let activeGeneration = generation
+    let bootStatus: 'verified' | 'pending-restart' = 'verified'
     let loaderActive = true
+    const pluginSnapshots = managedPluginSnapshots(profileId => ({
+      profileId,
+      revision: 4,
+      digest: treeDigest,
+      materialRoot: root,
+      bootStatus,
+      ownerRevision: `managed-plugin:4:${treeDigest}`,
+    }))
     const owners: HostOwners = {
-      profileTransactions: {
-        snapshot: async () => ({
-          profile: 'web', revision: 4, treeDigest, effectivePath: root, activeGeneration,
-          lastGoodGeneration: generation, rollbackGeneration: null, bootStatus: 'verified',
-        }),
-      } as never,
+      managedPlugins: pluginSnapshots,
       mcpConnections: null,
       taskContinuations: null,
       skills: null,
@@ -509,22 +624,33 @@ describe('Host inventory owner normalization', () => {
           id: source.artifact.id,
           options: { id: source.artifact.id, name: source.artifact.id },
           disabled: false,
-          fiber: { state: 2 },
+          refresh: async () => {},
+          fiber: { state: 2, await: async () => {} },
         }] : [],
       },
     }
-    const inventory = new HostInventoryService(state, owners, () => catalog)
+    const inventory = new HostInventoryService(state, owners, () => catalog, pluginSnapshots)
 
     await expect(inventory.list('profile:web', 'web')).resolves.toMatchObject({
-      rows: [{ effective: 'active', agentVisibility: 'visible', evidence: { consumerObserved: true } }],
+      rows: [{
+        effective: 'active',
+        agentVisibility: 'visible',
+        updateObservation: {
+          status: 'available',
+          candidateRef: 'plugin:dsh-capability-resolver@0.1.1',
+          revision: '0.1.1',
+          integrity: 'sha256:650fab654ad7a7c22d2dd34814d8625810b67d5b6345e6ffe136c19373127c17',
+        },
+        evidence: { consumerObserved: true },
+      }],
     })
     loaderActive = false
     await expect(inventory.list('profile:web', 'web')).resolves.toMatchObject({
       rows: [{ effective: 'degraded', agentVisibility: 'not-visible', evidence: { consumerObserved: false } }],
     })
-    activeGeneration = '00000000-0000-4000-8000-000000000742'
+    bootStatus = 'pending-restart'
     await expect(inventory.list('profile:web', 'web')).resolves.toMatchObject({
-      rows: [{ effective: 'degraded', agentVisibility: 'not-visible', evidence: { externalRestartObserved: false } }],
+      rows: [{ effective: 'degraded', agentVisibility: 'not-visible', evidence: { restartObserved: false } }],
     })
   })
 })

@@ -23,11 +23,12 @@ function configurationDiff(value: RpcJson): string {
 /** Ordinary-user projection of the exact kind-specific facts protected by the plan hash. */
 export function ReviewEvidenceDetails({ evidence, t }: Readonly<{ evidence: PlanReviewEvidence; t: Translate }>) {
   const exact = evidence.kind === 'plugin'
-    ? {
+      ? {
         manifest: evidence.manifest,
         dependencies: evidence.dependencies,
-        lockfile: evidence.lockfile,
-        bundles: evidence.bundles,
+        managedMaterial: evidence.managedMaterial,
+        packageMetadata: evidence.packageMetadata,
+        activation: evidence.activation,
         scripts: evidence.scripts,
         settings: evidence.settings,
       }
@@ -193,9 +194,10 @@ export function PlanReview({ preview, candidate, management, configuration, init
   const permissions = candidateBound
     ? candidate.permissions.filter(permission => permission.access !== 'none')
     : []
-  const restart = candidateBound
-    ? `${candidate.restart.required ? t('restart.required') : t('restart.notRequired')} · ${localize(candidate.restart.detail, language)}`
-    : t('field.notDeclared')
+  const restart = `${plan.content.restartRequired ? t('restart.required') : t('restart.notRequired')}`
+    + (candidateBound && plan.content.restartRequired
+      ? ` · ${localize(candidate.restart.detail, language)}`
+      : '')
   const retention = candidateBound ? localize(candidate.retainedData, language) : t('field.notDeclared')
 
   return (

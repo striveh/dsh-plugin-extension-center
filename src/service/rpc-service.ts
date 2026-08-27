@@ -92,18 +92,21 @@ function inventoryVerifyRequest(payload: unknown): Readonly<{ scopeKey: string; 
 
 function configurationOptionsRequest(payload: unknown): Readonly<{
   candidateRef: string
+  operationKind: OperationKind
   targetKey: string | null
   scopeKey: string
   profileId: string
 }> {
-  const input = exact(payload, ['candidateRef', 'profileId', 'protocolVersion', 'scopeKey', 'targetKey'])
+  const input = exact(payload, ['candidateRef', 'operationKind', 'profileId', 'protocolVersion', 'scopeKey', 'targetKey'])
   protocol(input)
   if (typeof input.candidateRef !== 'string' || !CANDIDATE.test(input.candidateRef)
+    || typeof input.operationKind !== 'string' || !OPERATIONS.has(input.operationKind as OperationKind)
     || (input.targetKey !== null && (typeof input.targetKey !== 'string' || !SAFE_ID.test(input.targetKey)))) {
     throw new Error('configuration candidateRef is invalid')
   }
   return Object.freeze({
     candidateRef: input.candidateRef,
+    operationKind: input.operationKind as OperationKind,
     targetKey: input.targetKey as string | null,
     scopeKey: id(input.scopeKey, 'scopeKey', 128),
     profileId: id(input.profileId, 'profileId', 128),
@@ -208,16 +211,6 @@ function taskChoiceRequest(payload: unknown): Readonly<{ taskAttemptId: string; 
   return Object.freeze({ taskAttemptId: input.taskAttemptId, candidateRef: input.candidateRef })
 }
 
-function bootAck(payload: unknown): Readonly<{ operationId: string; profileId: string; generation: string }> {
-  const input = exact(payload, ['generation', 'operationId', 'profileId', 'protocolVersion'])
-  protocol(input)
-  return Object.freeze({
-    operationId: id(input.operationId, 'operationId'),
-    profileId: id(input.profileId, 'profileId', 128),
-    generation: id(input.generation, 'generation'),
-  })
-}
-
 function badRequest(message: string) {
   return { ok: false as const, error: { code: 'bad-request' as const, message, details: { issues: [] } } }
 }
@@ -265,7 +258,7 @@ export function createHostRpcHandler(source: HostRpcServicesSource): ConnectionR
     const execute = async (signal: AbortSignal): ReturnType<ConnectionRpcHandler> => {
       if (signal.aborted) return cancelled()
       try {
-        if (['intent/preview', 'approval/configure', 'plan/decide', 'lifecycle/request', 'operation/recover', 'operation/ack-profile-boot'].includes(endpoint)
+        if (['intent/preview', 'approval/configure', 'plan/decide', 'lifecycle/request', 'operation/recover'].includes(endpoint)
           && !currentCapabilities(input).acquisition) {
           return badRequest('Extension Center writes are unavailable because a required Host capability is absent')
         }
@@ -411,13 +404,6 @@ export function createHostRpcHandler(source: HostRpcServicesSource): ConnectionR
           const requested = operationId(payload)
           const prior = await input.operations.get(requested)
           const response = await input.operations.recoverOperation(requested, signal)
-          if (prior !== null) await input.acquisition?.recordLifecycleResult(prior.projection.planHash, response.status)
-          return { ok: true, value: response }
-        }
-        case 'operation/ack-profile-boot': {
-          const request = bootAck(payload)
-          const prior = await input.operations.get(request.operationId)
-          const response = await input.operations.acknowledgeProfileBoot(request, signal)
           if (prior !== null) await input.acquisition?.recordLifecycleResult(prior.projection.planHash, response.status)
           return { ok: true, value: response }
         }

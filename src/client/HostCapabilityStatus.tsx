@@ -6,21 +6,21 @@ type Translate = (key: ExtensionCenterKey) => string
 
 type HostCapabilityEvidence = Pick<
   CatalogHostCapabilities,
-  | 'profileTransaction'
+  | 'managedPluginLifecycle'
   | 'dynamicMcpConnection'
   | 'durableContinuation'
   | 'skillRegistry'
   | 'toolRegistry'
-  | 'loaderObservation'
+  | 'loaderMutation'
 >
 
 const HOST_CAPABILITIES = [
-  ['profileTransaction', 'capability.profileTransaction'],
+  ['managedPluginLifecycle', 'capability.managedPluginLifecycle'],
   ['dynamicMcpConnection', 'capability.dynamicMcpConnection'],
   ['durableContinuation', 'capability.durableContinuation'],
   ['skillRegistry', 'capability.skillRegistry'],
   ['toolRegistry', 'capability.toolRegistry'],
-  ['loaderObservation', 'capability.loaderObservation'],
+  ['loaderMutation', 'capability.loaderMutation'],
 ] as const satisfies readonly (readonly [keyof HostCapabilityEvidence, ExtensionCenterKey])[]
 
 /** Render every independent writable-Host preflight fact. */

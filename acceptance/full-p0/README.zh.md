@@ -1,52 +1,71 @@
-# 完整 P0 Host Owner Acceptance Red
+# 基于官方 DSH rc.2 的完整 P0 验收
 
 [English](README.md) | 中文
 
-本目录负责从签名商店走向可写 P0 的不可变已发布 Host 负向通道。Runner 把最终 Extension Center tarball 安装到准确当前已发布 Host 的隔离 Web Profile，启动真实 Web Host，通过唯一一个通用 Connection RPC 读取已验证目录，并在不发送写请求的前提下检查全部六项必需 Host owner。
+本目录定义独立扩展中心的 Release 验收要求。完整 lane 使用官方 CLI，把 packed Center 安装到隔离且未经修改的 `@deepseek-ai/dsh@0.1.1-rc.2` 环境，并通过真实 Host 与 Web Client 运行 Plugin、MCP、Skill 与 Continuation 旅程。缺少绑定待审 Release 的一份生命周期终态通过 receipt，以及分别通过的公开 Release、Pages 与 CI receipt 时，不成立 P0 主张。
 
 ## 准确目标
 
-- Extension 形态：由 `pnpm pack` 生成、作为 Host+Web Client Bundle 安装的 tarball。
-- Host package：来自本项目已安装依赖的准确 `@deepseek-ai/dsh@0.1.1-rc.2`。
-- 已审计 Host source：commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`（`dsh-v0.1.1-rc.2`）。
-- 按稳定顺序要求的 owner：Profile transaction、dynamic MCP connection、durable continuation、Skill registry、Tool registry 与 Loader observation。
+- Center artifact：从已提交 `lib/` 产物生成且不声明 package lifecycle script 的准确确定性 tarball。Release 决策使用的必须是准确 `main` push Node 22 CI job 随 `SHA256SUMS` 与自摘要 attestation 一起上传的 tarball。
+- Host artifact：官方 `@deepseek-ai/dsh@0.1.1-rc.2`，已审计 commit 为 `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`。
+- Center 安装：通过已发布 CLI 执行 `dsh plugin --profile web add <packed-center-artifact>`。
+- 子扩展所有权：扩展中心拥有准确暂存与保留的 Plugin archive、plan、grant、journal、receipt、验证、恢复编排与 continuation claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，只有官方 Profile package manager 拥有 dependency、lock 数据、`node_modules`、Bundle membership 与最终 Loader row；MCP desired state 与 Skill 物料仍由扩展中心拥有。
+- 官方观测：Loader 与声明的 consumer、MCP Client 握手与 Tool 可见性、Skill registry 可见性，以及 Agent/Session continuation dispatch。
 
-当前 Host 有意作为负兼容基线。它的第一个稳定产品失败是：
-
-```text
-P0-RED-HOST-PROFILE-TRANSACTION-OWNER-MISSING
-```
+扩展中心自身不进入自己的管理 inventory；更新、降级和卸载只能由用户通过官方 `dsh plugin --profile web ...` 命令完成。
 
 ## 运行
 
 ```sh
 node --test acceptance/full-p0/support.test.mjs
-node acceptance/full-p0/host-owner-gate.mjs
-DSH_LOCAL_HEAD_ROOT=/absolute/path/to/deepseek-harness-host pnpm run test:acceptance:local-head
+node --test acceptance/full-p0/receipt-binding.test.mjs
+pnpm run test:acceptance:official-rc2
 ```
 
-Support suite 必须以零退出。`host-owner-gate.mjs` 当前必须以上述稳定失败非零退出，并写入 `.artifacts/acceptance/full-p0-host-owner-gate/receipt.json`。缺失 tarball role、Host 启动损坏、RPC 响应畸形、外部请求、状态变化或 teardown 失败都是 `invalid`，不是预期产品 Red。
+Runner 必须从隔离的官方 rc.2 安装中解析 CLI 与全部 Host package。DSH 源码 checkout、修改过的 Host package、workspace import、未打包的 Center 源码树或仅 mock 的 runtime 都必须被拒绝，不能成为 Release evidence。
 
-## 只读 preflight
+## 证据类别
 
-Packed artifact 安装是观测开始前完成的隔离 setup。真实 Host 报告 ready 后，Runner 对可变 DSH home、Agents home、workspace 与 Profile 状态计算摘要，并排除依赖树。然后只发送一个请求：
+- `Lifecycle`：该完整 runner 的终态 receipt 覆盖准确未修改官方 rc.2 artifact 上的浏览器授权与变更、分类型 Plugin/MCP/Skill operation、受控外部 CLI ABA 顺序、packed break-glass recovery 与原任务续行。
+- `Bootstrap release`：rc.0 把前一 Center artifact、前一 CI receipt、前一 release-ready receipt 与前一 evidence run 明确记录为 `null`。其 package 内置签名目录 revision `rN` 仍必须从 Pages 刷新到已提交且已签名的准确相邻后继 `rN+1`，并通过公开 GitHub Release 安装、绑定准确 commit 的 Ubuntu/macOS CI 与确定性 pack attestation 验证。
+- `Update release`：此后的每个 prerelease 或 stable release 必须证明不同前一版本到当前版本的 Center artifact 更新，并绑定前一 Release 的准确成功 post-publication receipt。前一 receipt 已部署的 `rN` 必须成为当前 artifact 的 package 内置 bootstrap；当前 Pages deployment 则必须是已签名的相邻后继 `rN+1`。
+- `External`：Release、Pages 与 CI 状态只能来自绑定准确已发布 commit 和 asset 的生成 receipt。Repository setting、源码文件、已配置 workflow 与本地测试输出只是输入，不是发布证据。
+- `Advisory`：live provider compatibility smoke 不阻塞 P0，也不能替代确定性的无密钥 Agent receipt。
 
-```text
-POST /dsh-extension-center/catalog/list
-method = catalog/list
-payload = { "protocolVersion": 1 }
-```
+## 必跑旅程
 
-相关联响应必须展示已验证的签名目录 revision 与六个 owner boolean。Runner 随后重新计算同一状态的摘要，并要求可变状态逐字节相同。Provider credential 与 endpoint override 会被移除，telemetry 被禁用，遵守代理的非 loopback Host 流量会被记录并拒绝。Runner 不发送 acquisition、intent、plan、confirmation、install、configure、update、uninstall 或 restore method。
+一份完整 receipt 必须绑定准确 Center tarball、官方 Host package identity、catalog revision、隔离状态根、browser origin、plan digest、operation journal 与终态证据。Release lane 必须证明：
+
+1. 商店搜索与任务驱动 Capability RAG 读取同一份已验证签名目录，并产生绑定候选的不可变计划。
+2. 每项变更都等待未过期且一次性使用的 loopback 人工授权；模型侧输入不能包含 package name、URL、shell command、credential 或 approval。
+3. 受管 Plugin 完成 v1 安装与必需 Host 重启、同 Host Loader 配置、v2 更新与重启、声明 consumer 验证、回滚到保留版本、卸载与 break-glass recovery。扩展中心暂存并锁定准确 archive，但每个已准入 child Plugin Bundle 的 Profile membership 变更都通过官方 `dsh plugin --profile` CLI；纯配置使用官方 Loader API。扩展中心绝不直接写 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row。
+4. 受管 MCP connection 通过扩展中心自有 desired-state record 挂载官方 MCP Client，并完成配置、启用、握手与 Tool 可见性、更新、禁用、恢复、移除和永久清除。
+5. 受管 Skill 使用扩展中心自有文件与官方 Skill registry，完成安装、配置、registry 可见性、更新、禁用、启用、恢复、卸载和永久清除。
+6. 任务来源的获取使用官方 DSH Replay，并且只替换模型响应这一条边。真实官方 Agent、Session log、Tool dispatch、扩展中心受管 Skill 加载与使用、持久化 continuation claim 及 receipt 路径必须验证所获取能力，并且只向原 Session 派发一次续行；商店来源的获取不创建 continuation claim。
+7. 注入的 commit 前后故障必须保持 journal chain 完整，且只恢复已批准 target：直接恢复扩展中心自有 MCP、Skill 或 continuation 状态，child Plugin 则只通过官方 CLI 恢复。对已安装 Profile，扩展中心必须从变更前的准确 manifest、lock、modules metadata、已安装 manifest 与 canonical store 合成 owner-only、content-addressed pnpm 11 metadata generation。Provider recovery snapshot 必须绑定 generation identity、manifest 与文件 digest，使正常与 break-glass 路径在下一次 Profile 写入前重新验证同一组本地事实。执行期保持 offline 且禁用 lifecycle script；物料缺失或变更必须 fail closed，cache 不联系 registry，也不承诺不可用的 byte。只有同时没有 lock 与 `node_modules` 安装的 fresh Profile 才使用扩展中心私有 store。Break-glass schema v5 与 official-execution binding v2 还必须固定 Node、supervisor、私有 bundled pnpm、官方 package 及 production closure、entrypoint 与 `hostHome`，拒绝 Profile execution control，终止 orphan process group，通过该 CLI 恢复准确 Profile before-state，验证后才提交 Center state。部分 observation 绝不能变成成功 receipt；Windows mutation 与 recovery 必须 fail closed。
+8. 使用官方 CLI 移除 child Plugin 与扩展中心后，官方 DSH 源码与 package tree 保持不变，预期 Profile package-manager 变化有明确记录，且只保留用户明确选择保留的数据。
+
+## 证据与失败规则
+
+完整 Release runner 必须启动真实 Web Host 与 browser Client，使用 loopback Connection RPC 完成授权与变更，独立重算 plan/receipt hash，验证每个 journal link 与终态 checkpoint，并在每步操作后检查准确官方 Profile 与扩展中心自有状态。它必须把 setup download 与产品运行期网络证据分开，并在受测旅程中只准入显式锁定的 fixture origin。Provider credential、endpoint override、telemetry、原始任务文本和私有目录数据不能进入 receipt 或 log。
+
+官方 rc.2 服务缺失、Host 提前退出、目录过期、授权被拒或 replay、owner revision 漂移、物料不一致、metadata-cache generation 缺失或被篡改、Loader/Tool/Skill/continuation 证据缺失、恢复绑定漂移或 teardown 残留都必须 fail closed。该 lane 还必须运行受控的其他进程官方 CLI A→B→A 顺序，并要求进入 `recovery-required` 而不是虚假终态成功；仅有 Center target lock 不足以证明。该 receipt 只覆盖受测顺序，不声称覆盖所有可能的进程交错。只读商店通过是有用证据，但不能满足该通道。
+
+任何仍期待 `profileTransactions`、本地 DSH HEAD、六个上游 Host owner 或 Host PR 的 legacy fixture 都只能作为拒绝用例，绝不能被报告成前置条件或兼容性 receipt。
+
+## 复合 Release 证据
+
+最终 Release 决策组合彼此独立的 receipt，不扩大任何单个 runner 的主张：
+
+1. 完整官方 rc.2 生命周期 receipt 绑定 packed artifact、浏览器旅程、子扩展生命周期、恢复、受控 ABA 顺序与无密钥 Agent 续行。
+2. Runtime Release receipt 证明 Host 启动、Client 启动、RPC 注册、准确官方 DSH tree 保持不变；提供前一 artifact 时，还会在同一 Profile 中证明不同前一版本到当前版本的扩展中心更新。
+3. 公开 Release receipt 要求 Release asset 准确且仅为 CI tarball、`SHA256SUMS` 与 pack attestation，下载并逐一绑定三个 asset 的 byte，使用 GitHub CLI 验证显式 immutable Release 与每个 asset，再结合 runtime receipt 证明官方 CLI install、可选 update 与 remove。
+4. 公开目录 receipt 从准确已提交的 `catalog/public/plugins.json` 推导预期坐标，在固定 Pages URL 验证该 canonical byte，并证明 runtime 从 package 内置 bootstrap 刷新到其准确签名相邻后继且未进入 degraded fallback。
+5. CI receipt 把声明的 Ubuntu 与 macOS job 绑定到准确 Release commit，并下载唯一的 `main` push Node 22 Release-candidate artifact。它验证 Actions archive digest、run id 与 attempt、有界且 path-safe 的准确三 entry ZIP、每个 entry 的 digest 与 size、source commit、packed manifest、bundled pnpm tree 与 tarball byte。Downloader 只接受固定 GitHub API URL，以及随后一次准入的 GitHub Actions 或 Azure Blob storage redirect。Runtime、公开 Release 与复合 receipt 交叉绑定当前 CI artifact；更新还必须提供前一 artifact 的独立 CI receipt，bootstrap 则把它明确记录为 `null`。
+6. 对更新 Release，post-publication workflow 会使用调用者提供的成功 run id 下载准确前一 release-ready receipt，验证其 workflow、branch、终态、commit、version、immutable Release identity、目录迁移以及 receipt 自身绑定的 CI 与验收 evidence，并把该 run id 和 receipt digest 写入新的 schema-v2 composite receipt。rc.0 没有前驱。强制序列是 rc.0 `r8→r9`，rc.1 package 内置 `r9` 并部署 `r10`，随后 stable 直接从 rc.1 晋级、package 内置 `r10` 并部署 `r11`。
+
+公开 Release、Pages 与已完成 CI 主张必须具备各自的生成 receipt。源码文件、已配置 workflow、repository setting 或本地测试不能满足这些外部观测。
 
 ## 证明边界
 
-未来通过本 lane 只证明 packed Extension Center 能在准确 Host artifact 上观察六项 readiness gate。Boolean 存在不是 owner 行为证据，也不能让完整 P0 转绿。Profile generation promotion/rollback、实时 MCP tool-generation ownership、durable single-use cross-restart continuation、生命周期动作、任务获取、恢复、package 更新/移除与真实 provider task 都需要各自的 Acceptance lane。
-
-最终 P0 兼容声明必须针对准确已发布、同时提供并在行为上证明六项 owner 的 DSH release。Moving branch 或本地 Host checkout 不能替代该 Release lane。
-
-## 本地 HEAD 正向通道
-
-`verify-local-head.mjs` 是独立的开发态 receipt，不替代不可变的已发布 Host 通道。`DSH_LOCAL_HEAD_ROOT` 是必填项，必须指向本次接受验证的准确 checkout；Runner 不会回退到相邻的其他仓库。它只读取该 DSH checkout，不修改该项目；要求 CLI 与 owner package 已构建，要求 CLI realpath 保持在该 canonical checkout 内，并要求 format-v2 repository build record 通过匹配的源码内容与身份观测，把当前 checkout 绑定到当前 Host-side `lib` 产物。该通道会在开始前及生命周期结束后分别验证记录，并要求准确 record bytes 的 SHA-256 保持不变，同时记录准确 commit、dirty entry 数量与状态摘要。它拒绝声明 package `bin` 的 packed Center，把 packed Center 通过 Profile transaction CLI 和一个固定的调用方 mutation identity 安装到隔离 DSH/Agents/home 目录，并启动真实 Web Host。随后它探测六项 owner，并对固定 Skill 依次执行 install、configure、disable、enable、uninstall、restore、purge 前必需的再次 uninstall、purge；每一步都检查准确 single-use Store preview、approval、lifecycle、receipt 与 inventory。该通道同时检查互相独立的 inventory 状态、调用配置、真实 merged-registry winner、准确托管物料与 purge 后物料不存在。对于八项终态 operation，它会独立重算 immutable plan digest、计算每份 canonical receipt body 的 hash、交叉绑定 extension kind 与 operation kind、验证 durable inventory 中的唯一性、获取完整 operation、重算每个 journal event 与链接，并把终态 checkpoint 和 projection 绑定到返回的 receipt。Receipt 还会报告通过的稳定门槛与必需 owner predicate 的准确数量。缺少 build 输出、owner 不可用、acquisition 被拒、receipt 非 committed 或语义不一致、Web Host 提前退出、物料不匹配都会 fail closed，并留下 `.artifacts/acceptance/full-p0-local-head/receipt.json` 与脱敏日志。
-
-隔离的内容寻址缓存没有物料时，本通道需要访问签名目录中准确固定的 Skill URL。签名目录没有提供该 Skill 的第二个 revision，因此 update 在此仍明确标记为未证明，只由 unit/fault 通道覆盖。Runner 会移除 provider credential 与 provider endpoint override、关闭 telemetry、不启动模型任务，并且只通过直接 HTTP Connection RPC 操作 Web Host；它不会加载或观测浏览器 Client/UI，也不执行 break-glass Profile `restore-receipt` 路径。Build record 只提供非对抗性端点检测，不提供编译器消费这些源码 bytes 的不可变或因果证明。通过仅证明该本地 Host checkout 与 packed artifact；已发布安装、浏览器 Client/UI 观测、break-glass 恢复、Plugin restart、真实预置 MCP runtime、真实模型任务续行、provider E2E、因果构建来源和平台矩阵仍需独立证据。
+通过只证明 receipt 所绑定的准确官方 rc.2 artifact、准确 packed Center 与所列平台。它不证明任意目录候选安全、第三方服务正确、每个续行任务最终成功、live provider、未经测试的进程交错、未测试平台或其他 DSH Release；这些主张必须分别取得证据。

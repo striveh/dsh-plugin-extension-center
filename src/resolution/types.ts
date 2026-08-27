@@ -12,7 +12,9 @@ export interface CapabilityNeed {
   readonly scopeKey: string
   readonly platform: 'darwin' | 'linux' | 'windows'
   readonly requiredDataAccess: readonly ('network' | 'filesystem-read' | 'filesystem-write' | 'subprocess')[]
-  readonly maximumAuthority: readonly ('network' | 'filesystem-read' | 'filesystem-write' | 'subprocess')[]
+  readonly maximumAuthority: readonly (
+    'network' | 'filesystem-read' | 'filesystem-write' | 'subprocess' | 'credentials' | 'model-context'
+  )[]
 }
 
 /** One currently Agent-visible capability checked before the catalog. */
@@ -20,7 +22,11 @@ export interface ExistingCapability {
   readonly capabilityId: string
   readonly kind: 'tool' | 'skill' | 'plugin'
   readonly outcomeTags: readonly string[]
-  readonly dataAccess: readonly string[]
+  readonly dataAccess: readonly CapabilityNeed['requiredDataAccess'][number][]
+  /** Complete coarse authority used when this capability serves the current task. */
+  readonly authority: readonly CapabilityNeed['maximumAuthority'][number][]
+  /** Whether every authority category is known from admitted facts for this exact Agent view. */
+  readonly authorityKnown: boolean
   readonly visible: boolean
   readonly observationComplete: boolean
 }

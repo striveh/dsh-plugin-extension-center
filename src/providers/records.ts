@@ -36,6 +36,16 @@ export function nextManagedRecord(
   let current = before?.current ?? null
   let lastGood = before?.lastGood ?? null
   let removed = before?.removed ?? null
+  const assertRestoreTarget = (version: ManagedVersion): void => {
+    if (version.candidateRef !== plan.candidateRef
+      || version.artifactRevision !== plan.artifactRevision
+      || version.artifactIntegrity !== plan.artifactIntegrity) {
+      throw new Error('restore plan does not bind the exact retained artifact')
+    }
+    if (canonicalSha256(version.configuration) !== canonicalSha256(request.payload.configuration)) {
+      throw new Error('restore payload does not bind the exact retained configuration')
+    }
+  }
   switch (operation) {
     case 'install':
       if (current !== null || suppliedVersion === null) throw new Error('install requires an absent target and staged material')
@@ -66,10 +76,12 @@ export function nextManagedRecord(
     case 'restore':
       if (current === null) {
         if (removed === null) throw new Error('restore has no removed material')
+        assertRestoreTarget(removed)
         current = removed
         removed = null
       } else {
         if (lastGood === null) throw new Error('restore has no last-good material')
+        assertRestoreTarget(lastGood)
         const replacement = lastGood
         lastGood = current
         current = replacement

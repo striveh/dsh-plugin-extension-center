@@ -1,50 +1,16 @@
 import type { HostCapabilityProjection } from '../service/rpc-contract.ts';
-/** Narrow Profile generation owner used until its package becomes a published peer. */
-export interface ProfileTransactionsOwner {
-    readonly protocolVersion: 1;
-    snapshot(profile: string): Promise<Readonly<{
-        profile: string;
+/** Center-owned Plugin lifecycle snapshot used for planning and recovery fences. */
+export interface ManagedPluginsOwner {
+    snapshot(profileId: string): Promise<Readonly<{
+        profileId: string;
         revision: number;
-        treeDigest: string;
-        effectivePath: string;
-        activeGeneration: string | null;
-        lastGoodGeneration: string | null;
-        rollbackGeneration: string | null;
+        digest: `sha256:${string}`;
+        materialRoot: string;
         bootStatus: 'live' | 'pending-restart' | 'verified';
+        ownerRevision: string;
     }>>;
-    stage(request: unknown): Promise<Readonly<{
-        profile: string;
-        generation: string;
-        basedOnRevision: number;
-        basedOnTreeDigest: string;
-        treeDigest: string;
-        mutation: unknown;
-    }>>;
-    commit(request: unknown): Promise<Readonly<{
-        before: unknown;
-        after: unknown;
-    }>>;
-    abort(request: unknown): Promise<boolean>;
-    restoreLastGood(request: unknown): Promise<Readonly<{
-        before: unknown;
-        after: unknown;
-    }>>;
-    getRestoreReceipt(request: unknown): Promise<Readonly<{
-        mutationId: string;
-        status: 'committed';
-        operation: 'restore';
-        before: unknown;
-        after: unknown;
-        restartRequired: true;
-    }> | null>;
-    acknowledgeBoot(request: unknown): Promise<Readonly<{
-        before: unknown;
-        after: unknown;
-        restartRequired: boolean;
-    }>>;
-    list(profile: string): Promise<unknown>;
 }
-/** Narrow dynamic MCP desired-state owner. */
+/** Center-owned dynamic MCP desired-state lifecycle. */
 export interface McpConnectionsOwner {
     readonly protocolVersion: 1;
     snapshot(): Readonly<{
@@ -54,6 +20,8 @@ export interface McpConnectionsOwner {
     }>;
     get(id: string): unknown;
     getRemoved(id: string): unknown;
+    /** Query the real official Tool registry for one namespace and exact prior names. */
+    registeredToolNames(id: string, exactNames?: readonly string[]): readonly string[];
     configure(request: unknown): Promise<unknown>;
     enable(request: unknown): Promise<unknown>;
     disable(request: unknown): Promise<unknown>;
@@ -62,7 +30,7 @@ export interface McpConnectionsOwner {
     restore(request: unknown): Promise<unknown>;
     purge(request: unknown): Promise<unknown>;
 }
-/** Narrow durable continuation owner used for claim binding and verifier registration. */
+/** Center-owned durable continuation lifecycle over official Agent and Session services. */
 export interface TaskContinuationsOwner {
     readonly protocolVersion: 1;
     create(agent: unknown, request: unknown): Promise<unknown>;
@@ -71,12 +39,13 @@ export interface TaskContinuationsOwner {
     list(request?: unknown): Promise<readonly unknown[]>;
     cancel(ref: unknown): Promise<boolean>;
     supersede(request: unknown): Promise<boolean>;
+    reconcile(signal?: AbortSignal): Promise<void>;
     registerVerifier(verifier: Readonly<{
         id: string;
         verify(claim: unknown, signal: AbortSignal): Promise<unknown>;
     }>): () => void;
 }
-/** Minimal merged Skill registry needed to publish and prove a winning definition. */
+/** Official merged Skill registry used to publish and prove a winning definition. */
 export interface SkillsOwner {
     registerProvider(create: (control: Readonly<{
         signal: AbortSignal;
@@ -89,13 +58,27 @@ export interface SkillsOwner {
     list(options?: unknown): Promise<readonly unknown[]>;
     get(name: string, options?: unknown): Promise<unknown>;
 }
-/** Minimal Tool registry used only after every required Host owner is present. */
+/** Official Tool registry receiving Center tools and managed MCP tools. */
 export interface ToolsOwner {
     register(definition: unknown): () => void;
     schemas?(agent?: unknown): readonly unknown[];
 }
-/** Current Loader tree used to prove a Plugin consumer after a real boot. */
+/** Official Loader mutation and observation surface used by managed Plugins. */
 export interface LoaderOwner {
+    create(options: Readonly<{
+        name: string;
+        config?: unknown;
+        group?: boolean | null;
+        disabled?: boolean | null;
+        inject?: unknown;
+    }>, parent?: string | null, position?: number): Promise<string>;
+    update(id: string, options: Readonly<{
+        config?: unknown;
+        group?: boolean | null;
+        disabled?: boolean | null;
+        inject?: unknown;
+    }>, parent?: string | null, position?: number): Promise<void>;
+    remove(id: string): Promise<void>;
     await(): Promise<void>;
     entries(): Iterable<Readonly<{
         id: string;
@@ -105,14 +88,16 @@ export interface LoaderOwner {
             group?: boolean;
         }>;
         disabled: boolean;
+        refresh(): Promise<void>;
         fiber?: Readonly<{
             state: number;
+            await(): Promise<unknown>;
         }>;
     }>>;
 }
-/** Live owner set captured from one Cordis service view. */
+/** One coherent owner set assembled entirely inside the Extension Center plugin. */
 export interface HostOwners {
-    readonly profileTransactions: ProfileTransactionsOwner | null;
+    readonly managedPlugins: ManagedPluginsOwner | null;
     readonly mcpConnections: McpConnectionsOwner | null;
     readonly taskContinuations: TaskContinuationsOwner | null;
     readonly skills: SkillsOwner | null;
@@ -122,20 +107,13 @@ export interface HostOwners {
 interface ServiceLookup {
     get(name: string): unknown;
 }
-interface ServiceIdentity {
-    [Symbol.hasInstance](value: unknown): boolean;
-}
-/** Exact Definition constructors for the three independently released writable owners. */
-export interface HostOwnerDefinitions {
-    readonly profileTransactions: ServiceIdentity | null;
-    readonly mcpConnections: ServiceIdentity | null;
-    readonly taskContinuations: ServiceIdentity | null;
-}
-/** Load the exact optional peer Definitions without making the rc.2 read-only lane fail to boot. */
-export declare function loadHostOwnerDefinitions(): Promise<HostOwnerDefinitions>;
-/** Probe exact live services without declaring hard Cordis injection requirements. */
-export declare function probeHostOwners(lookup: ServiceLookup, definitions: HostOwnerDefinitions): HostOwners;
-/** Project truthful management capability without collapsing individual owner evidence. */
+/** Bind Center-owned lifecycles to the exact official rc.2 registries they use. */
+export declare function bindHostOwners(lookup: ServiceLookup, internal: Readonly<{
+    managedPlugins: ManagedPluginsOwner;
+    mcpConnections: McpConnectionsOwner;
+    taskContinuations: TaskContinuationsOwner;
+}>): HostOwners;
+/** Project truthful lifecycle capability without depending on non-official Host services. */
 export declare function hostCapabilities(owners: HostOwners): HostCapabilityProjection;
 export {};
 //# sourceMappingURL=owners.d.ts.map

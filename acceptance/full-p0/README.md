@@ -1,52 +1,71 @@
-# Full P0 Host Owner Acceptance Red
+# Full P0 acceptance on official DSH rc.2
 
 English | [中文](README.zh.md)
 
-This directory owns the immutable published-Host negative lane on the path from the signed Store to writable P0. The runner installs the final Extension Center tarball into an isolated Web Profile on the exact current published Host, starts the real Web Host, reads the verified catalog through one generic Connection RPC, and checks all six required Host owners without issuing a write request.
+This directory defines the release acceptance requirements for the independent Extension Center. The complete lane installs the packed Center with the official CLI into an isolated, unmodified `@deepseek-ai/dsh@0.1.1-rc.2` environment and exercises the Plugin, MCP, Skill, and Continuation journeys through the real Host and Web Client. No P0 claim exists without one terminal passing lifecycle receipt and separate passing public-release, Pages, and CI receipts for the release under review.
 
 ## Exact target
 
-- Extension form: the tarball produced by `pnpm pack`, installed as a Host+Web Client Bundle.
-- Host package: exact `@deepseek-ai/dsh@0.1.1-rc.2` from this project's installed dependencies.
-- Audited Host source: commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e` (`dsh-v0.1.1-rc.2`).
-- Required owners, in stable order: Profile transaction, dynamic MCP connection, durable continuation, Skill registry, Tool registry, and Loader observation.
+- Center artifact: the exact deterministic tarball produced from committed `lib/` output with no package lifecycle script. For a release decision, it must be the tarball uploaded with `SHA256SUMS` and a self-digested attestation by the exact `main`-push Node 22 CI job.
+- Host artifact: official `@deepseek-ai/dsh@0.1.1-rc.2`, audited at commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
+- Center installation: `dsh plugin --profile web add <packed-center-artifact>` through the published CLI.
+- Child ownership: the Center owns exact staged and retained Plugin archives, plans, grants, journals, receipts, verification, recovery coordination, and continuation claims. For every admitted child Plugin Bundle, whether Host-only or Host+Client, the official Profile package manager alone owns dependencies, lock data, `node_modules`, Bundle membership, and resulting Loader rows; MCP desired state and Skill material remain Center-owned.
+- Official observations: Loader and declared consumers, MCP Client handshake and Tool visibility, Skill registry visibility, and Agent/Session continuation dispatch.
 
-The current Host is intentionally the negative compatibility baseline. Its first stable product failure is:
-
-```text
-P0-RED-HOST-PROFILE-TRANSACTION-OWNER-MISSING
-```
+The Center itself remains outside its management inventory. Its update, downgrade, and removal are performed only through the official `dsh plugin --profile web ...` commands.
 
 ## Run
 
 ```sh
 node --test acceptance/full-p0/support.test.mjs
-node acceptance/full-p0/host-owner-gate.mjs
-DSH_LOCAL_HEAD_ROOT=/absolute/path/to/deepseek-harness-host pnpm run test:acceptance:local-head
+node --test acceptance/full-p0/receipt-binding.test.mjs
+pnpm run test:acceptance:official-rc2
 ```
 
-The support suite must exit zero. `host-owner-gate.mjs` must currently exit non-zero with the stable failure above and write `.artifacts/acceptance/full-p0-host-owner-gate/receipt.json`. A missing tarball role, broken Host boot, malformed RPC response, external request, state mutation, or teardown failure is `invalid`, not the expected product Red.
+The runner must resolve the CLI and all Host packages from the isolated official rc.2 installation. It must reject a DSH source checkout, modified Host package, workspace import, unpacked Center source tree, or mock-only runtime as release evidence.
 
-## Read-only preflight
+## Evidence classes
 
-The packed artifact installation is isolated setup performed before observation begins. After the real Host reports readiness, the runner hashes mutable DSH home, Agents home, workspace, and Profile state while excluding dependency trees. It then sends exactly one request:
+- `Lifecycle`: a terminal receipt from this complete runner covers browser authorization and mutation, typed Plugin/MCP/Skill operations, the controlled external-CLI ABA ordering, packed break-glass recovery, and original-task continuation on the exact unmodified official rc.2 artifact.
+- `Bootstrap release`: rc.0 records the previous Center artifact, previous CI receipt, previous release-ready receipt, and previous evidence run as `null`. Its packaged signed catalog revision `rN` must still refresh from Pages to the exact committed and signed adjacent successor `rN+1`, in addition to public GitHub Release installation, exact-commit Ubuntu/macOS CI, and deterministic-pack attestation verification.
+- `Update release`: every later prerelease or stable release must prove a distinct previous-to-current Center artifact update and bind the exact successful post-publication receipt from the previous release. The previous receipt's deployed `rN` catalog must be the current artifact's packaged bootstrap, while the current Pages deployment must be the signed adjacent successor `rN+1`.
+- `External`: Release, Pages, and CI status comes only from the generated receipts for the exact published commit and assets. Repository settings, source files, configured workflows, and local test output are inputs, not publication evidence.
+- `Advisory`: a live-provider compatibility smoke does not block P0 and cannot replace the deterministic keyless Agent receipt.
 
-```text
-POST /dsh-extension-center/catalog/list
-method = catalog/list
-payload = { "protocolVersion": 1 }
-```
+## Required journey
 
-The correlated response must expose a verified signed catalog revision and the six owner booleans. The runner hashes the same state again and requires byte-identical mutable state. Provider credentials and endpoint overrides are removed, telemetry is disabled, and proxy-aware non-loopback Host traffic is recorded and rejected. No acquisition, intent, plan, confirmation, install, configure, update, uninstall, or restore method is sent.
+One complete receipt must bind the exact Center tarball, official Host package identity, catalog revision, isolated state roots, browser origin, plan digests, operation journals, and terminal evidence. The release lane must prove:
+
+1. Store search and task-driven Capability RAG read the same verified signed catalog and produce candidate-bound immutable plans.
+2. Every mutation waits for an unexpired single-use loopback human grant; model-facing input cannot contain a package name, URL, shell command, credential, or approval.
+3. A managed Plugin progresses through v1 install, required Host restart, same-Host Loader configuration, v2 update and restart, declared-consumer verification, rollback to a retained version, uninstall, and break-glass recovery. The Center stages and pins exact archives, but every admitted child Plugin Bundle Profile membership change runs through the official `dsh plugin --profile` CLI; pure configuration uses the official Loader API. The Center never writes Profile dependencies, lock data, `node_modules`, Bundle membership, or Loader rows directly.
+4. A managed MCP connection progresses through configure, enable, handshake and Tool visibility, update, disable, restore, remove, and purge using a Center-owned desired-state record that mounts the official MCP Client.
+5. A managed Skill progresses through install, configuration, registry visibility, update, disable, enable, restore, uninstall, and purge using Center-owned files and the official Skill registry.
+6. A task-originated acquisition uses official DSH Replay to replace only the model response edge. The real official Agent, Session log, Tool dispatch, Center-managed Skill load and use, durable continuation claim, and receipt path must verify the acquired capability and dispatch one continuation to the original Session. Store-originated acquisition creates no continuation claim.
+7. Injected pre-commit and post-commit faults preserve the journal chain and recover only the approved target: Center-owned MCP, Skill, or continuation state directly, and a child Plugin only through the official CLI. For an installed Profile, the Center must synthesize an owner-only, content-addressed pnpm 11 metadata generation from the exact pre-mutation manifest, lock, modules metadata, installed manifests, and canonical store. Its provider recovery snapshot must bind the generation identity, manifest, and file digests so normal and break-glass paths re-verify the same local facts before the next Profile write. Execution stays offline with lifecycle scripts disabled; missing or changed material fails closed, and the cache does not contact a registry or promise unavailable bytes. A fresh Profile with neither lock nor `node_modules` installation uses the Center-private store. Break-glass schema v5 and official-execution binding v2 must also pin Node, the supervisor, private bundled pnpm, the official package and production closure, entrypoint, and `hostHome`; reject Profile execution controls; terminate orphan process groups; restore the exact Profile before-state through that CLI; verify it; and only then commit Center state. A partial observation never becomes a successful receipt. Windows mutation and recovery must fail closed.
+8. Removing child Plugins and the Center with the official CLI leaves the official DSH source and package tree unchanged, records expected Profile package-manager changes, and retains only data the user explicitly chose to keep.
+
+## Evidence and failure rules
+
+A complete release runner must start the real Web Host and browser Client, use loopback Connection RPC for authorization and mutation, independently recompute plan and receipt hashes, verify every journal link and terminal checkpoint, and inspect exact official Profile and Center-owned state after each operation. It must separate setup downloads from product-runtime network evidence and admit only explicitly pinned fixture origins during the measured journey. Provider credentials, endpoint overrides, telemetry, raw task text, and private catalog data must be absent from receipts and logs.
+
+A missing official rc.2 service, early Host exit, stale catalog, rejected or replayed grant, owner-revision drift, mismatched material, missing or tampered metadata-cache generation, missing Loader/Tool/Skill/continuation evidence, recovery-binding drift, or teardown residue fails closed. The lane must also run the controlled separately invoked official-CLI A→B→A ordering and require `recovery-required` rather than false terminal success; a Center-only target lock is insufficient. This receipt is limited to the tested ordering and does not claim every possible process interleaving. A read-only Store pass is useful evidence but cannot satisfy this lane.
+
+Any legacy fixture that expects `profileTransactions`, a local DSH HEAD, six upstream Host owners, or a Host PR is a rejection case only. It must never be reported as a prerequisite or a compatibility receipt.
+
+## Composite release evidence
+
+The final release decision composes independent receipts rather than widening any one runner:
+
+1. The complete official-rc.2 lifecycle receipt binds the packed artifact, browser journey, child lifecycles, recovery, controlled ABA ordering, and keyless Agent continuation.
+2. The runtime-release receipt proves Host boot, Client boot, RPC registration, exact official DSH tree preservation, and, when a previous artifact is supplied, a distinct previous-to-current Center update in one Profile.
+3. The public-release receipt requires exactly the CI tarball, `SHA256SUMS`, and pack attestation as Release assets, downloads and byte-binds all three, verifies the explicit immutable Release and every asset with GitHub CLI, and then proves official-CLI install, optional update, and removal against the runtime receipt.
+4. The public-catalog receipt derives its expected coordinates from the exact committed `catalog/public/plugins.json`, verifies those canonical bytes at the fixed Pages URL, and proves a non-degraded runtime refresh from the packaged bootstrap to its exact signed adjacent successor.
+5. The CI receipt binds the declared Ubuntu and macOS jobs to the exact release commit and downloads the sole `main`-push Node 22 release-candidate artifact. It verifies the Actions archive digest, run id and attempt, a bounded path-safe ZIP with exactly the tarball, `SHA256SUMS`, and self-digested attestation, each entry's digest and size, the source commit, packed manifest, bundled pnpm tree, and tarball bytes. The downloader accepts only the fixed GitHub API URL followed by one admitted GitHub Actions or Azure Blob storage redirect. Runtime, public-release, and composite receipts cross-bind the current CI artifact; an update also requires the previous artifact's independent CI receipt, while a bootstrap records it as `null`.
+6. For an update, the post-publication workflow downloads the exact previous release-ready receipt from a caller-supplied successful run id, verifies its workflow, branch, terminal status, commit, version, immutable Release identity, catalog transition, and self-bound CI and acceptance evidence, and records that run id and receipt digest in the new schema-v2 composite receipt. rc.0 has no predecessor. The required sequence is rc.0 `r8→r9`, rc.1 with packaged `r9` and deployed `r10`, then stable directly from rc.1 with packaged `r10` and deployed `r11`.
+
+Public Release, Pages, and completed CI claims require their corresponding generated receipts. Source files, configured workflows, repository settings, or local tests cannot satisfy those external observations.
 
 ## Proof boundary
 
-A future pass proves only that the packed Extension Center can observe the six readiness gates on an exact Host artifact. Boolean presence is not owner behavior evidence and does not make the complete P0 green. Profile generation promotion/rollback, live MCP tool-generation ownership, durable single-use cross-restart continuation, lifecycle actions, task acquisition, recovery, package update/removal, and real-provider tasks require their own Acceptance lanes.
-
-The final P0 compatibility claim must target an exact published DSH release that supplies and behaviorally proves all six owners. A moving branch or local Host checkout cannot replace that release lane.
-
-## Local HEAD positive lane
-
-`verify-local-head.mjs` is a separate development receipt, not a replacement for the immutable published-Host lane. `DSH_LOCAL_HEAD_ROOT` is mandatory and must identify the exact checkout under test; the runner never falls back to another adjacent repository. It reads that DSH checkout without changing it, requires its built CLI and owner packages, requires the CLI realpath to remain inside that canonical checkout, and requires a format-v2 repository build record whose matching source content/identity observations bind the current checkout to its current Host-side `lib` artifacts. It verifies that record before the lane and again after the lifecycle, requiring the exact record-byte SHA-256 to remain unchanged, and records the exact commit plus a digest and count of dirty entries. It rejects a packed Center that declares a package `bin`, installs the packed Center through the Profile transaction CLI with one fixed caller-owned mutation identity into isolated DSH/Agents/home directories, and boots the real Web Host. It then probes all six owners and executes exact single-use Store preview, approval, lifecycle, receipt, and inventory checks for a pinned Skill through install, configure, disable, enable, uninstall, restore, a second uninstall required by purge, and purge. The lane checks independent inventory dimensions, invocation configuration, the real merged-registry winner, exact managed material, and post-purge material absence. For all eight terminal operations it independently recomputes the immutable plan digest, hashes each canonical receipt body, cross-binds the extension and operation kinds, verifies unique durable inventory, fetches the full operation, recomputes every journal event and link, and binds the terminal checkpoint and projection to the returned receipt. The receipt also reports the exact number of successful stable gates and required-owner predicates. Missing build outputs, unavailable owners, rejected acquisition, non-committed or semantically inconsistent receipts, an early Web Host exit, or mismatched material fail closed and leave `.artifacts/acceptance/full-p0-local-head/receipt.json` plus sanitized logs.
-
-The lane needs network access to the exact signed Skill artifact when it is absent from the isolated content-addressed cache. The signed catalog does not expose a second revision of that Skill, so update remains explicitly unproven here and is covered only by unit and fault lanes. The runner removes provider credentials and provider endpoint overrides, disables telemetry, never starts a model task, and exercises the Web Host only through direct HTTP Connection RPC; it does not load or observe the browser Client/UI and does not run the break-glass Profile `restore-receipt` path. The build record supplies non-adversarial endpoint detection, not immutable or causal proof that the compiler consumed those source bytes. A pass proves this one local Host checkout and packed artifact only; published installation, browser Client/UI observation, break-glass recovery, Plugin restart, a live preprovisioned MCP runtime, task continuation with a real model, provider E2E, causal build provenance, and the platform matrix remain separate evidence.
+A pass proves the exact packed Center on the exact official rc.2 artifact and the platforms named by the receipt. It does not prove arbitrary catalog safety, third-party service correctness, successful completion of every resumed task, a live provider, an untested process interleaving, an untested platform, or a different DSH release. Those claims require their own evidence.

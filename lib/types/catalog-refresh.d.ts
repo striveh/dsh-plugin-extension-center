@@ -1,5 +1,7 @@
 import type { CatalogEnvelope, CatalogRoot, CatalogSignature } from './catalog-contract.ts';
 import { type VerifiedCatalog } from './catalog.ts';
+/** Exact public Pages resource selected by the installable Bundle. */
+export declare const PUBLISHED_CATALOG_URL = "https://striveh.github.io/dsh-plugin-extension-center/plugins.json";
 /** One signed payload downloaded from the configured fixed catalog endpoint. */
 export interface SignedCatalogDocument {
     readonly envelope: CatalogEnvelope;
@@ -20,7 +22,7 @@ export interface AdmittedCatalogSnapshot {
 }
 /** Network and schedule configuration after Host config validation. */
 export interface CatalogRefreshConfig {
-    readonly trustedOrigin: string | null;
+    readonly trustedUrl: string | null;
     readonly fetchTimeoutMs: number;
 }
 /** Deterministic network and clock seam used by focused fault tests. */
@@ -30,8 +32,8 @@ export interface CatalogRefreshDependencies {
 }
 /** Verify one same-or-next revision without allowing rollback, gaps, or a broken predecessor link. */
 export declare function verifyCatalogAdvance(root: CatalogRoot, current: VerifiedCatalog, document: SignedCatalogDocument, now?: number): VerifiedCatalog;
-/** Resolve a configured origin to the one fixed catalog path. */
-export declare function catalogEndpoint(trustedOrigin: string): string;
+/** Accept only one credential-free canonical HTTPS resource URL. */
+export declare function canonicalCatalogUrl(trustedUrl: string): string;
 /** Own the one admitted snapshot used by both Store RPC and local task retrieval. */
 export declare class CatalogSnapshotManager {
     private readonly root;

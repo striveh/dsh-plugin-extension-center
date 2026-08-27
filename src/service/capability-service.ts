@@ -7,6 +7,11 @@ import type { HostOwners, StoredResolution } from '../host/index.ts'
 import { CenterStateStore, hostCapabilities } from '../host/index.ts'
 import type { InventoryRow } from '../inventory/index.ts'
 import {
+  TASK_CONTINUATION_INVALID_REASONS,
+  type TaskContinuationInvalidReason,
+} from '../internal/continuation/types.ts'
+import { taskAcquisitionCandidates } from '../kind-candidates.ts'
+import {
   candidateAdmissionFacts,
   currentHostPlatform,
   evaluateCandidatePolicy,
@@ -49,10 +54,23 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_CONTINUATION_ROUTE_BYTES = 256
 const MAX_CONTINUATION_RESUME_TOKENS = 1_000_000
 const MODALITIES = ['audio', 'file', 'image', 'structured-data', 'text', 'video'] as const
-const ACCESS = ['filesystem-read', 'filesystem-write', 'network', 'subprocess'] as const
+const DATA_ACCESS = ['filesystem-read', 'filesystem-write', 'network', 'subprocess'] as const
+const AUTHORITY = ['credentials', 'filesystem-read', 'filesystem-write', 'model-context', 'network', 'subprocess'] as const
+/** Package-scoped model tool that resolves current or admitted capabilities. */
+export const EXTENSION_CENTER_RESOLVE_TOOL_NAME = 'extension_center_resolve'
+/** Package-scoped model tool that creates a reviewable acquisition request. */
+export const EXTENSION_CENTER_REQUEST_TOOL_NAME = 'extension_center_request_acquisition'
+const EXTENSION_CENTER_TOOL_NAMES = new Set([
+  EXTENSION_CENTER_RESOLVE_TOOL_NAME,
+  EXTENSION_CENTER_REQUEST_TOOL_NAME,
+])
 const RETRY_CONTINUATION_STATES = [
-  'pending', 'ready', 'consumed', 'claimed', 'canceled', 'superseded', 'expired', 'invalid',
+  'pending', 'ready', 'consumed', 'dispatching', 'dispatched', 'claimed', 'delivery-unknown',
+  'canceled', 'superseded', 'expired', 'invalid',
 ] as const satisfies readonly TaskRetryContinuationState[]
+const DELIVERY_UNKNOWN_REASONS = [
+  'followup-error', 'session-flush-error', 'owner-lease-expired', 'legacy-consumed',
+] as const
 
 interface ObservedRetryContinuationClaim {
   readonly continuationId: string
@@ -72,6 +90,11 @@ interface ObservedRetryContinuationClaim {
   readonly expiresAtMs: number
   readonly resumeAgentOptions: RestrictedAgentOptions
   readonly supersededByTaskRevision?: string
+  readonly invalidReason?: TaskContinuationInvalidReason
+}
+
+interface ObservableTaskContinuationsOwner {
+  subscribe(listener: () => void): () => void
 }
 
 /** Strict model input for local existing-first capability retrieval. */
@@ -81,8 +104,8 @@ export interface ModelCapabilityNeed {
   readonly outputModalities: readonly (typeof MODALITIES)[number][]
   readonly scopeKey: 'profile:web' | 'user' | 'project'
   readonly profileId: string
-  readonly requiredDataAccess: readonly (typeof ACCESS)[number][]
-  readonly maximumAuthority: readonly (typeof ACCESS)[number][]
+  readonly requiredDataAccess: readonly (typeof DATA_ACCESS)[number][]
+  readonly maximumAuthority: readonly (typeof AUTHORITY)[number][]
 }
 
 /** Safe, prose-free result returned to the model. */
@@ -177,8 +200,8 @@ function modelNeed(value: unknown): ModelCapabilityNeed {
     outputModalities: stringSet(value.outputModalities, 'outputModalities', MODALITIES),
     scopeKey: value.scopeKey as ModelCapabilityNeed['scopeKey'],
     profileId: value.profileId,
-    requiredDataAccess: stringSet(value.requiredDataAccess, 'requiredDataAccess', ACCESS, true),
-    maximumAuthority: stringSet(value.maximumAuthority, 'maximumAuthority', ACCESS, true),
+    requiredDataAccess: stringSet(value.requiredDataAccess, 'requiredDataAccess', DATA_ACCESS, true),
+    maximumAuthority: stringSet(value.maximumAuthority, 'maximumAuthority', AUTHORITY, true),
   })
 }
 
@@ -200,17 +223,24 @@ function words(value: string): readonly string[] {
 }
 
 type CapabilityDataAccess = ModelCapabilityNeed['requiredDataAccess'][number]
+type CapabilityAuthority = ModelCapabilityNeed['maximumAuthority'][number]
 
 type ToolCapabilityFacts = Readonly<{
   outcomeTags: readonly string[]
   dataAccess: readonly CapabilityDataAccess[]
+  authority: readonly CapabilityAuthority[]
 }>
 
 function capabilityFacts(
   outcomeTags: readonly string[],
   dataAccess: readonly CapabilityDataAccess[],
+  authority: readonly CapabilityAuthority[] = dataAccess,
 ): ToolCapabilityFacts {
-  return Object.freeze({ outcomeTags: Object.freeze([...outcomeTags]), dataAccess: Object.freeze([...dataAccess]) })
+  return Object.freeze({
+    outcomeTags: Object.freeze([...outcomeTags]),
+    dataAccess: Object.freeze([...dataAccess]),
+    authority: Object.freeze([...authority]),
+  })
 }
 
 const TOOL_CAPABILITY_FACTS: Readonly<Record<string, ToolCapabilityFacts>> = Object.freeze({
@@ -230,6 +260,8 @@ const TOOL_CAPABILITY_FACTS: Readonly<Record<string, ToolCapabilityFacts>> = Obj
 function toolCapabilityFacts(name: string, description: unknown): Readonly<{
   outcomeTags: readonly string[]
   dataAccess: readonly CapabilityDataAccess[]
+  authority: readonly CapabilityAuthority[]
+  authorityKnown: boolean
 }> {
   const admitted = TOOL_CAPABILITY_FACTS[name]
   return Object.freeze({
@@ -239,6 +271,8 @@ function toolCapabilityFacts(name: string, description: unknown): Readonly<{
       ...(admitted?.outcomeTags ?? []),
     ])].sort()),
     dataAccess: Object.freeze([...(admitted?.dataAccess ?? [])].sort()),
+    authority: Object.freeze([...(admitted?.authority ?? [])].sort()),
+    authorityKnown: admitted !== undefined,
   })
 }
 
@@ -249,11 +283,16 @@ function currentPlatform(): CapabilityNeed['platform'] {
 }
 
 function rowCandidate(row: InventoryRow): ResolutionCandidate | undefined {
-  if (row.candidateRef === null) return undefined
   const order = ['configure', 'enable', 'update', 'restore'] as const
   const operationKind = order.find(operation => row.actions[operation].status === 'available')
   if (operationKind === undefined) return undefined
-  return Object.freeze({ candidateRef: row.candidateRef, operationKind, targetKey: row.targetKey, configuration: null })
+  const candidateRef = operationKind === 'update' && row.updateObservation.status === 'available'
+    ? row.updateObservation.candidateRef
+    : operationKind === 'restore' && row.restoreObservation.status === 'available'
+      ? row.restoreObservation.candidateRef
+      : row.candidateRef
+  if (candidateRef === null) return undefined
+  return Object.freeze({ candidateRef, operationKind, targetKey: row.targetKey, configuration: null })
 }
 
 function parseResolutionValue(value: RpcJson): ResolutionValue {
@@ -319,22 +358,58 @@ function restrictedAgentOptions(value: unknown): RestrictedAgentOptions {
   })
 }
 
+function validObservedDispatch(value: Record<string, unknown>, state: string): boolean {
+  const ownerId = value.dispatchOwnerId
+  const fence = value.dispatchFence
+  const lease = value.dispatchLeaseExpiresAtMs
+  const started = value.dispatchStartedAtMs
+  const reason = value.deliveryUnknownReason
+  const hasOwner = Object.prototype.hasOwnProperty.call(value, 'dispatchOwnerId')
+  const hasLease = Object.prototype.hasOwnProperty.call(value, 'dispatchLeaseExpiresAtMs')
+  const hasStarted = Object.prototype.hasOwnProperty.call(value, 'dispatchStartedAtMs')
+  const hasReason = Object.prototype.hasOwnProperty.call(value, 'deliveryUnknownReason')
+  if ((hasOwner && (typeof ownerId !== 'string' || !SAFE_ID.test(ownerId)))
+    || (hasLease && (!Number.isSafeInteger(lease) || (lease as number) < 0))
+    || (hasStarted && (!Number.isSafeInteger(started) || (started as number) < 0))
+    || (hasReason && (typeof reason !== 'string'
+      || !DELIVERY_UNKNOWN_REASONS.includes(reason as typeof DELIVERY_UNKNOWN_REASONS[number])))) return false
+  if (!hasOwner) {
+    return fence === 0 && !hasLease && !hasStarted && !hasReason
+      && !['dispatching', 'dispatched', 'claimed', 'delivery-unknown'].includes(state)
+  }
+  if (typeof fence !== 'number' || fence < 1) return false
+  if (state === 'dispatching') return hasLease && !hasReason
+  if (state === 'dispatched' || state === 'claimed') return !hasLease && hasStarted && !hasReason
+  if (state === 'delivery-unknown') return !hasLease && hasStarted && hasReason
+  return state === 'invalid' && !hasReason
+}
+
 function observedRetryContinuationClaim(value: unknown): ObservedRetryContinuationClaim {
   const baseKeys = [
     'callerId', 'continuationId', 'createdAtMs', 'dispatchMessageId', 'expiresAtMs', 'kind', 'mutationId',
-    'needDigest', 'originalMessageId', 'recordRevision', 'resumeAgentOptions', 'sessionId', 'state',
+    'needDigest', 'originalMessageId', 'recordRevision', 'resumeAgentOptions', 'sessionId', 'state', 'dispatchFence',
     'taskRevision', 'updatedAtMs', 'verificationPayloadDigest', 'verifierId', 'version',
   ]
   const hasSupersededRevision = typeof value === 'object' && value !== null && !Array.isArray(value)
     && Object.prototype.hasOwnProperty.call(value, 'supersededByTaskRevision')
-  const keys = hasSupersededRevision ? [...baseKeys, 'supersededByTaskRevision'] : baseKeys
+  const hasInvalidReason = typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.prototype.hasOwnProperty.call(value, 'invalidReason')
+  const optionalDispatchKeys = [
+    'dispatchOwnerId', 'dispatchLeaseExpiresAtMs', 'dispatchStartedAtMs', 'deliveryUnknownReason', 'invalidReason',
+  ]
+    .filter(key => typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key))
+  const keys = [
+    ...baseKeys,
+    ...optionalDispatchKeys,
+    ...(hasSupersededRevision ? ['supersededByTaskRevision'] : []),
+  ]
   if (!exactRecord(value, keys)) throw new Error('Retry original continuation owner returned an invalid claim')
   const state = value.state
   const createdAtMs = value.createdAtMs
   const updatedAtMs = value.updatedAtMs
   const expiresAtMs = value.expiresAtMs
   if (value.kind !== 'task-continuation'
-    || value.version !== 1
+    || value.version !== 3
     || typeof value.continuationId !== 'string'
     || !UUID.test(value.continuationId)
     || typeof value.dispatchMessageId !== 'string'
@@ -359,6 +434,8 @@ function observedRetryContinuationClaim(value: unknown): ObservedRetryContinuati
     || !SHA256.test(value.verificationPayloadDigest)
     || !Number.isSafeInteger(value.recordRevision)
     || (value.recordRevision as number) < 0
+    || !Number.isSafeInteger(value.dispatchFence)
+    || (value.dispatchFence as number) < 0
     || !Number.isSafeInteger(createdAtMs)
     || (createdAtMs as number) < 0
     || !Number.isSafeInteger(updatedAtMs)
@@ -367,6 +444,10 @@ function observedRetryContinuationClaim(value: unknown): ObservedRetryContinuati
     || (expiresAtMs as number) <= (createdAtMs as number)
     || typeof state !== 'string'
     || !RETRY_CONTINUATION_STATES.includes(state as TaskRetryContinuationState)
+    || !validObservedDispatch(value, state)
+    || (state === 'invalid') !== hasInvalidReason
+    || (hasInvalidReason && (typeof value.invalidReason !== 'string'
+      || !TASK_CONTINUATION_INVALID_REASONS.includes(value.invalidReason as TaskContinuationInvalidReason)))
     || (state === 'superseded') !== hasSupersededRevision
     || (hasSupersededRevision
       && (typeof value.supersededByTaskRevision !== 'string'
@@ -393,6 +474,7 @@ function observedRetryContinuationClaim(value: unknown): ObservedRetryContinuati
     ...(hasSupersededRevision
       ? { supersededByTaskRevision: value.supersededByTaskRevision as string }
       : {}),
+    ...(hasInvalidReason ? { invalidReason: value.invalidReason as TaskContinuationInvalidReason } : {}),
   })
 }
 
@@ -430,6 +512,8 @@ function agentExecution(agent: unknown): Readonly<{
 export class CapabilityAcquisitionService {
   private readonly volatileResolutions = new Map<string, StoredResolution>()
   private taskAttemptInitialization: Promise<void> | undefined
+  private continuationReconciliationRequested = false
+  private continuationReconciliation: Promise<void> | undefined
 
   constructor(
     private readonly state: CenterStateStore,
@@ -561,6 +645,7 @@ export class CapabilityAcquisitionService {
   /** List durable task attempts, expiring mutable records before projection. */
   async listTaskAttempts(nowMs = Date.now()): Promise<readonly TaskAttemptProjection[]> {
     await this.ensureTaskAttempts()
+    await this.reconcileTaskContinuations()
     const output: TaskAttemptProjection[] = []
     for (const attempt of await this.taskAttempts.list()) {
       const current = attempt.outcome === null && attempt.expiresAtMs <= nowMs
@@ -651,12 +736,12 @@ export class CapabilityAcquisitionService {
         return this.modelProjection(attempt, 'discovery-unavailable')
       }
       const eligibleEntries = selectedCandidateRef === null
-        ? catalog.envelope.entries
+        ? taskAcquisitionCandidates(catalog.envelope.entries, input.scopeKey, input.outcomeTags)
         : catalog.envelope.entries.filter(entry => entry.candidateRef === selectedCandidateRef)
       const policy = new Map<string, CandidatePolicyResult>()
       for (const entry of eligibleEntries) {
       if (!entry.scopes.includes(input.scopeKey)
-        || !input.outcomeTags.some(tag => entry.tags.includes(tag))) continue
+        || !input.outcomeTags.every(tag => entry.tags.includes(tag))) continue
       if (entry.kind === 'skill' && input.scopeKey === 'project') {
         // Project discovery remains observable, but P0 has no published
         // workspace/Agent selector that can authorize a project-root write.
@@ -664,8 +749,9 @@ export class CapabilityAcquisitionService {
       }
       const runtimeOptions = entry.kind === 'mcp'
         ? await this.intentPlans.configurationOptions({
-            candidateRef: entry.candidateRef,
-            targetKey: null,
+          candidateRef: entry.candidateRef,
+          operationKind: 'install',
+          targetKey: null,
             scopeKey: input.scopeKey,
             profileId: input.profileId,
           })
@@ -1171,6 +1257,7 @@ export class CapabilityAcquisitionService {
         // A later trusted request retries exact plan/attempt reconciliation.
       }
     }
+    await this.reconcileTaskContinuations()
   }
 
   /** Register the non-mutating verifier that releases only exact committed task receipts. */
@@ -1234,9 +1321,35 @@ export class CapabilityAcquisitionService {
           || (row.evidence.kind === 'mcp' && (!row.evidence.descriptorMatches
             || row.evidence.observedLifecycle !== 'ready' || row.evidence.qualifiedTools.length === 0))
           || (row.evidence.kind === 'plugin' && (!row.evidence.consumerObserved
-            || !row.evidence.externalRestartObserved || row.evidence.loaderPhase !== 'active'))) {
+            || !row.evidence.restartObserved || row.evidence.loaderPhase !== 'active'))) {
           return { kind: 'not-ready' }
         }
+        let existing: readonly ExistingCapability[]
+        try {
+          existing = await this.existing({
+            outcomeTags: attempt.need.outcomeTags,
+            inputModalities: attempt.need.inputModalities,
+            outputModalities: attempt.need.outputModalities,
+            scopeKey: attempt.need.scopeKey,
+            profileId: attempt.profileId,
+            requiredDataAccess: attempt.need.requiredDataAccess,
+            maximumAuthority: attempt.need.maximumAuthority,
+          }, this.agentForAttempt(attempt), attempt.projectRoot)
+        } catch {
+          return { kind: 'not-ready' }
+        }
+        if (signal.aborted) throw signal.reason
+        const satisfied = resolveCapability({
+          need: attempt.need,
+          existing,
+          inventory: inventory.rows,
+          inventoryComplete: inventory.complete,
+          catalog: [],
+          catalogComplete: false,
+          policy: new Map(),
+          maximumCandidates: 3,
+        })
+        if (satisfied.decision !== 'use-existing') return { kind: 'not-ready' }
         if (!await this.markTaskVisibilityReady(attempt.taskAttemptId)) return { kind: 'not-ready' }
         return Object.freeze({
           kind: 'ready',
@@ -1253,7 +1366,13 @@ export class CapabilityAcquisitionService {
       id: RETRY_VERIFIER_ID,
       verify: (claim: unknown, signal: AbortSignal) => this.verifyRetryContinuation(claim, signal),
     })
+    const owner = this.owners.taskContinuations as typeof this.owners.taskContinuations & Partial<ObservableTaskContinuationsOwner>
+    const stopObservation = typeof owner.subscribe === 'function'
+      ? owner.subscribe(() => { this.scheduleTaskContinuationReconciliation() })
+      : () => {}
+    this.scheduleTaskContinuationReconciliation()
     return () => {
+      stopObservation()
       retry()
       acquisition()
     }
@@ -1365,11 +1484,88 @@ export class CapabilityAcquisitionService {
         nowMs,
       )
     }
+    await this.owners.taskContinuations!.reconcile()
   }
 
   private async ensureTaskAttempts(): Promise<void> {
     this.taskAttemptInitialization ??= this.taskAttempts.initialize()
     await this.taskAttemptInitialization
+  }
+
+  private scheduleTaskContinuationReconciliation(): void {
+    void this.reconcileTaskContinuations().catch(() => {
+      // Durable claims and attempts remain authoritative; the next owner signal,
+      // startup recovery, or task listing retries the exact same reconciliation.
+    })
+  }
+
+  private async reconcileTaskContinuations(): Promise<void> {
+    if (this.owners.taskContinuations === null) return
+    this.continuationReconciliationRequested = true
+    while (true) {
+      if (this.continuationReconciliation === undefined) {
+        this.continuationReconciliation = this.runTaskContinuationReconciliation()
+      }
+      const run = this.continuationReconciliation
+      try {
+        await run
+      } finally {
+        if (this.continuationReconciliation === run) this.continuationReconciliation = undefined
+      }
+      if (!this.continuationReconciliationRequested) return
+    }
+  }
+
+  private async runTaskContinuationReconciliation(): Promise<void> {
+    await this.ensureTaskAttempts()
+    while (this.continuationReconciliationRequested) {
+      this.continuationReconciliationRequested = false
+      for (const attempt of await this.taskAttempts.list()) {
+        if (attempt.outcome !== null || attempt.result?.kind !== 'acquisition-candidate') continue
+        const claim = await this.observeAcquisitionContinuationClaim(attempt)
+        if (claim === undefined) continue
+        await this.taskAttempts.reconcileContinuation(
+          attempt.taskAttemptId,
+          claim.state,
+          Date.now(),
+          claim.invalidReason,
+        )
+      }
+    }
+  }
+
+  private async observeAcquisitionContinuationClaim(
+    attempt: TaskAttempt,
+  ): Promise<ObservedRetryContinuationClaim | undefined> {
+    if (attempt.result?.kind !== 'acquisition-candidate' || this.owners.taskContinuations === null) return undefined
+    const activation = await this.state.getContinuationActivation(attempt.result.continuationId)
+    if (activation === undefined) return undefined
+    const activationIntent = await this.state.getContinuationActivationIntent(attempt.result.continuationId)
+    if (activationIntent === undefined) throw new Error('task continuation activation intent is absent')
+    const value = await this.owners.taskContinuations.get(activation.continuationId)
+    if (value === undefined) throw new Error('activated task continuation claim is absent')
+    const claim = observedRetryContinuationClaim(value)
+    if (activation.reservationId !== attempt.result.continuationId
+      || activation.resolutionId !== attempt.result.resolutionId
+      || activation.sessionId !== attempt.sessionId
+      || activation.originalMessageId !== attempt.originalMessageId
+      || activation.needDigest !== attempt.needDigest
+      || activation.verificationPayloadDigest !== attempt.result.verificationPayloadDigest
+      || claim.continuationId !== activation.continuationId
+      || claim.callerId !== activationIntent.callerId
+      || claim.mutationId !== activationIntent.mutationId
+      || claim.sessionId !== activation.sessionId
+      || claim.originalMessageId !== activation.originalMessageId
+      || claim.needDigest !== activation.needDigest
+      || claim.taskRevision !== activation.taskRevision
+      || claim.verifierId !== VERIFIER_ID
+      || claim.verificationPayloadDigest !== activation.verificationPayloadDigest
+      || claim.expiresAtMs !== activationIntent.expiresAtMs
+      || canonicalSha256(claim.resumeAgentOptions) !== canonicalSha256(attempt.resumeAgentOptions)
+      || canonicalSha256(claim.resumeAgentOptions) !== canonicalSha256(activationIntent.resumeAgentOptions)) {
+      throw new Error('task continuation claim does not bind the exact acquisition attempt')
+    }
+    return claim
   }
 
   private agentForAttempt(attempt: TaskAttempt): unknown {
@@ -1718,19 +1914,25 @@ export class CapabilityAcquisitionService {
   private async existing(input: ModelCapabilityNeed, agent: unknown, cwd: string): Promise<readonly ExistingCapability[]> {
     const output: ExistingCapability[] = []
     const visibleToolAccess = new Set<CapabilityDataAccess>()
+    const visibleToolAuthority = new Set<CapabilityAuthority>()
+    let visibleToolAuthorityKnown = true
     for (const schema of this.owners.tools!.schemas?.(agent) ?? []) {
       if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) continue
       const { name, description } = schema as { name?: unknown; description?: unknown }
-      if (typeof name !== 'string' || ['capability_resolve', 'capability_request_acquisition'].includes(name)) continue
+      if (typeof name !== 'string' || EXTENSION_CENTER_TOOL_NAMES.has(name)) continue
       const facts = toolCapabilityFacts(name, description)
       for (const item of facts.dataAccess) visibleToolAccess.add(item)
+      for (const item of facts.authority) visibleToolAuthority.add(item)
+      if (!facts.authorityKnown) visibleToolAuthorityKnown = false
       output.push({
         capabilityId: `tool:${name}`,
         kind: 'tool',
         outcomeTags: facts.outcomeTags,
         dataAccess: facts.dataAccess,
+        authority: facts.authority,
+        authorityKnown: facts.authorityKnown,
         visible: true,
-        observationComplete: true,
+        observationComplete: facts.authorityKnown,
       })
     }
     const skills = await this.owners.skills!.snapshot({ cwd })
@@ -1742,11 +1944,11 @@ export class CapabilityAcquisitionService {
         capabilityId: `skill:${item.name}`,
         kind: 'skill',
         outcomeTags: words(`${item.name} ${typeof item.description === 'string' ? item.description : ''}`),
-        // A visible Skill is usable together with the Tool schemas in the same
-        // exact Agent view. Unknown Tool authority is never invented here.
         dataAccess: Object.freeze([...visibleToolAccess].sort()),
+        authority: Object.freeze([...visibleToolAuthority, 'model-context' as const].sort()),
+        authorityKnown: visibleToolAuthorityKnown,
         visible: true,
-        observationComplete: skills.complete,
+        observationComplete: skills.complete && visibleToolAuthorityKnown,
       })
     }
     return Object.freeze(output.sort((left, right) => left.capabilityId.localeCompare(right.capabilityId)))
@@ -1795,7 +1997,7 @@ export class CapabilityAcquisitionService {
 export function capabilityToolDefinitions(service: CapabilityAcquisitionService): readonly unknown[] {
   const text = (value: unknown): Array<{ type: 'text'; text: string }> => [{ type: 'text', text: JSON.stringify(value) }]
   return Object.freeze([{
-    name: 'capability_resolve',
+    name: EXTENSION_CENTER_RESOLVE_TOOL_NAME,
     description: 'Resolve an existing capability first, or return opaque locally verified acquisition candidates. This tool never installs or approves anything.',
     parameters: {
       type: 'object', additionalProperties: false,
@@ -1806,16 +2008,16 @@ export function capabilityToolDefinitions(service: CapabilityAcquisitionService)
         outputModalities: { type: 'array', minItems: 1, maxItems: 6, uniqueItems: true, items: { type: 'string', enum: MODALITIES } },
         scopeKey: { type: 'string', enum: ['profile:web', 'user', 'project'] },
         profileId: { type: 'string', pattern: SAFE_ID.source },
-        requiredDataAccess: { type: 'array', minItems: 0, maxItems: 4, uniqueItems: true, items: { type: 'string', enum: ACCESS } },
-        maximumAuthority: { type: 'array', minItems: 0, maxItems: 4, uniqueItems: true, items: { type: 'string', enum: ACCESS } },
+        requiredDataAccess: { type: 'array', minItems: 0, maxItems: 4, uniqueItems: true, items: { type: 'string', enum: DATA_ACCESS } },
+        maximumAuthority: { type: 'array', minItems: 0, maxItems: 6, uniqueItems: true, items: { type: 'string', enum: AUTHORITY } },
       },
     },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args: unknown, value: RpcJson) => text(value) },
     execute: (args: unknown, exec: { agent?: unknown; signal: AbortSignal }) => service.resolve(args, exec.agent, exec.signal),
     presentCall: () => ({ card: 'generic', title: 'Resolve capability', kind: 'search' }),
   }, {
-    name: 'capability_request_acquisition',
-    description: 'Request a human-reviewable immutable plan using only opaque ids returned by capability_resolve. This tool cannot approve or execute the plan.',
+    name: EXTENSION_CENTER_REQUEST_TOOL_NAME,
+    description: `Request a human-reviewable immutable plan using only opaque ids returned by ${EXTENSION_CENTER_RESOLVE_TOOL_NAME}. This tool cannot approve or execute the plan.`,
     parameters: {
       type: 'object', additionalProperties: false, required: ['resolutionId', 'candidateRef', 'continuationId'],
       properties: {

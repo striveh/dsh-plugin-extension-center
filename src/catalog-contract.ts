@@ -152,12 +152,12 @@ export interface CatalogRoot {
 
 /** Runtime Host-owner preflight projected independently from catalog admission. */
 export interface CatalogHostCapabilities {
-  readonly profileTransaction: boolean
+  readonly managedPluginLifecycle: boolean
   readonly dynamicMcpConnection: boolean
   readonly durableContinuation: boolean
   readonly skillRegistry: boolean
   readonly toolRegistry: boolean
-  readonly loaderObservation: boolean
+  readonly loaderMutation: boolean
   readonly acquisition: boolean
   readonly reason: 'host-capability' | null
 }

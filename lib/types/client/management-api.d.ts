@@ -1,5 +1,5 @@
 import type { ClientConnectionRpc } from '@deepseek-ai/dsh-client-connection/client';
-import type { ImmutablePlan, PlanAuthorizationState } from '../plans/types.ts';
+import type { ImmutablePlan, OperationKind, PlanAuthorizationState } from '../plans/types.ts';
 import type { IntentPreviewRequest, IntentPreviewResponse, InventoryListResponse, LifecycleResponse, OperationListResponse, OperationReceiptsResponse, ConfigurationOptionsResponse, RpcJson, TaskApprovalListResponse, TaskAttemptCancelResponse, TaskAttemptListResponse, TaskAttemptResolutionResponse, TaskConfigurationResponse } from '../service/rpc-contract.ts';
 /** Current Browser observation context supplied by the Host composition. */
 export interface ExtensionManagementContext {
@@ -19,6 +19,7 @@ export interface ExtensionManagementClient {
     /** Read safe typed configuration selectors for one exact candidate or managed target. */
     configurationOptions(input: Readonly<{
         candidateRef: string;
+        operationKind: OperationKind;
         targetKey: string | null;
         scopeKey: string;
         profileId: string;

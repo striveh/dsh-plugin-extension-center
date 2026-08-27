@@ -24,10 +24,11 @@ export interface PlanRevisionFences {
     readonly targetRevision: string;
     readonly ownerRevision: string;
     readonly scopeRevision: string;
+    /** Center-managed Plugin snapshot revision retained in the schema's existing fence slot. */
     readonly profileRevision: string;
 }
 /** Lifecycle review checks whose successful execution may be recorded in a receipt. */
-export type ReviewCheckCode = 'catalog-admission' | 'owner-revision' | 'review-record' | 'artifact-integrity' | 'plugin-manifest' | 'plugin-dependencies' | 'plugin-lifecycle-scripts' | 'plugin-bundle' | 'plugin-settings-schema' | 'profile-lockfile' | 'isolated-profile-boot' | 'loader-consumer' | 'skill-file-manifest' | 'skill-frontmatter' | 'skill-body' | 'skill-links' | 'skill-executables' | 'invocation-policy' | 'merged-skill-winner' | 'mcp-runtime-integrity' | 'mcp-descriptor' | 'mcp-secret-absence' | 'mcp-initialize' | 'mcp-tools-list' | 'mcp-tool-generation' | 'owner-mutation' | 'owner-absence' | 'quiescent-disposal';
+export type ReviewCheckCode = 'catalog-admission' | 'owner-revision' | 'review-record' | 'artifact-integrity' | 'plugin-manifest' | 'plugin-dependencies' | 'plugin-lifecycle-scripts' | 'plugin-package-metadata' | 'plugin-settings-schema' | 'center-plugin-material' | 'official-profile-package' | 'loader-consumer' | 'host-restart-observation' | 'skill-file-manifest' | 'skill-frontmatter' | 'skill-body' | 'skill-links' | 'skill-executables' | 'invocation-policy' | 'merged-skill-winner' | 'mcp-runtime-integrity' | 'mcp-descriptor' | 'mcp-secret-absence' | 'mcp-initialize' | 'mcp-tools-list' | 'mcp-tool-generation' | 'owner-mutation' | 'owner-absence' | 'quiescent-disposal';
 /** Operation phase that owns one review check. */
 export type ReviewCheckPhase = 'planning' | 'prepare' | 'apply' | 'verify' | 'external-restart';
 /** One stable check disclosed before approval. */
@@ -37,20 +38,20 @@ export interface PlannedReviewCheck {
 }
 /** Exact material disclosed as removed or retained by an operation. */
 export interface ReviewMaterial {
-    readonly kind: 'profile-dependency' | 'profile-lockfile' | 'bundle-row' | 'plugin-settings' | 'skill-file' | 'connection-row' | 'credential-record' | 'external-runtime' | 'remote-data' | 'recovery-point';
+    readonly kind: 'center-plugin-material' | 'profile-dependency' | 'loader-entry' | 'plugin-settings' | 'skill-file' | 'connection-row' | 'credential-record' | 'external-runtime' | 'remote-data' | 'recovery-point';
     readonly id: string;
     readonly digest: Sha256Digest | null;
 }
 /** Exact recovery point bound before an operation may mutate owner state. */
 export interface ReviewRollbackPoint {
-    readonly kind: 'absent-state' | 'managed-version' | 'profile-generation';
+    readonly kind: 'absent-state' | 'managed-version';
     readonly id: string;
     readonly digest: Sha256Digest;
 }
 /** Limits that remain true even when DSH-managed rollback succeeds. */
 export type ReviewRollbackLimit = 'dsh-managed-state-only' | 'remote-grants-not-revoked' | 'third-party-side-effects-not-reversed' | 'external-runtime-not-restored' | 'workspace-files-not-restored' | 'purge-irreversible' | 'restart-required-before-runtime-proof';
 /** Claims intentionally not represented as verified by an immutable plan. */
-export type ReviewNotProvenClaim = 'catalog-admission-is-not-security-audit' | 'target-lockfile-bytes-before-staging' | 'third-party-code-side-effects' | 'remote-side-effects' | 'external-runtime-state' | 'post-restart-consumer' | 'user-task-outcome';
+export type ReviewNotProvenClaim = 'catalog-admission-is-not-security-audit' | 'third-party-code-side-effects' | 'remote-side-effects' | 'external-runtime-state' | 'post-restart-consumer' | 'user-task-outcome';
 /** Fields shared by every kind-specific approval record. */
 export interface ReviewEvidenceBase {
     readonly schemaVersion: 1;
@@ -63,15 +64,15 @@ export interface ReviewEvidenceBase {
     readonly rollbackLimits: readonly ReviewRollbackLimit[];
     readonly notProven: readonly ReviewNotProvenClaim[];
 }
-/** Exact dependency change displayed for a Profile Plugin operation. */
+/** Exact dependency change displayed for a Center-managed Plugin operation. */
 export interface PluginDependencyChange {
-    readonly kind: 'profile' | 'host' | 'runtime' | 'extension' | 'peer';
+    readonly kind: 'host' | 'runtime' | 'extension' | 'peer';
     readonly id: string;
     readonly beforeVersion: string | null;
     readonly afterVersion: string | null;
     readonly required: boolean;
 }
-/** Secret-free, artifact-pinned Profile Plugin review evidence. */
+/** Secret-free, artifact-pinned Center-managed Plugin review evidence. */
 export interface PluginReviewEvidence extends ReviewEvidenceBase {
     readonly kind: 'plugin';
     readonly manifest: Readonly<{
@@ -84,20 +85,27 @@ export interface PluginReviewEvidence extends ReviewEvidenceBase {
         fileManifestDigest: Sha256Digest;
     }>;
     readonly dependencies: readonly PluginDependencyChange[];
-    readonly lockfile: Readonly<{
-        path: 'pnpm-lock.yaml';
-        beforeDigest: Sha256Digest | null;
+    readonly managedMaterial: Readonly<{
+        owner: 'extension-center';
         packageName: string;
         beforeVersion: string | null;
         afterVersion: string | null;
         targetIntegrity: ArtifactIntegrity | null;
     }>;
-    readonly bundles: readonly Readonly<{
-        id: string;
-        action: 'add' | 'retain' | 'remove' | 'restore';
-        patchDigest: Sha256Digest;
-        patchBody: string;
-    }>[];
+    readonly packageMetadata: Readonly<{
+        bundlePatch: Readonly<{
+            path: 'cordis.patch.yml';
+            patchDigest: Sha256Digest;
+            patchBody: string;
+        }> | null;
+    }>;
+    readonly activation: Readonly<{
+        mutationOwner: 'official-dsh-cli' | 'official-loader';
+        profileDependency: 'add' | 'replace' | 'remove' | 'restore' | 'retain';
+        loaderEntry: 'create' | 'replace' | 'remove' | 'restore' | 'retain';
+        restartRequired: boolean;
+        packageName: string;
+    }>;
     readonly scripts: Readonly<{
         before: readonly string[];
         after: readonly string[];
@@ -255,17 +263,63 @@ export interface PlanUseContext {
 export interface PlanDecisionRecord extends PlanDecisionInput {
     readonly decidedAtMs: number;
 }
-/** Hash-pinned standalone recovery executable, public DSH CLI, and Host home. */
-export interface RecoveryExecutableBinding {
-    readonly schemaVersion: 2;
+/** One installed production dependency in the exact official DSH runtime closure. */
+export interface OfficialDshDependencyBinding {
+    readonly packageName: string;
+    readonly packageVersion: string;
+    readonly packageRoot: string;
+    readonly packageTreeSha256: Sha256Digest;
+}
+/** Exact Node executable used to launch the official DSH CLI. */
+export interface NodeExecutionBinding {
+    readonly schemaVersion: 1;
     readonly executablePath: string;
     readonly executableSha256: Sha256Digest;
-    readonly hostCliPath: string;
-    readonly hostCliSha256: Sha256Digest;
+    readonly version: string;
+}
+/** Center-private pnpm runtime and shim consumed by the official DSH CLI. */
+export interface PnpmExecutionBinding {
+    readonly schemaVersion: 1;
+    readonly packageName: 'pnpm';
+    readonly packageVersion: '11.7.0';
+    readonly registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==';
+    readonly packageRoot: string;
+    readonly packageTreeSha256: Sha256Digest;
+    readonly entrypointPath: string;
+    readonly entrypointSha256: Sha256Digest;
+    readonly shimPath: string;
+    readonly shimSha256: Sha256Digest;
+    readonly shellPath: string;
+    readonly shellSha256: Sha256Digest;
+    readonly runtimeRoot: string;
+}
+/** Exact official DSH CLI and private execution identities available to recovery. */
+export interface OfficialDshRecoveryBinding {
+    readonly schemaVersion: 2;
+    readonly packageName: '@deepseek-ai/dsh';
+    readonly packageVersion: '0.1.1-rc.2';
+    readonly packageRoot: string;
+    readonly packageTreeSha256: Sha256Digest;
+    readonly productionDependencies: readonly OfficialDshDependencyBinding[];
+    readonly entrypointPath: string;
+    readonly entrypointSha256: Sha256Digest;
     readonly hostHome: string;
+    readonly timeoutMs: number;
+    readonly node: NodeExecutionBinding;
+    readonly supervisorPath: string;
+    readonly supervisorSha256: Sha256Digest;
+    readonly pnpm: PnpmExecutionBinding;
+}
+/** Hash-pinned standalone recovery executable and official CLI bound to one Center-owned state root. */
+export interface RecoveryExecutableBinding {
+    readonly schemaVersion: 5;
+    readonly executablePath: string;
+    readonly executableSha256: Sha256Digest;
+    readonly centerRoot: string;
     readonly packageVersion: string;
     readonly platform: 'darwin' | 'linux' | 'win32';
     readonly arch: string;
+    readonly officialDsh: OfficialDshRecoveryBinding;
 }
 /** Authorization emitted only after an approved plan is consumed once. */
 export interface OperationAuthorization {

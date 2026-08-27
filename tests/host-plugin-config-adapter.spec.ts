@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import {
-  buildCapabilityResolverPatch,
-  hasPluginConfigurationAdapter,
-} from '../src/providers/plugin-config-adapter.ts'
+import * as adapter from '../src/providers/plugin-config-adapter.ts'
+import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
+
+const [resolver010, resolver011] = CAPABILITY_RESOLVER_CANDIDATES
 
 const configuration = {
   freshCacheMs: 5_000,
@@ -17,45 +17,33 @@ const configuration = {
   maxMatchedTerms: 10,
 }
 
-describe('typed capability-resolver Profile configuration', () => {
-  it('creates and replaces only the owner-marked exact override with whole-file digests', () => {
-    const current = '- id: existing-plugin\n  config:\n    enabled: true\n'
-    const created = buildCapabilityResolverPatch(current, configuration)
+describe('typed capability-resolver runtime configuration', () => {
+  it('binds exact candidate schemas without exposing a Profile patch writer', () => {
+    expect(adapter.hasPluginConfigurationAdapter(resolver010.candidateRef, '0.1.0')).toBe(true)
+    expect(adapter.hasPluginConfigurationAdapter(resolver011.candidateRef, resolver011.version)).toBe(true)
+    expect(adapter.hasPluginConfigurationAdapter(resolver010.candidateRef, '0.1.1')).toBe(false)
+    expect(adapter.hasPluginConfigurationAdapter('plugin:dsh-capability-resolver@0.1.2', '0.1.2')).toBe(false)
+    expect('buildCapabilityResolverPatch' in adapter).toBe(false)
+    expect('PluginConfigurationPatch' in adapter).toBe(false)
 
-    expect(hasPluginConfigurationAdapter(created.candidateRef, '0.1.0')).toBe(true)
-    expect(hasPluginConfigurationAdapter(created.candidateRef, '0.1.1')).toBe(false)
-    expect(created.expectedDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
-    expect(created.nextDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
-    expect(created.nextUtf8).toContain('dsh-extension-center-owned: dsh-capability-resolver')
-    expect(created.nextUtf8).toContain('freshCacheMs: 5000')
-    expect(created.nextUtf8).toContain('id: existing-plugin')
-
-    const replaced = buildCapabilityResolverPatch(created.nextUtf8, { ...configuration, freshCacheMs: 6_000 })
-    expect(replaced.expectedDigest).toBe(created.nextDigest)
-    expect(replaced.nextUtf8.match(/id: dsh-capability-resolver/g)).toHaveLength(1)
-    expect(replaced.nextUtf8).toContain('freshCacheMs: 6000')
+    const review010 = adapter.pluginConfigurationReview(resolver010.candidateRef, resolver010.version)
+    const review011 = adapter.pluginConfigurationReview(resolver011.candidateRef, resolver011.version)
+    expect(review011.schema).toEqual(review010.schema)
+    expect(review011.adapterVersion).toBe('dsh-capability-resolver/config@0.1.1')
+    expect(review011.adapterDigest).not.toBe(review010.adapterDigest)
+    expect(adapter.validateCapabilityResolverConfiguration(configuration)).toEqual(configuration)
   })
 
-  it('rejects unowned overrides, duplicate rows, aliases, incomplete fields, and invalid ranges', () => {
-    expect(() => buildCapabilityResolverPatch('- id: dsh-capability-resolver\n  config: {}\n', configuration))
-      .toThrow('not owned')
-    expect(() => buildCapabilityResolverPatch([
-      '# dsh-extension-center-owned: dsh-capability-resolver',
-      '- id: dsh-capability-resolver',
-      '  config: {}',
-      '# dsh-extension-center-owned: dsh-capability-resolver',
-      '- id: dsh-capability-resolver',
-      '  config: {}',
-      '',
-    ].join('\n'), configuration)).toThrow('duplicate')
-    expect(() => buildCapabilityResolverPatch('- &row\n  id: existing\n- *row\n', configuration)).toThrow('aliases')
+  it('rejects incomplete fields, invalid ranges, and unknown candidate schemas', () => {
     const { maxResults: _removed, ...incomplete } = configuration
-    expect(() => buildCapabilityResolverPatch('[]\n', incomplete)).toThrow('exactly')
-    expect(() => buildCapabilityResolverPatch('[]\n', { ...configuration, fetchTimeoutMs: 99 })).toThrow('outside')
-    expect(() => buildCapabilityResolverPatch('[]\n', {
+    expect(() => adapter.validateCapabilityResolverConfiguration(incomplete)).toThrow('exactly')
+    expect(() => adapter.validateCapabilityResolverConfiguration({ ...configuration, fetchTimeoutMs: 99 })).toThrow('outside')
+    expect(() => adapter.validateCapabilityResolverConfiguration({
       ...configuration,
       freshCacheMs: 40_000,
       staleCacheMs: 30_000,
     })).toThrow('greater than or equal')
+    expect(() => adapter.pluginConfigurationReview(resolver010.candidateRef, resolver011.version))
+      .toThrow('no exact typed configuration adapter')
   })
 })

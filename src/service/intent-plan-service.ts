@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { CatalogEntry } from '../catalog-contract.ts'
 import type { VerifiedCatalog } from '../catalog.ts'
 import { catalogReviewEvidenceSupport } from '../catalog.ts'
@@ -20,12 +18,12 @@ import {
   mintAcquisitionIntent,
   candidateAdmissionFacts,
   currentHostPlatform,
+  operationRestartRequired,
   type CandidatePolicyResult,
   type ResolvedIntentCandidate,
   verificationRecipeDigest,
 } from '../policy/index.ts'
 import {
-  buildCapabilityResolverPatch,
   hasPluginConfigurationAdapter,
   type McpRuntimePreflight,
   type McpRuntimeOption,
@@ -37,7 +35,11 @@ import { admitCenterManagement, admitInstallTarget } from './management-admissio
 import type { IntentPreviewRequest, IntentPreviewResponse, RpcJson, TaskApprovalRow } from './rpc-contract.ts'
 import { HOST_RPC_PROTOCOL_VERSION } from './rpc-contract.ts'
 import { HostInventoryService } from './inventory-service.ts'
-import { buildPlanReviewEvidence } from './review-evidence.ts'
+import {
+  buildPlanReviewEvidence,
+  type ManagedPluginSnapshot,
+  type ManagedPluginSnapshotPort,
+} from './review-evidence.ts'
 
 /** Admission refusal that retains the exact policy result for strict RPC projection. */
 export class IntentPolicyDeniedError extends Error {
@@ -65,31 +67,6 @@ export interface TaskIntentBinding {
   readonly originalMessageId: string
 }
 
-interface ProfileObservation {
-  readonly revision: number
-  readonly treeDigest: string
-  readonly effectivePath: string
-  readonly activeGeneration: string | null
-  readonly lastGoodGeneration: string | null
-  readonly rollbackGeneration: string | null
-}
-
-function profileObservation(value: unknown): ProfileObservation {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Profile owner observation is invalid')
-  const item = value as Record<string, unknown>
-  if (!Number.isSafeInteger(item.revision) || typeof item.treeDigest !== 'string' || typeof item.effectivePath !== 'string'
-    || (item.activeGeneration !== null && typeof item.activeGeneration !== 'string')
-    || (item.lastGoodGeneration !== null && typeof item.lastGoodGeneration !== 'string')
-    || (item.rollbackGeneration !== null && typeof item.rollbackGeneration !== 'string')) {
-    throw new Error('Profile owner observation fields are invalid')
-  }
-  return item as unknown as ProfileObservation
-}
-
-function profileFence(value: ProfileObservation): string {
-  return `profile:${String(value.revision)}:${value.treeDigest}`
-}
-
 /** Resolve the post-operation desired state from the exact retained version the provider will select. */
 export function resolveDesiredState(
   operation: OperationKind,
@@ -109,7 +86,7 @@ export function resolveDesiredState(
 }
 
 function ownerKey(kind: CatalogEntry['kind']): string {
-  return kind === 'plugin' ? 'profileTransactions' : kind === 'mcp' ? 'mcpConnections' : 'skills'
+  return kind === 'plugin' ? 'managedPlugins' : kind === 'mcp' ? 'mcpConnections' : 'skills'
 }
 
 function targetKey(entry: CatalogEntry, scopeKey: string, profileId: string): string {
@@ -134,6 +111,7 @@ export class IntentPlanService {
     private readonly inventory: HostInventoryService,
     private readonly owners: HostOwners,
     private readonly catalog: () => VerifiedCatalog,
+    private readonly managedPlugins: ManagedPluginSnapshotPort,
     private readonly preflight: IntentProviderPreflight,
     private readonly planTtlMs = 15 * 60 * 1000,
   ) {}
@@ -182,9 +160,31 @@ export class IntentPlanService {
       : null
     const snapshot = await this.inventory.list(request.scopeKey, request.profileId, skillProjectRoot)
     const inferredTarget = targetKey(entry, request.scopeKey, request.profileId)
+    if (request.targetKey !== null && request.targetKey !== inferredTarget) {
+      throw new Error('targetKey does not bind the exact candidate, scope, and profile identity')
+    }
     const selectedTarget = request.targetKey ?? inferredTarget
     const managed = await this.store.getManaged(selectedTarget)
     const row = snapshot.rows.find(item => item.targetKey === selectedTarget)
+    if (request.operationKind === 'restore') {
+      const restored = managed?.current === null ? managed.removed : managed?.lastGood
+      const observation = row?.restoreObservation
+      if (restored === null
+        || restored === undefined
+        || observation?.status !== 'available'
+        || observation.candidateRef !== entry.candidateRef
+        || observation.revision !== entry.artifact.version
+        || observation.integrity !== entry.artifact.integrity
+        || restored.candidateRef !== entry.candidateRef
+        || restored.artifactRevision !== entry.artifact.version
+        || restored.artifactIntegrity !== entry.artifact.integrity) {
+        throw new IntentPolicyDeniedError({
+          status: 'denied', policyRevision: 'extension-center-p0-policy-v2', code: 'action-unavailable',
+          reason: 'the exact retained restore target is unavailable from the verified catalog',
+        })
+      }
+      payloadConfiguration = restored.configuration
+    }
     let policy: CandidatePolicyResult
     const management = ['enable', 'disable', 'purge'].includes(request.operationKind)
     if (management) {
@@ -249,9 +249,9 @@ export class IntentPlanService {
       if (policy.status === 'denied') throw new IntentPolicyDeniedError(policy)
     }
     if (policy.status !== 'eligible') throw new IntentPolicyDeniedError(policy)
-    const profile = profileObservation(await this.owners.profileTransactions!.snapshot(request.profileId))
-    const ownerRevision = await this.ownerRevision(entry, row, skillProjectRoot)
-    const profileRevision = profileFence(profile)
+    const managedPluginSnapshot = await this.managedPlugins.snapshot(request.profileId)
+    const ownerRevision = await this.ownerRevision(entry, row, skillProjectRoot, managedPluginSnapshot)
+    const profileRevision = managedPluginSnapshot.ownerRevision
     const runtime = entry.kind === 'mcp'
       ? await this.preflight.mcpRuntime(entry.candidateRef, payloadConfiguration)
       : null
@@ -273,11 +273,7 @@ export class IntentPlanService {
           reason: 'the exact Plugin version has no typed configuration adapter',
         })
       }
-      const patch = buildCapabilityResolverPatch(
-        await readFile(join(profile.effectivePath, 'cordis.patch.yml'), 'utf8'),
-        payloadConfiguration,
-      )
-      mutationDigest = pluginConfigurationMutationDigest(patch, profileRevision)
+      mutationDigest = pluginConfigurationMutationDigest(payloadConfiguration, ownerRevision)
     }
     const candidate: ResolvedIntentCandidate = {
       kind: entry.kind,
@@ -316,7 +312,7 @@ export class IntentPlanService {
       ownerRevision,
       configuration: payloadConfiguration,
       managed,
-      profile,
+      managedPlugins: managedPluginSnapshot,
       runtime,
     })
     const plan = createImmutablePlan({
@@ -354,7 +350,7 @@ export class IntentPlanService {
       mutationDigest,
       verificationDigest: verificationRecipeDigest(entry.kind, request.operationKind, candidate.desiredState),
       reviewEvidence,
-      restartRequired: entry.restart.required,
+      restartRequired: operationRestartRequired(entry, request.operationKind),
       createdAtMs,
       expiresAtMs,
       fences: {
@@ -391,7 +387,8 @@ export class IntentPlanService {
 
   /** Re-observe every fence before decision or consumption. */
   async context(plan: ImmutablePlan): Promise<PlanUseContext> {
-    const entry = this.catalog().envelope.entries.find(candidate => candidate.candidateRef === plan.content.candidateRef)
+    const catalog = this.catalog()
+    const entry = catalog.envelope.entries.find(candidate => candidate.candidateRef === plan.content.candidateRef)
     if (entry === undefined) throw new Error('plan candidate disappeared from the verified catalog')
     if (plan.content.verificationDigest !== verificationRecipeDigest(
       entry.kind,
@@ -406,7 +403,7 @@ export class IntentPlanService {
     if (plan.content.retentionDigest !== canonicalSha256({ candidateRef: entry.candidateRef, retainedData: entry.retainedData })) {
       throw new Error('plan retention digest does not bind the verified catalog')
     }
-    if (plan.content.restartRequired !== entry.restart.required) {
+    if (plan.content.restartRequired !== operationRestartRequired(entry, plan.content.operationKind)) {
       throw new Error('plan restart requirement does not bind the verified catalog')
     }
     const skillProjectRoot = entry.kind === 'skill' && plan.content.scopeKey === 'project'
@@ -414,12 +411,12 @@ export class IntentPlanService {
       : null
     const snapshot = await this.inventory.list(plan.content.scopeKey, plan.content.profileId, skillProjectRoot)
     const row = snapshot.rows.find(item => item.targetKey === plan.content.targetKey)
-    const profile = profileObservation(await this.owners.profileTransactions!.snapshot(plan.content.profileId))
+    const managedPluginSnapshot = await this.managedPlugins.snapshot(plan.content.profileId)
     const runtime = entry.kind === 'mcp'
       ? await this.preflight.mcpRuntime(entry.candidateRef, stored.payload.configuration)
       : null
     if (entry.kind === 'mcp' && runtime === null) throw new Error('MCP runtime preflight is no longer satisfied')
-    const ownerRevision = await this.ownerRevision(entry, row, skillProjectRoot)
+    const ownerRevision = await this.ownerRevision(entry, row, skillProjectRoot, managedPluginSnapshot)
     const reviewEvidence = await buildPlanReviewEvidence({
       entry,
       operationKind: plan.content.operationKind,
@@ -427,7 +424,7 @@ export class IntentPlanService {
       ownerRevision,
       configuration: stored.payload.configuration,
       managed: await this.store.getManaged(plan.content.targetKey),
-      profile,
+      managedPlugins: managedPluginSnapshot,
       runtime,
     })
     if (canonicalSha256(reviewEvidence) !== canonicalSha256(plan.content.reviewEvidence)) {
@@ -440,7 +437,7 @@ export class IntentPlanService {
       scopeKey: plan.content.scopeKey,
       profileId: plan.content.profileId,
       fences: {
-        catalogRevision: this.catalog().envelope.revision,
+        catalogRevision: catalog.envelope.revision,
         inventoryRevision: snapshot.revision,
         targetRevision: row?.managedRevision ?? 'absent',
         ownerRevision,
@@ -450,7 +447,7 @@ export class IntentPlanService {
           configuration: stored.payload.configuration,
           runtimeDescriptorDigest: runtime?.descriptorDigest ?? null,
         }),
-        profileRevision: profileFence(profile),
+        profileRevision: managedPluginSnapshot.ownerRevision,
       },
     })
   }
@@ -480,6 +477,7 @@ export class IntentPlanService {
   /** Project safe selectors for an exact MCP candidate's currently usable Host runtimes. */
   async configurationOptions(input: Readonly<{
     candidateRef: string
+    operationKind: OperationKind
     targetKey: string | null
     scopeKey: string
     profileId: string
@@ -488,19 +486,37 @@ export class IntentPlanService {
     currentConfiguration: RpcJson | null
   }>> {
     const { candidateRef } = input
-    const entry = this.catalog().envelope.entries.find(candidate => candidate.candidateRef === candidateRef)
-    if (entry === undefined) throw new Error('configuration candidate is absent')
+    const entries = this.catalog().envelope.entries
+    const entry = entries.find(candidate => candidate.candidateRef === candidateRef)
+    if (entry === undefined || !entry.scopes.includes(input.scopeKey as never)) {
+      throw new Error('configuration candidate is absent from the exact scope')
+    }
     let currentConfiguration: RpcJson | null = null
     if (input.targetKey !== null) {
       const record = await this.store.getManaged(input.targetKey)
+      const selected = input.operationKind === 'restore'
+        ? record?.current === null ? record.removed : record?.lastGood
+        : record?.current
+      const selectedEntry = selected === null || selected === undefined
+        ? undefined
+        : entries.find(candidate => candidate.candidateRef === selected.candidateRef)
       if (record === undefined
-        || record.current === null
-        || record.current.candidateRef !== candidateRef
+        || selected === null
+        || selected === undefined
         || record.scopeKey !== input.scopeKey
-        || record.profileId !== input.profileId) {
+        || record.profileId !== input.profileId
+        || record.kind !== entry.kind
+        || record.extensionId !== entry.name
+        || selectedEntry?.kind !== entry.kind
+        || selectedEntry.name !== entry.name
+        || (input.operationKind === 'restore' && (
+          selected.candidateRef !== entry.candidateRef
+          || selected.artifactRevision !== entry.artifact.version
+          || selected.artifactIntegrity !== entry.artifact.integrity
+        ))) {
         throw new Error('configuration target is absent or does not match its exact scope')
       }
-      currentConfiguration = record.current.configuration
+      currentConfiguration = selected.configuration
     }
     const options = entry.kind === 'mcp' ? await this.preflight.mcpOptions(candidateRef) : []
     return Object.freeze({ options, currentConfiguration })
@@ -510,8 +526,9 @@ export class IntentPlanService {
     entry: CatalogEntry,
     row: InventoryRow | undefined,
     skillProjectRoot: string | null,
+    managedPluginSnapshot: ManagedPluginSnapshot,
   ): Promise<string> {
-    if (entry.kind === 'plugin') return row?.ownerRevision ?? 'profile:absent'
+    if (entry.kind === 'plugin') return managedPluginSnapshot.ownerRevision
     if (entry.kind === 'mcp') return row?.ownerRevision ?? `mcp:${String(this.owners.mcpConnections!.snapshot().revision)}`
     if (row !== undefined) return row.ownerRevision
     const snapshot = await this.owners.skills!.snapshot(skillProjectRoot === null ? undefined : { cwd: skillProjectRoot })

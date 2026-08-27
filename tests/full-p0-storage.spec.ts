@@ -11,6 +11,7 @@ import {
   transitionOperation,
   type OperationAuthorization,
   type OperationJournal,
+  type OperationPhase,
 } from '../src/operations/index.ts'
 import { FileOperationStore, operationStoreStat } from '../src/storage/index.ts'
 import { TEST_RECOVERY_EXECUTABLE_BINDING } from './support/recovery-binding.ts'
@@ -105,6 +106,48 @@ function completeJournals(): { journals: OperationJournal[]; receiptDigest: stri
   return { journals, receiptDigest: issued.receipt.digest }
 }
 
+function journalsThroughPhase(phase: OperationPhase, operationId: string): OperationJournal[] {
+  const beforeDigest = canonicalSha256({ before: operationId })
+  const journals: OperationJournal[] = []
+  let journal = createOperationJournal(authorization(operationId), beforeDigest, 2)
+  journals.push(journal)
+  if (phase === 'authorized') return journals
+  if (phase === 'failed') {
+    journal = transitionOperation(journal, 'failed', beforeDigest, 'interrupted-before-mutation', 3)
+    journals.push(journal)
+    return journals
+  }
+  journal = transitionOperation(journal, 'staging', null, null, 3)
+  journals.push(journal)
+  if (phase === 'staging') return journals
+  journal = transitionOperation(journal, 'applying', null, null, 4)
+  journals.push(journal)
+  if (phase === 'applying') return journals
+  journal = recordOperationMutation(journal, canonicalSha256({ mutation: operationId }), 5)
+  journals.push(journal)
+  journal = transitionOperation(journal, 'verifying', null, null, 6)
+  journals.push(journal)
+  if (phase === 'verifying') return journals
+  journal = recordOperationVerification(journal, canonicalSha256({ verification: operationId }), 7)
+  journals.push(journal)
+  if (phase === 'committed') {
+    journal = transitionOperation(journal, 'committed', canonicalSha256({ after: operationId }), null, 8)
+    journals.push(journal)
+    return journals
+  }
+  journal = transitionOperation(journal, 'rolling-back', null, null, 8)
+  journals.push(journal)
+  if (phase === 'rolling-back') return journals
+  if (phase === 'recovery-required') {
+    journal = transitionOperation(journal, 'recovery-required', null, 'rollback-failed', 9)
+    journals.push(journal)
+    return journals
+  }
+  journal = transitionOperation(journal, 'rolled-back', beforeDigest, null, 9)
+  journals.push(journal)
+  return journals
+}
+
 describe('full P0 durable operation store', () => {
   it('persists a strict idempotent operation reservation until its journal is durable', async () => {
     const root = await fixtureRoot()
@@ -168,6 +211,64 @@ describe('full P0 durable operation store', () => {
     expect(recovered).toMatchObject({ recovered: true, projection: { phase: 'staging' } })
     const pointer = JSON.parse(await readFile(join(targetDirectory, 'CURRENT.json'), 'utf8'))
     expect(pointer.eventCount).toBe(2)
+  })
+
+  it('fails closed at the fixed ENOSPC event-write seam without publishing a journal head', async () => {
+    const root = await fixtureRoot()
+    const noSpace = Object.assign(new Error('simulated fixed journal ENOSPC'), { code: 'ENOSPC' })
+    const store = new FileOperationStore(root, point => {
+      if (point === 'journal-event-before-write') throw noSpace
+    })
+    const journal = createOperationJournal(authorization('operation:enospc'), canonicalSha256(null), 2)
+
+    await expect(store.persist(journal)).rejects.toBe(noSpace)
+    await expect(new FileOperationStore(root).load(journal.operationId)).resolves.toBeUndefined()
+  })
+
+  it('rejects a partial CURRENT pointer even when the next event itself is durable', async () => {
+    const root = await fixtureRoot()
+    let journal = createOperationJournal(authorization('operation:partial-current'), canonicalSha256(null), 2)
+    await new FileOperationStore(root).persist(journal)
+    journal = transitionOperation(journal, 'staging', null, null, 3)
+    const store = new FileOperationStore(root, async (point, context) => {
+      if (point !== 'journal-event-durable-before-current' || context.phase !== 'staging') return
+      await writeFile(context.currentPath, '{"schemaVersion":', 'utf8')
+      throw new Error('simulated process death after partial CURRENT replacement')
+    })
+
+    await expect(store.persist(journal)).rejects.toThrow('simulated process death')
+    await expect(new FileOperationStore(root).load(journal.operationId))
+      .rejects.toMatchObject({ code: 'journal-corrupt' })
+  })
+
+  it('repairs an event-ahead-of-CURRENT crash at every journal phase', async () => {
+    const phases: readonly OperationPhase[] = [
+      'authorized',
+      'staging',
+      'applying',
+      'verifying',
+      'rolling-back',
+      'committed',
+      'rolled-back',
+      'failed',
+      'recovery-required',
+    ]
+    for (const phase of phases) {
+      const root = await fixtureRoot()
+      const operationId = `operation:phase-crash:${phase}`
+      const journals = journalsThroughPhase(phase, operationId)
+      const store = new FileOperationStore(root, (point, context) => {
+        if (point === 'journal-event-durable-before-current' && context.phase === phase) {
+          throw new Error(`simulated ${phase} process death`)
+        }
+      })
+      for (const journal of journals.slice(0, -1)) await store.persist(journal)
+      await expect(store.persist(journals.at(-1)!)).rejects.toThrow(`simulated ${phase} process death`)
+
+      const recovered = await new FileOperationStore(root).load(operationId)
+      expect(recovered, phase).toMatchObject({ recovered: true, projection: { phase } })
+      expect(recovered?.journal.events).toHaveLength(journals.at(-1)!.events.length)
+    }
   })
 
   it('rejects a valid-prefix truncation and an altered content-addressed event', async () => {

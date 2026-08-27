@@ -1,0 +1,327 @@
+name: Post-publication evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact lowercase 40-character published commit on main
+        required: true
+        type: string
+      previous_commit:
+        description: Exact previous published commit for an update release; blank only for rc.0
+        required: false
+        default: ''
+        type: string
+      previous_evidence_run_id:
+        description: Successful previous post-publication evidence run; blank only for rc.0
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  verify-publication:
+    name: Exact-commit runtime, Release, catalog, and composite receipt
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact published commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.commit }}
+      - name: Bind requested commits to main history
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+        run: |
+          case "$EXPECTED_COMMIT" in *[!0-9a-f]*|'') exit 1 ;; esac
+          test "${#EXPECTED_COMMIT}" -eq 40
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/main
+          if test -n "$PREVIOUS_COMMIT"; then
+            case "$PREVIOUS_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+            test "${#PREVIOUS_COMMIT}" -eq 40
+            test "$PREVIOUS_COMMIT" != "$EXPECTED_COMMIT"
+            git merge-base --is-ancestor "$PREVIOUS_COMMIT" "$EXPECTED_COMMIT"
+            case "$PREVIOUS_EVIDENCE_RUN_ID" in *[!0-9]*|''|0*) exit 1 ;; esac
+            test "$PREVIOUS_EVIDENCE_RUN_ID" != "$GITHUB_RUN_ID"
+          else
+            test -z "$PREVIOUS_EVIDENCE_RUN_ID"
+          fi
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Require immutable Release verification support
+        run: |
+          gh --version
+          gh release verify --help >/dev/null
+          gh release verify-asset --help >/dev/null
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build verifier inputs
+        run: pnpm run build
+      - name: Install Chromium with system dependencies
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify current and previous exact main CI
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .artifacts/acceptance/github-ci
+          pnpm run test:acceptance:github-ci -- \
+            --commit "$EXPECTED_COMMIT" \
+            --receipt .artifacts/acceptance/github-ci/current.json
+          if test -n "$PREVIOUS_COMMIT"; then
+            pnpm run test:acceptance:github-ci -- \
+              --commit "$PREVIOUS_COMMIT" \
+              --receipt .artifacts/acceptance/github-ci/previous.json
+          fi
+      - name: Resolve attested release coordinates
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+        run: |
+          current=.artifacts/acceptance/github-ci/current.json
+          test "$(jq -er '.target.commit' "$current")" = "$EXPECTED_COMMIT"
+          current_version=$(jq -er '.packAttestation.version' "$current")
+          current_filename=$(jq -er '.packAttestation.filename' "$current")
+          current_sha=$(jq -er '.packAttestation.sha256' "$current")
+          current_size=$(jq -er '.packAttestation.sizeBytes' "$current")
+          current_manifest=$(jq -er '.packAttestation.manifestSha256' "$current")
+          current_run=$(jq -er '.run.id' "$current")
+          current_attempt=$(jq -er '.run.attempt' "$current")
+          {
+            echo "CURRENT_VERSION=$current_version"
+            echo "CURRENT_FILENAME=$current_filename"
+            echo "CURRENT_SHA=$current_sha"
+            echo "CURRENT_SIZE=$current_size"
+            echo "CURRENT_MANIFEST_SHA=$current_manifest"
+            echo "CURRENT_RUN_ID=$current_run"
+            echo "CURRENT_RUN_ATTEMPT=$current_attempt"
+            echo "CURRENT_CI_RECEIPT_SHA=sha256:$(sha256sum "$current" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_ENV"
+          if test -n "$PREVIOUS_COMMIT"; then
+            previous=.artifacts/acceptance/github-ci/previous.json
+            test "$(jq -er '.target.commit' "$previous")" = "$PREVIOUS_COMMIT"
+            {
+              echo "PREVIOUS_VERSION=$(jq -er '.packAttestation.version' "$previous")"
+              echo "PREVIOUS_FILENAME=$(jq -er '.packAttestation.filename' "$previous")"
+              echo "PREVIOUS_SHA=$(jq -er '.packAttestation.sha256' "$previous")"
+              echo "PREVIOUS_SIZE=$(jq -er '.packAttestation.sizeBytes' "$previous")"
+              echo "PREVIOUS_MANIFEST_SHA=$(jq -er '.packAttestation.manifestSha256' "$previous")"
+              echo "PREVIOUS_CI_RECEIPT_SHA=sha256:$(sha256sum "$previous" | cut -d ' ' -f 1)"
+            } >> "$GITHUB_ENV"
+          fi
+      - name: Download previous exact release-ready receipt
+        if: inputs.previous_commit != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+        run: |
+          run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PREVIOUS_EVIDENCE_RUN_ID}")
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow '.github/workflows/post-publication-evidence.yml' \
+            '.repository.full_name == $repository
+              and .path == $workflow
+              and .event == "workflow_dispatch"
+              and .head_branch == "main"
+              and .status == "completed"
+              and .conclusion == "success"' \
+            <<<"$run_json" >/dev/null
+          previous_attempt=$(jq -er '.run_attempt' <<<"$run_json")
+          case "$previous_attempt" in *[!0-9]*|''|0*) exit 1 ;; esac
+          artifact_name="post-publication-evidence-${PREVIOUS_COMMIT}-${previous_attempt}"
+          gh run download "$PREVIOUS_EVIDENCE_RUN_ID" \
+            --name "$artifact_name" \
+            --dir .artifacts/previous-post-publication
+          mapfile -t previous_receipts < <(
+            find .artifacts/previous-post-publication -type f -path '*/release-ready/receipt.json'
+          )
+          test "${#previous_receipts[@]}" -eq 1
+          previous_ready=$(realpath "${previous_receipts[0]}")
+          jq -e \
+            --arg commit "$PREVIOUS_COMMIT" \
+            --arg version "$PREVIOUS_VERSION" \
+            '.schemaVersion == 2
+              and .acceptanceId == "P0-EXTENSION-CENTER-RELEASE-READY"
+              and .status == "passed"
+              and .target.sourceCommit == $commit
+              and .target.version == $version
+              and .evidence.githubCi.acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
+              and (.evidence.githubCi.sha256 | test("^sha256:[0-9a-f]{64}$"))
+              and (.evidence.githubCi.receiptDigest | test("^sha256:[0-9a-f]{64}$"))
+              and (.evidence.githubCi.runId | type == "number" and . >= 1)' \
+            "$previous_ready" >/dev/null
+          echo "PREVIOUS_RELEASE_READY=$previous_ready" >> "$GITHUB_ENV"
+      - name: Download exact public Release assets
+        env:
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+        run: |
+          mkdir -p .artifacts/releases
+          current_url="https://github.com/striveh/dsh-plugin-extension-center/releases/download/v${CURRENT_VERSION}/${CURRENT_FILENAME}"
+          curl --fail --location --max-redirs 3 --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --connect-timeout 20 --max-time 120 --max-filesize "$CURRENT_SIZE" \
+            --output ".artifacts/releases/${CURRENT_FILENAME}" "$current_url"
+          test "$(wc -c < ".artifacts/releases/${CURRENT_FILENAME}" | tr -d ' ')" = "$CURRENT_SIZE"
+          test "sha256:$(sha256sum ".artifacts/releases/${CURRENT_FILENAME}" | cut -d ' ' -f 1)" = "$CURRENT_SHA"
+          echo "CURRENT_RELEASE_URL=$current_url" >> "$GITHUB_ENV"
+          if test -n "$PREVIOUS_COMMIT"; then
+            previous_url="https://github.com/striveh/dsh-plugin-extension-center/releases/download/v${PREVIOUS_VERSION}/${PREVIOUS_FILENAME}"
+            curl --fail --location --max-redirs 3 --proto '=https' --proto-redir '=https' \
+              --tlsv1.2 --connect-timeout 20 --max-time 120 --max-filesize "$PREVIOUS_SIZE" \
+              --output ".artifacts/releases/${PREVIOUS_FILENAME}" "$previous_url"
+            test "$(wc -c < ".artifacts/releases/${PREVIOUS_FILENAME}" | tr -d ' ')" = "$PREVIOUS_SIZE"
+            test "sha256:$(sha256sum ".artifacts/releases/${PREVIOUS_FILENAME}" | cut -d ' ' -f 1)" = "$PREVIOUS_SHA"
+            echo "PREVIOUS_RELEASE_URL=$previous_url" >> "$GITHUB_ENV"
+          fi
+      - name: Download exact full lifecycle receipt from current CI attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          acceptance_name="rc2-acceptance-ubuntu-latest-${EXPECTED_COMMIT}-attempt-${CURRENT_RUN_ATTEMPT}"
+          gh run download "$CURRENT_RUN_ID" --name "$acceptance_name" --dir .artifacts/ci-acceptance
+          mapfile -t receipts < <(find .artifacts/ci-acceptance -type f -path '*/full-p0-official-rc2/receipt.json')
+          test "${#receipts[@]}" -eq 1
+          full_path=$(realpath "${receipts[0]}")
+          test "$(jq -er '.status' "$full_path")" = passed
+          echo "FULL_P0_RECEIPT=$full_path" >> "$GITHUB_ENV"
+      - name: Verify exact Release artifact runtime on official DSH
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+        run: |
+          args=(
+            --current ".artifacts/releases/${CURRENT_FILENAME}"
+            --current-version "$CURRENT_VERSION"
+            --current-sha256 "$CURRENT_SHA"
+            --current-size "$CURRENT_SIZE"
+            --current-commit "$EXPECTED_COMMIT"
+            --current-manifest-sha256 "$CURRENT_MANIFEST_SHA"
+            --ci-receipt .artifacts/acceptance/github-ci/current.json
+            --ci-receipt-sha256 "$CURRENT_CI_RECEIPT_SHA"
+            --receipt .artifacts/acceptance/runtime-release/receipt.json
+          )
+          if test -n "$PREVIOUS_COMMIT"; then
+            args+=(
+              --previous ".artifacts/releases/${PREVIOUS_FILENAME}"
+              --previous-version "$PREVIOUS_VERSION"
+              --previous-sha256 "$PREVIOUS_SHA"
+              --previous-size "$PREVIOUS_SIZE"
+              --previous-commit "$PREVIOUS_COMMIT"
+              --previous-manifest-sha256 "$PREVIOUS_MANIFEST_SHA"
+            )
+          fi
+          pnpm run test:acceptance:runtime-release -- "${args[@]}"
+          echo "RUNTIME_RECEIPT_SHA=sha256:$(sha256sum .artifacts/acceptance/runtime-release/receipt.json | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
+      - name: Resolve immutable pnpm binding
+        run: |
+          node scripts/resolve-pnpm-binding.mjs "$(command -v pnpm)" > .artifacts/pnpm-binding.json
+          test "$(jq -er '.version' .artifacts/pnpm-binding.json)" = 11.21.0
+          {
+            echo "PINNED_PNPM_BIN=$(jq -er '.binPath' .artifacts/pnpm-binding.json)"
+            echo "PINNED_PNPM_ROOT=$(jq -er '.packageRoot' .artifacts/pnpm-binding.json)"
+            echo "PINNED_PNPM_TREE=$(jq -er '.treeSha256' .artifacts/pnpm-binding.json)"
+          } >> "$GITHUB_ENV"
+      - name: Verify public GitHub Release install, update, and removal
+        env:
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(
+            --current "$CURRENT_RELEASE_URL"
+            --current-version "$CURRENT_VERSION"
+            --current-sha256 "$CURRENT_SHA"
+            --current-size "$CURRENT_SIZE"
+            --current-commit "$EXPECTED_COMMIT"
+            --current-manifest-sha256 "$CURRENT_MANIFEST_SHA"
+            --runtime-receipt .artifacts/acceptance/runtime-release/receipt.json
+            --runtime-receipt-sha256 "$RUNTIME_RECEIPT_SHA"
+            --ci-receipt .artifacts/acceptance/github-ci/current.json
+            --ci-receipt-sha256 "$CURRENT_CI_RECEIPT_SHA"
+            --pnpm-bin "$PINNED_PNPM_BIN"
+            --pnpm-root "$PINNED_PNPM_ROOT"
+            --pnpm-version 11.21.0
+            --pnpm-tree-sha256 "$PINNED_PNPM_TREE"
+            --receipt .artifacts/acceptance/public-release/receipt.json
+          )
+          if test -n "$PREVIOUS_COMMIT"; then
+            args+=(
+              --previous "$PREVIOUS_RELEASE_URL"
+              --previous-version "$PREVIOUS_VERSION"
+              --previous-sha256 "$PREVIOUS_SHA"
+              --previous-size "$PREVIOUS_SIZE"
+              --previous-commit "$PREVIOUS_COMMIT"
+              --previous-manifest-sha256 "$PREVIOUS_MANIFEST_SHA"
+              --previous-ci-receipt .artifacts/acceptance/github-ci/previous.json
+              --previous-ci-receipt-sha256 "$PREVIOUS_CI_RECEIPT_SHA"
+            )
+          fi
+          pnpm run test:acceptance:public-release -- "${args[@]}"
+      - name: Verify signed public catalog deployment
+        run: >-
+          pnpm run test:acceptance:public-catalog --
+          --receipt .artifacts/acceptance/public-catalog/receipt.json
+      - name: Re-fetch every signed catalog source and artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          pnpm run test:acceptance:catalog-sources --
+          --receipt .artifacts/acceptance/catalog-sources/receipt.json
+      - name: Compose one cross-bound release-ready receipt
+        env:
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+        run: |
+          args=(
+            --full-p0 "$FULL_P0_RECEIPT"
+            --runtime-release .artifacts/acceptance/runtime-release/receipt.json
+            --public-release .artifacts/acceptance/public-release/receipt.json
+            --public-catalog .artifacts/acceptance/public-catalog/receipt.json
+            --catalog-sources .artifacts/acceptance/catalog-sources/receipt.json
+            --github-ci .artifacts/acceptance/github-ci/current.json
+            --receipt .artifacts/acceptance/release-ready/receipt.json
+          )
+          if test -n "$PREVIOUS_COMMIT"; then
+            args+=(
+              --previous-github-ci .artifacts/acceptance/github-ci/previous.json
+              --previous-release-ready "$PREVIOUS_RELEASE_READY"
+              --previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"
+            )
+          fi
+          pnpm run test:release-ready -- "${args[@]}"
+      - name: Upload bounded post-publication receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: post-publication-evidence-${{ inputs.commit }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/acceptance/github-ci/*.json
+            .artifacts/acceptance/runtime-release/receipt.json
+            .artifacts/acceptance/public-release/receipt.json
+            .artifacts/acceptance/public-catalog/receipt.json
+            .artifacts/acceptance/catalog-sources/receipt.json
+            .artifacts/acceptance/release-ready/receipt.json
+            .artifacts/pnpm-binding.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 90
