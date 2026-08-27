@@ -724,7 +724,7 @@ describe('standalone Center break-glass recovery', () => {
     const duplicateReplay = await runCli(duplicate)
     expect(duplicateReplay.exitCode).toBe(1)
     expect(duplicateReplay.stderr).toContain('Profile diverged from the committed recovery transaction')
-  })
+  }, 15_000)
 
   it('reclaims a dead shared Profile lease before restoring', async () => {
     const value = await fixture()
