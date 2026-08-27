@@ -25,12 +25,14 @@ import {
   AcceptanceFailure,
   TARGET_DSH_COMMIT,
   TARGET_DSH_VERSION,
+  assertNoManagedResolutionLinks,
   assertNoPackageLifecycleScripts,
   hasBlockedCredentialEnvironment,
   hasProviderEndpointOverride,
   immutablePackageTreeDigest,
   installOfficialDshHost,
   keylessEnvironment,
+  profileRemovalSurfaceDigest,
   runChecked,
   sanitizeDiagnostic,
   sha256,
@@ -1032,6 +1034,35 @@ async function inspectPackedArtifact(artifactPath, spec, env, unpackRoot, author
   })
 }
 
+async function releaseManifestAuthority(specification, repositoryRoot, environment) {
+  const spec = artifactSpecification(specification, 'release manifest authority')
+  const [commitOutput, manifestOutput] = await Promise.all([
+    runChecked('git', ['rev-parse', `${spec.commit}^{commit}`], {
+      cwd: repositoryRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['show', `${spec.commit}:package.json`], {
+      cwd: repositoryRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+  ])
+  if (commitOutput.stdout.trim() !== spec.commit) {
+    fail('P0-RELEASE-COMMIT', `${spec.version} source commit did not resolve exactly`)
+  }
+  let manifest
+  try {
+    manifest = JSON.parse(manifestOutput.stdout)
+  } catch {
+    fail('P0-RELEASE-COMMIT', `${spec.version} source commit package.json is not JSON`)
+  }
+  if (manifest.name !== CENTER_PACKAGE || manifest.version !== spec.version) {
+    fail('P0-RELEASE-COMMIT', `${spec.version} source commit did not declare the supplied package version`)
+  }
+  return Object.freeze(manifest)
+}
+
 function isInside(root, path) {
   const offset = relative(root, path)
   return offset === '' || offset !== '..' && !offset.startsWith(`..${sep}`)
@@ -1101,9 +1132,7 @@ async function captureProfileBaseline(dshBin, profileRoot, cwd, env) {
   return Object.freeze({
     manifest: normalizedProfileManifest(manifest),
     lockSha256: `sha256:${sha256(Buffer.from(lockfile))}`,
-    treeWithoutManifestSha256: await treeDigest(profileRoot, {
-      exclude: name => name === 'package.json',
-    }),
+    profileRemovalSurfaceSha256: await profileRemovalSurfaceDigest(profileRoot),
     dumpSha256: `sha256:${sha256(Buffer.from(dump.stdout))}`,
   })
 }
@@ -1194,7 +1223,7 @@ async function addCenter(dshBin, artifact, dshHome, cwd, env, forbiddenArtifactP
   })
 }
 
-async function assertRemoved(dshBin, profileRoot, baseline, cwd, env) {
+async function assertRemoved(dshBin, profileRoot, centerRoot, baseline, cwd, env) {
   const [manifestText, lockfile, dump] = await Promise.all([
     readFile(join(profileRoot, 'package.json'), 'utf8'),
     readFile(join(profileRoot, 'pnpm-lock.yaml'), 'utf8'),
@@ -1202,12 +1231,11 @@ async function assertRemoved(dshBin, profileRoot, baseline, cwd, env) {
   ])
   const manifest = JSON.parse(manifestText)
   await assertCenterAbsent(profileRoot, manifest, lockfile, dump.stdout, 'P0-RELEASE-REMOVE')
+  await assertNoManagedResolutionLinks(profileRoot, centerRoot, [CENTER_PACKAGE])
   const observed = Object.freeze({
     manifest: normalizedProfileManifest(manifest),
     lockSha256: `sha256:${sha256(Buffer.from(lockfile))}`,
-    treeWithoutManifestSha256: await treeDigest(profileRoot, {
-      exclude: name => name === 'package.json',
-    }),
+    profileRemovalSurfaceSha256: await profileRemovalSurfaceDigest(profileRoot),
     dumpSha256: `sha256:${sha256(Buffer.from(dump.stdout))}`,
   })
   assertProfileBaselineRestored(baseline, observed)
@@ -1225,7 +1253,7 @@ async function assertRemoved(dshBin, profileRoot, baseline, cwd, env) {
 export function assertProfileBaselineRestored(baselineValue, observedValue) {
   const baseline = record(baselineValue, 'Profile baseline')
   const observed = record(observedValue, 'observed removed Profile')
-  for (const field of ['manifest', 'lockSha256', 'treeWithoutManifestSha256', 'dumpSha256']) {
+  for (const field of ['manifest', 'lockSha256', 'profileRemovalSurfaceSha256', 'dumpSha256']) {
     if (observed[field] !== baseline[field]) {
       fail('P0-RELEASE-REMOVE-BASELINE', `official CLI remove changed baseline field ${field}`)
     }
@@ -1469,8 +1497,8 @@ export async function runReleaseAcceptance(input) {
     previousCiAcceptance === null ? [ciAcceptance.path] : [previousCiAcceptance.path, ciAcceptance.path],
   )
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
-  const authorityManifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
-  if (authorityManifest.packageManager !== `pnpm@${PINNED_PNPM_VERSION}`) {
+  const verifierManifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
+  if (verifierManifest.packageManager !== `pnpm@${PINNED_PNPM_VERSION}`) {
     fail('P0-RELEASE-PNPM', 'source manifest packageManager no longer matches the release pnpm pin')
   }
 
@@ -1499,6 +1527,10 @@ export async function runReleaseAcceptance(input) {
     if (hasBlockedCredentialEnvironment(baseEnv) || hasProviderEndpointOverride(baseEnv)) {
       fail('P0-RELEASE-ISOLATION', 'release acceptance inherited a provider credential or endpoint override')
     }
+    const [previousAuthority, currentAuthority] = await Promise.all([
+      previous === null ? null : releaseManifestAuthority(previous, projectRoot, baseEnv),
+      releaseManifestAuthority(current, projectRoot, baseEnv),
+    ])
     const pnpm = await verifyPinnedPnpm(pnpmInput, shimRoot, workspace, baseEnv)
     const env = Object.freeze({
       ...baseEnv,
@@ -1517,7 +1549,7 @@ export async function runReleaseAcceptance(input) {
     const profileRoot = join(dshHome, 'profiles', 'web')
     const baseline = await captureProfileBaseline(official.dshBin, profileRoot, workspace, env)
 
-    const acquire = async (spec, name, ci) => {
+    const acquire = async (spec, name, ci, authorityManifest) => {
       const path = join(downloads, `${name}.tgz`)
       const evidence = await acquireVerifiedReleaseArtifact(spec, path, {
         ciReleaseAssets: ci.artifact.releaseAssets,
@@ -1535,8 +1567,10 @@ export async function runReleaseAcceptance(input) {
       )
       return Object.freeze({ path: await realpath(path), spec, evidence, packed, pnpmTreeSha256 })
     }
-    const prior = previous === null ? null : await acquire(previous, 'previous', previousCiAcceptance)
-    const next = await acquire(current, 'current', ciAcceptance)
+    const prior = previous === null
+      ? null
+      : await acquire(previous, 'previous', previousCiAcceptance, previousAuthority)
+    const next = await acquire(current, 'current', ciAcceptance, currentAuthority)
     if (runtimeAcceptance.current.pnpmTreeSha256 !== next.pnpmTreeSha256
       || prior !== null && runtimeAcceptance.previous?.pnpmTreeSha256 !== prior.pnpmTreeSha256) {
       fail('P0-RELEASE-PNPM-ATTESTATION', 'runtime and public Release pnpm tree evidence differ')
@@ -1560,9 +1594,16 @@ export async function runReleaseAcceptance(input) {
       fail('P0-RELEASE-UPDATE', 'official CLI update did not switch the exact Center artifact dependency')
     }
     await runChecked(official.dshBin, [
-      'plugin', '--profile', 'web', 'remove', CENTER_PACKAGE, '--ignore-scripts',
+      'plugin', '--profile', 'web', 'remove', CENTER_PACKAGE,
     ], { cwd: workspace, env, timeoutMs: 180_000 })
-    const removal = await assertRemoved(official.dshBin, profileRoot, baseline, workspace, env)
+    const removal = await assertRemoved(
+      official.dshBin,
+      profileRoot,
+      join(dshHome, 'extension-center'),
+      baseline,
+      workspace,
+      env,
+    )
     const officialAfter = await immutablePackageTreeDigest(official.packageRoot)
     if (officialAfter !== officialBefore) {
       fail('P0-RELEASE-OFFICIAL-HOST', 'Center release lifecycle changed the official DSH package tree')

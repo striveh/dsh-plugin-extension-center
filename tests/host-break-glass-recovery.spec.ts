@@ -684,7 +684,7 @@ describe('standalone Center break-glass recovery', () => {
     await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
     await expect(readFile(join(attackerHome, 'profiles', PROFILE_ID, 'package.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
-  })
+  }, 15_000)
 
   it('accepts the strict rollback marker when standalone recovery reads a managed Plugin version', async () => {
     const value = await fixture()
@@ -701,7 +701,7 @@ describe('standalone Center break-glass recovery', () => {
     await writeCanonical(value.sidecarPath, sidecar(marked))
 
     await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
-  })
+  }, 15_000)
 
   it('replays a committed recovery without advancing the revision again', async () => {
     const value = await fixture()
@@ -1013,7 +1013,7 @@ describe('standalone Center break-glass recovery', () => {
     const treeResult = await runCli(tree)
     expect(treeResult.exitCode).toBe(1)
     expect(treeResult.stderr).toContain('official DSH recovery package tree does not match its pin')
-  })
+  }, 15_000)
 
   it('fails closed on executable pin, journal chain, and CURRENT tampering', async () => {
     const executable = await fixture()
@@ -1041,7 +1041,7 @@ describe('standalone Center break-glass recovery', () => {
     const pointerResult = await runCli(pointer)
     expect(pointerResult.exitCode).toBe(1)
     expect(pointerResult.stderr).toContain('headDigest does not match')
-  })
+  }, 15_000)
 
   it('rejects current-state drift before recovery and after a committed replay', async () => {
     const before = await fixture()

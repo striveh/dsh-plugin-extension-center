@@ -208,6 +208,10 @@ test('Profile removal digest ignores only declared package-manager paths and the
     await writeFile(join(root, 'node_modules', '.bin', 'package-manager-shim'), 'allowed')
     await mkdir(join(root, 'node_modules', '.pnpm'), { recursive: true })
     await writeFile(join(root, 'node_modules', '.pnpm', 'retained-cache'), 'allowed')
+    await writeFile(
+      join(root, 'node_modules', '.pnpm-workspace-state-v1.json'),
+      '{"lastValidatedTimestamp":42}\n',
+    )
     await writeFile(join(root, 'package.json'), '{"name":"dsh-profile-web","private":true}\n')
     assert.equal(await profileRemovalSurfaceDigest(root), before)
     assert.deepEqual(PROFILE_REMOVAL_MUTATION_WHITELIST, [

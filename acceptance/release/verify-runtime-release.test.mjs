@@ -255,7 +255,10 @@ test('uses one official Host and only official Plugin CLI Profile mutations', as
   assert.equal(source.match(/await installOfficialDshHost\(/gu)?.length, 1)
   assert.match(source, /'plugin', '--profile', PROFILE_ID, 'install', '--offline', '--ignore-scripts'/u)
   assert.match(source, /'plugin', '--profile', PROFILE_ID, 'add', artifact\.source,/u)
-  assert.match(source, /'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE, '--ignore-scripts'/u)
+  assert.match(source, /'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE,\n\s*\]/u)
+  assert.doesNotMatch(source, /'remove', CENTER_PACKAGE, '--ignore-scripts'/u)
+  assert.match(source, /profileRemovalSurfaceSha256: await profileRemovalSurfaceDigest\(profileRoot\)/u)
+  assert.match(source, /await assertNoManagedResolutionLinks\(profileRoot, centerRoot, \[CENTER_PACKAGE\]\)/u)
   assert.match(source, /previousInstallation = await addCenter[\s\S]+currentInstallation = await addCenter/u)
   const installedProfileSource = source.slice(
     source.indexOf('async function installedProfile'),
