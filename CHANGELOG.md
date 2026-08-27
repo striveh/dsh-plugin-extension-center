@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Fixed
+
+- Pass verifier flags directly through pnpm 11 in post-publication and catalog-discovery workflows so the strict CLI decoders receive no synthetic `--` argument.
+
 ## [0.1.0-rc.0] - 2026-08-27
 
 ### Added
