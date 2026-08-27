@@ -58,6 +58,8 @@ Runner 必须从隔离的官方 rc.2 安装中解析 CLI 与全部 Host package�
 
 最终 Release 决策组合彼此独立的 receipt，不扩大任何单个 runner 的主张：
 
+这些 receipt 之间的官方 Host identity 是准确的 DSH package name 与 version、audited source commit、registry 和 registry integrity。每个 lane 都在自己的 lifecycle 前对完整 installed package tree 取指纹，结束后重新计算，并要求两者完全相同；这些 lane-local fingerprint 继续通过 input receipt digest 绑定。它们不会在不同 fresh installation 之间比较，因为 pnpm 生成的 `.bin` shim 会嵌入各自的隔离安装路径。
+
 1. 完整官方 rc.2 生命周期 receipt 绑定 packed artifact、浏览器旅程、子扩展生命周期、恢复、受控 ABA 顺序与无密钥 Agent 续行。
 2. Runtime Release receipt 证明 Host 启动、Client 启动、RPC 注册、准确官方 DSH tree 保持不变；提供前一 artifact 时，还会在同一 Profile 中证明不同前一版本到当前版本的扩展中心更新。
 3. 公开 Release receipt 要求 Release asset 准确且仅为 CI tarball、`SHA256SUMS` 与 pack attestation，下载并逐一绑定三个 asset 的 byte，使用 GitHub CLI 验证显式 immutable Release 与每个 asset，再结合 runtime receipt 证明官方 CLI install、可选 update 与 remove。
