@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.1.0-rc.2] - 2026-08-28
+
+### Added
+
+- Record the immutable rc.1 post-publication failure as a dedicated `not-release-ready` incident receipt and require the recovery release sequence to preserve that failed candidate instead of rewriting or rerunning it.
+- Bind update acceptance to the same persistent Center root and the observed previous degraded catalog state followed by the current fresh public catalog state.
+
+### Fixed
+
+- Verify a legacy signed catalog cache before atomically rebasing it to the newer packaged bootstrap, or trim a verified historical prefix when the exact packaged bootstrap already appears in the chain. Serialize durable cache commits across DSH processes, re-read the authoritative chain inside the writer reservation, and retain a newer verified tip when a stale refresh finishes later. This lets an official-CLI same-Profile update recover the rc.0 revision-8 cache, adopt packaged revision 9, and refresh to public revision 10 without deleting user state or allowing a concurrent Host to roll it back.
+- Route recovery promotion through rc.0's last successful composite receipt: rc.2 updates from rc.0, and stable can advance only from a successful rc.2 receipt. The immutable rc.1 Release remains published but is not release-ready because its only post-publication attempt failed during the real cache-preserving update.
+
 ## [0.1.0-rc.1] - 2026-08-28
 
 ### Changed
@@ -15,7 +27,7 @@ All notable changes to this project will be documented in this file. The format 
 - Upgrade the private bundled recovery runtime from pnpm 11.7.0 to 11.21.0 and rebind its registry integrity, closing the high-severity `GHSA-qrv3-253h-g69c` path-traversal advisory before another candidate is published. Exact rc.0 records remain readable history, while unfinished operations and failed Plugin journals still referenced by durable owner state retain their target quarantine and never expose or execute the retired runtime. Provider apply ambiguity now remains nonterminal instead of issuing an unsafe failed receipt.
 - Pass verifier flags directly through pnpm 11 in post-publication and catalog-discovery workflows so the strict CLI decoders receive no synthetic `--` argument.
 - Keep the Profile lease durable through official CLI dispatch, a monotonic private child outcome, detached-process-group shutdown, and exact marker cleanup in both normal and standalone break-glass execution; the supervisor owns group termination through its hard-kill deadline, so resistant descendants cannot outlive it and the caller never signals a reaped group leader.
-- Enforce the fixed rc.0 to rc.1 to stable promotion sequence and revalidate the embedded stage and artifact history of every previous release-ready receipt.
+- Enforce the then-intended rc.0 to rc.1 to stable promotion sequence and revalidate the embedded stage and artifact history of every previous release-ready receipt. rc.2 supersedes this sequence after rc.1 failed post-publication verification.
 - Read the official CLI's captured `--dump-config` stdout when verifying an installed Center Profile, so post-publication runtime acceptance reaches the Host, Client, removal, and composite receipt gates instead of failing on the command-result wrapper.
 - Invoke official Plugin CLI removal with the exact rc.2 argument list, omitting the add-only pnpm `--ignore-scripts` option that `pnpm remove` rejects.
 - Reuse the P0 Profile-removal surface audit in release verification, preserving exact manifest, lock, and composed-config restoration while admitting only declared package-manager internals and rejecting residual Center resolution links.
@@ -57,8 +69,9 @@ All notable changes to this project will be documented in this file. The format 
 ### Release gates
 
 - Every release remains conditional on exact packed-artifact lifecycle, browser, recovery, continuation, deterministic-pack, and platform receipts against the unmodified official DSH rc.2 artifact.
-- `0.1.0-rc.0` is the bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it does not claim an update from an earlier Center Release and proves only catalog `r8→r9`. rc.1 must bind rc.0's successful composite receipt, promote deployed `r9` into its packaged bootstrap, and deploy signed `r10`; stable must bind rc.1, promote `r10`, and deploy `r11`. Public Release, Pages, catalog-source, runtime, and composite claims require their own passing receipts. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
+- `0.1.0-rc.0` is the successful bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it proves catalog `r8→r9`. The immutable rc.1 candidate promoted `r9` and deployed `r10`, but its only post-publication run exposed the cache-rollover defect and produced no successful composite receipt. Recovery rc.2 therefore binds rc.0's successful receipt, keeps packaged `r9` and deployed `r10`, and also binds the rc.1 `not-release-ready` incident. Stable must bind a successful rc.2 receipt, promote `r10`, and deploy `r11`. Public Release, Pages, catalog-source, runtime, incident, and composite claims require their own receipts. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
 
-[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.2...HEAD
+[0.1.0-rc.2]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.0...v0.1.0-rc.1
 [0.1.0-rc.0]: https://github.com/striveh/dsh-plugin-extension-center/releases/tag/v0.1.0-rc.0

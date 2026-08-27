@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import { TARGET_DSH_REGISTRY_INTEGRITY } from '../store-only/support.mjs'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../../lib/catalog-data.js'
@@ -7,12 +8,22 @@ import { canonicalSha256 } from './receipt-binding.mjs'
 import { REQUIRED_FAULT_MATRIX_CASE_IDS } from './fault-matrix.mjs'
 import { EXPECTED_PUBLIC_CATALOG, PUBLIC_CATALOG_URL } from '../release/verify-public-catalog.mjs'
 import { REQUIRED_CI_JOBS } from '../release/verify-github-ci.mjs'
+import {
+  FAILED_ARTIFACT_ENTRIES,
+  FAILED_JOB_NAME,
+  FAILED_STEP_NAME,
+} from '../release/assert-publication-incident.mjs'
 import { assertReleaseReady, parseReleaseReadyArguments } from './assert-release-ready.mjs'
 
 const TREE = `sha256:${'a'.repeat(64)}`
 const RUNTIME_RECEIPT_SHA = `sha256:${'b'.repeat(64)}`
 const BOOTSTRAP_ENTRIES = EXPECTED_PUBLIC_CATALOG.packagedBootstrapEntriesDigest
 const PREVIOUS_BOOTSTRAP_ENTRIES = `sha256:${'0'.repeat(64)}`
+const RECOVERY_RC1_COMMIT = '951c48cf7666991487eab9ef26d39f359b68cc20'
+const RECOVERY_RC0_COMMIT = '882d3c3cc59b597bb24ee55025690f8c4447abd5'
+const RECOVERY_FAILED_RUN_ID = 33103882901
+const RECOVERY_PREVIOUS_RUN_ID = 33099069510
+const RECOVERY_INCIDENT_RUN_ID = 33110000001
 const CURRENT = Object.freeze({
   version: '0.1.0-rc.1',
   sha256: `sha256:${'c'.repeat(64)}`,
@@ -147,7 +158,7 @@ function releaseReadyArtifact(artifact) {
   }
 }
 
-function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact) {
+function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact, runId = 99) {
   const ci = githubCiReceipt(artifact)
   const verifierCi = githubCiReceipt(verifier)
   const body = {
@@ -157,7 +168,7 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact) {
     p0Status: 'rc0-bootstrap-release-ready',
     releaseStage: 'bootstrap-rc0',
     generatedAt: '2026-08-27T00:05:00.000Z',
-    verifier: verifierIdentity(artifact, verifier, 99),
+    verifier: verifierIdentity(artifact, verifier, runId),
     target: {
       repository: 'striveh/dsh-plugin-extension-center',
       sourceCommit: artifact.sourceCommit,
@@ -257,8 +268,13 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact) {
 
 function updateReleaseReadyReceipt(previous, current) {
   const receipt = previousReleaseReadyReceipt(current)
+  receipt.schemaVersion = 3
   receipt.p0Status = 'p0-release-ready'
-  receipt.releaseStage = current.version === '0.1.0' ? 'stable' : 'update-rc'
+  receipt.releaseStage = current.version === '0.1.0'
+    ? 'stable'
+    : current.version === '0.1.0-rc.2'
+      ? 'recovery-rc'
+      : 'update-rc'
   receipt.artifacts.previous = releaseReadyArtifact(previous)
   receipt.evidence.previousGithubCi = {
     acceptanceId: 'P0-GITHUB-CI-EXACT-COMMIT',
@@ -272,6 +288,24 @@ function updateReleaseReadyReceipt(previous, current) {
     receiptDigest: `sha256:${'4'.repeat(64)}`,
     runId: 40,
   }
+  receipt.evidence.publicationIncident = current.version === '0.1.0-rc.2'
+    ? {
+      acceptanceId: 'P0-EXTENSION-CENTER-PUBLICATION-INCIDENT',
+      sha256: `sha256:${'8'.repeat(64)}`,
+      receiptDigest: `sha256:${'9'.repeat(64)}`,
+      runId: RECOVERY_INCIDENT_RUN_ID,
+      runAttempt: 1,
+      failedRunId: RECOVERY_FAILED_RUN_ID,
+      failedRunAttempt: 1,
+      targetCommit: RECOVERY_RC1_COMMIT,
+      targetVersion: '0.1.0-rc.1',
+      verifierCommit: current.sourceCommit,
+      verifierGithubCiSha256: `sha256:${'a'.repeat(64)}`,
+      verifierGithubCiReceiptDigest: `sha256:${'b'.repeat(64)}`,
+      verifierGithubCiRunId: 42,
+      verifierGithubCiRunAttempt: 1,
+    }
+    : null
   receipt.claims.publicPreviousToCurrentUpdate = true
   receipt.claims.signedCatalogPreviousToCurrentUpdate = true
   receipt.notProven = receipt.notProven.slice(2)
@@ -397,12 +431,17 @@ function runtimeReceipt(previous = PREVIOUS, current = CURRENT) {
         profileId: 'web',
         sameProfile: true,
         officialCliUpdate: previous === null ? null : true,
+        centerRootRetained: previous === null ? null : true,
         removalExactBaselineRestored: true,
       },
       previous: previous === null ? null : {
         installedPnpmTreeSha256: previous.pnpmTreeSha256,
         catalogRevision: EXPECTED_PUBLIC_CATALOG.previousRevision - 1,
         catalogEntriesDigest: PREVIOUS_BOOTSTRAP_ENTRIES,
+        catalogSource: 'bootstrap',
+        catalogFreshness: 'bootstrap',
+        catalogDegraded: true,
+        catalogDegradedReason: 'catalog revision chain contains a gap',
         browserExternalRequests: [],
         browserExternalWebSockets: [],
         browserConsoleFailures: [],
@@ -411,6 +450,10 @@ function runtimeReceipt(previous = PREVIOUS, current = CURRENT) {
         installedPnpmTreeSha256: current.pnpmTreeSha256,
         catalogRevision: EXPECTED_PUBLIC_CATALOG.revision,
         catalogEntriesDigest: EXPECTED_PUBLIC_CATALOG.entriesDigest,
+        catalogSource: 'remote',
+        catalogFreshness: 'fresh',
+        catalogDegraded: false,
+        catalogDegradedReason: null,
         browserExternalRequests: [],
         browserExternalWebSockets: [],
         browserConsoleFailures: [],
@@ -625,14 +668,210 @@ function githubCiReceipt(current = CURRENT) {
   return { ...body, receiptDigest: canonicalSha256(body) }
 }
 
+function receiptFileSha256(receipt) {
+  const bytes = `${JSON.stringify(receipt, null, 2)}\n`
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+}
+
+function publicationIncidentReceipt({
+  current,
+  previous,
+  previousGithubCi,
+  previousReleaseReady,
+  verifierGithubCi,
+  verifierGithubCiSha256,
+}) {
+  const repository = 'striveh/dsh-plugin-extension-center'
+  const failedArtifact = {
+    ...CURRENT,
+    version: '0.1.0-rc.1',
+    sourceCommit: RECOVERY_RC1_COMMIT,
+  }
+  const failedPayload = releasePayload(failedArtifact)
+  const failedRunUrl = `https://github.com/${repository}/actions/runs/${String(RECOVERY_FAILED_RUN_ID)}`
+  const previousRunUrl = `https://github.com/${repository}/actions/runs/${String(RECOVERY_PREVIOUS_RUN_ID)}`
+  const failedCurrentCoordinate = {
+    fileSha256: `sha256:${'c'.repeat(64)}`,
+    receiptDigest: `sha256:${'d'.repeat(64)}`,
+    commit: RECOVERY_RC1_COMMIT,
+    version: '0.1.0-rc.1',
+    ciRunId: 33102419745,
+    ciRunAttempt: 1,
+  }
+  const body = {
+    schemaVersion: 1,
+    acceptanceId: 'P0-EXTENSION-CENTER-PUBLICATION-INCIDENT',
+    status: 'failed',
+    p0Status: 'not-release-ready',
+    observedAt: '2026-08-27T19:00:00.000Z',
+    target: {
+      repository,
+      sourceCommit: RECOVERY_RC1_COMMIT,
+      version: '0.1.0-rc.1',
+      release: {
+        id: 378036901,
+        version: '0.1.0-rc.1',
+        tag: 'v0.1.0-rc.1',
+        tagCommit: RECOVERY_RC1_COMMIT,
+        immutable: true,
+        prerelease: true,
+        htmlUrl: `https://github.com/${repository}/releases/tag/v0.1.0-rc.1`,
+        createdAt: '2026-08-27T18:13:43.000Z',
+        publishedAt: '2026-08-27T18:28:51.000Z',
+        assets: failedPayload.map((asset, index) => ({
+          id: 500 + index,
+          ...asset,
+          publicUrl: `https://github.com/${repository}/releases/download/v0.1.0-rc.1/${asset.name}`,
+        })),
+      },
+    },
+    verifier: {
+      repository,
+      workflowPath: '.github/workflows/publication-incident-evidence.yml',
+      ref: 'refs/heads/main',
+      refProtected: true,
+      commit: current.sourceCommit,
+      runId: RECOVERY_INCIDENT_RUN_ID,
+      runAttempt: 1,
+      githubCi: {
+        acceptanceId: 'P0-GITHUB-CI-EXACT-COMMIT',
+        fileSha256: verifierGithubCiSha256,
+        receiptDigest: verifierGithubCi.receiptDigest,
+        runId: verifierGithubCi.run.id,
+        runAttempt: verifierGithubCi.run.attempt,
+      },
+    },
+    failure: {
+      classification: 'runtime-release-verification-failed',
+      run: {
+        id: RECOVERY_FAILED_RUN_ID,
+        attempt: 1,
+        runNumber: 18,
+        workflowPath: '.github/workflows/post-publication-evidence.yml',
+        event: 'workflow_dispatch',
+        headBranch: 'main',
+        headSha: RECOVERY_RC1_COMMIT,
+        status: 'completed',
+        conclusion: 'failure',
+        htmlUrl: failedRunUrl,
+        createdAt: '2026-08-27T18:31:21.000Z',
+        updatedAt: '2026-08-27T18:33:21.000Z',
+      },
+      job: {
+        id: 98628458057,
+        name: FAILED_JOB_NAME,
+        status: 'completed',
+        conclusion: 'failure',
+        startedAt: '2026-08-27T18:31:25.000Z',
+        completedAt: '2026-08-27T18:33:21.000Z',
+        htmlUrl: `${failedRunUrl}/job/98628458057`,
+        failedStep: {
+          number: 15,
+          name: FAILED_STEP_NAME,
+          status: 'completed',
+          conclusion: 'failure',
+          startedAt: '2026-08-27T18:32:00.000Z',
+          completedAt: '2026-08-27T18:32:01.000Z',
+        },
+        releaseReadyCompositeStep: {
+          number: 20,
+          name: 'Compose one cross-bound release-ready receipt',
+          status: 'completed',
+          conclusion: 'skipped',
+        },
+      },
+      artifact: {
+        id: 9659675180,
+        name: `post-publication-evidence-${RECOVERY_RC1_COMMIT}-1`,
+        archiveSizeBytes: 4096,
+        archiveSha256: `sha256:${'e'.repeat(64)}`,
+        entries: [...FAILED_ARTIFACT_ENTRIES],
+        receipts: {
+          current: failedCurrentCoordinate,
+          previous: {
+            fileSha256: `sha256:${'6'.repeat(64)}`,
+            receiptDigest: previousGithubCi.receiptDigest,
+            commit: previous.sourceCommit,
+            version: previous.version,
+            ciRunId: previousGithubCi.run.id,
+            ciRunAttempt: previousGithubCi.run.attempt,
+          },
+          verifier: { ...failedCurrentCoordinate },
+        },
+      },
+      releaseReadyReceiptPresent: false,
+      releaseReadyCompositeConclusion: 'skipped',
+    },
+    previousSuccessfulPublication: {
+      targetCommit: previous.sourceCommit,
+      run: {
+        id: RECOVERY_PREVIOUS_RUN_ID,
+        attempt: 1,
+        runNumber: 17,
+        workflowPath: '.github/workflows/post-publication-evidence.yml',
+        event: 'workflow_dispatch',
+        headBranch: 'main',
+        headSha: previousReleaseReady.verifier.commit,
+        status: 'completed',
+        conclusion: 'success',
+        htmlUrl: previousRunUrl,
+        createdAt: '2026-08-27T17:34:09.000Z',
+        updatedAt: '2026-08-27T17:36:15.000Z',
+      },
+      artifact: {
+        id: 9650000000,
+        name: `post-publication-evidence-${previous.sourceCommit}-1`,
+        archiveSizeBytes: 8192,
+        archiveSha256: `sha256:${'f'.repeat(64)}`,
+      },
+      releaseReadyReceipt: {
+        acceptanceId: 'P0-EXTENSION-CENTER-RELEASE-READY',
+        p0Status: previousReleaseReady.p0Status,
+        fileSha256: `sha256:${'7'.repeat(64)}`,
+        receiptDigest: previousReleaseReady.receiptDigest,
+        targetVersion: previous.version,
+        verifierCommit: previousReleaseReady.verifier.commit,
+      },
+    },
+    releaseReadyAcceptanceId: null,
+    notProven: [
+      'release-readiness',
+      'root-cause-from-actions-metadata',
+      'successful-update-runtime-verification',
+    ],
+  }
+  return { ...body, receiptDigest: canonicalSha256(body) }
+}
+
 function evidence(previous = PREVIOUS, current = CURRENT, verifier = current, previousVerifier = previous) {
+  const recovery = current.version === '0.1.0-rc.2'
   const runtimeRelease = runtimeReceipt(previous, current)
   const publicRelease = publicReceipt(previous, current)
   const githubCi = githubCiReceipt(current)
   const verifierGithubCi = githubCiReceipt(verifier)
   const previousGithubCi = previous === null ? null : githubCiReceipt(previous)
   const previousVerifierGithubCi = previous === null ? null : githubCiReceipt(previousVerifier)
-  const previousReleaseReady = previous === null ? null : previousReleaseReadyReceipt(previous, previousVerifier)
+  const previousReleaseReady = previous === null
+    ? null
+    : previousReleaseReadyReceipt(
+      previous,
+      previousVerifier,
+      recovery ? RECOVERY_PREVIOUS_RUN_ID : 99,
+    )
+  const publicationIncidentVerifierGithubCi = recovery ? githubCiReceipt(current) : null
+  const publicationIncidentVerifierGithubCiSha256 = publicationIncidentVerifierGithubCi === null
+    ? null
+    : receiptFileSha256(publicationIncidentVerifierGithubCi)
+  const publicationIncident = recovery
+    ? publicationIncidentReceipt({
+      current,
+      previous,
+      previousGithubCi,
+      previousReleaseReady,
+      verifierGithubCi: publicationIncidentVerifierGithubCi,
+      verifierGithubCiSha256: publicationIncidentVerifierGithubCiSha256,
+    })
+    : null
   runtimeRelease.ciPackAttestation.receiptDigest = githubCi.receiptDigest
   publicRelease.inputs.ciPackAttestation.receiptDigest = githubCi.receiptDigest
   if (previousGithubCi !== null) {
@@ -650,7 +889,12 @@ function evidence(previous = PREVIOUS, current = CURRENT, verifier = current, pr
     previousGithubCi,
     previousVerifierGithubCi,
     previousReleaseReady,
-    previousEvidenceRunId: previous === null ? null : 99,
+    previousEvidenceRunId: previous === null
+      ? null
+      : recovery ? RECOVERY_PREVIOUS_RUN_ID : 99,
+    publicationIncident,
+    publicationIncidentVerifierGithubCi,
+    publicationIncidentRunId: recovery ? RECOVERY_INCIDENT_RUN_ID : null,
     receiptDigests: {
       fullP0: `sha256:${'9'.repeat(64)}`,
       runtimeRelease: RUNTIME_RECEIPT_SHA,
@@ -662,6 +906,8 @@ function evidence(previous = PREVIOUS, current = CURRENT, verifier = current, pr
       previousGithubCi: previousGithubCi === null ? null : `sha256:${'6'.repeat(64)}`,
       previousVerifierGithubCi: previousVerifierGithubCi === null ? null : `sha256:${'5'.repeat(64)}`,
       previousReleaseReady: previousReleaseReady === null ? null : `sha256:${'7'.repeat(64)}`,
+      publicationIncident: publicationIncident === null ? null : receiptFileSha256(publicationIncident),
+      publicationIncidentVerifierGithubCi: publicationIncidentVerifierGithubCiSha256,
     },
     generatedAt: '2026-08-27T00:10:00.000Z',
   }
@@ -686,6 +932,76 @@ test('aggregates rc.1 update evidence into one exact-commit P0 release receipt',
   ])
   const { receiptDigest, ...body } = receipt
   assert.equal(receiptDigest, canonicalSha256(body))
+})
+
+test('aggregates recovery rc.2 directly from the successful rc.0 receipt', () => {
+  const rc0 = { ...PREVIOUS, sourceCommit: RECOVERY_RC0_COMMIT }
+  const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
+  const receipt = assertReleaseReady(evidence(rc0, rc2))
+  assert.equal(receipt.schemaVersion, 3)
+  assert.equal(receipt.p0Status, 'p0-release-ready')
+  assert.equal(receipt.releaseStage, 'recovery-rc')
+  assert.equal(receipt.artifacts.previous.version, '0.1.0-rc.0')
+  assert.equal(receipt.artifacts.current.version, '0.1.0-rc.2')
+  assert.equal(receipt.evidence.previousReleaseReady.runId, RECOVERY_PREVIOUS_RUN_ID)
+  assert.equal(receipt.evidence.publicationIncident.targetCommit, RECOVERY_RC1_COMMIT)
+  assert.equal(receipt.evidence.publicationIncident.failedRunId, RECOVERY_FAILED_RUN_ID)
+  assert.equal(receipt.evidence.publicationIncident.runId, RECOVERY_INCIDENT_RUN_ID)
+  assert.equal(receipt.evidence.publicationIncident.runAttempt, 1)
+})
+
+test('requires the complete terminal publication incident input set for recovery rc.2', () => {
+  const rc0 = { ...PREVIOUS, sourceCommit: RECOVERY_RC0_COMMIT }
+  const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
+  for (const mutate of [
+    input => { input.publicationIncident = null },
+    input => { input.publicationIncidentVerifierGithubCi = null },
+    input => { input.publicationIncidentRunId = null },
+    input => { input.receiptDigests.publicationIncident = null },
+    input => { input.receiptDigests.publicationIncidentVerifierGithubCi = null },
+  ]) {
+    const input = evidence(rc0, rc2)
+    mutate(input)
+    assert.throws(() => assertReleaseReady(input), /publication incident|terminal rc\.1/u)
+  }
+})
+
+test('rejects re-digested publication incident coordinate and retained-evidence drift', () => {
+  const rc0 = { ...PREVIOUS, sourceCommit: RECOVERY_RC0_COMMIT }
+  const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
+  for (const mutate of [
+    input => { input.publicationIncident.target.version = '0.1.0-rc.9' },
+    input => { input.publicationIncident.failure.run.id += 1 },
+    input => { input.publicationIncident.verifier.githubCi.fileSha256 = `sha256:${'0'.repeat(64)}` },
+    input => { input.publicationIncident.failure.artifact.receipts.previous.fileSha256 = `sha256:${'0'.repeat(64)}` },
+    input => { input.publicationIncident.previousSuccessfulPublication.releaseReadyReceipt.receiptDigest = `sha256:${'0'.repeat(64)}` },
+  ]) {
+    const input = evidence(rc0, rc2)
+    mutate(input)
+    const { receiptDigest: _oldDigest, ...body } = input.publicationIncident
+    input.publicationIncident.receiptDigest = canonicalSha256(body)
+    input.receiptDigests.publicationIncident = receiptFileSha256(input.publicationIncident)
+    assert.throws(() => assertReleaseReady(input), /publication incident|rc\.1 incident/u)
+  }
+})
+
+test('rejects incident evidence outside recovery rc.2 and the immutable failed rc.1 target', () => {
+  const rc0 = { ...PREVIOUS, sourceCommit: RECOVERY_RC0_COMMIT }
+  const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
+  const injected = evidence()
+  const recovery = evidence(rc0, rc2)
+  injected.publicationIncident = recovery.publicationIncident
+  injected.publicationIncidentVerifierGithubCi = recovery.publicationIncidentVerifierGithubCi
+  injected.publicationIncidentRunId = recovery.publicationIncidentRunId
+  injected.receiptDigests.publicationIncident = recovery.receiptDigests.publicationIncident
+  injected.receiptDigests.publicationIncidentVerifierGithubCi = recovery.receiptDigests.publicationIncidentVerifierGithubCi
+  assert.throws(() => assertReleaseReady(injected), /only recovery rc\.2/u)
+
+  const immutableRc1 = { ...CURRENT, sourceCommit: RECOVERY_RC1_COMMIT }
+  assert.throws(
+    () => assertReleaseReady(evidence(PREVIOUS, immutableRc1)),
+    /terminal not-release-ready/u,
+  )
 })
 
 test('accepts rc.0 only as an explicit bootstrap with update still unproven', () => {
@@ -718,6 +1034,24 @@ test('accepts independent official DSH tree fingerprints after every lane proves
   const receipt = assertReleaseReady(input)
   assert.equal(receipt.target.officialDsh.registryIntegrity, TARGET_DSH_REGISTRY_INTEGRITY)
   assert.equal(receipt.target.officialDsh.packageTreeDigest, fullTree)
+})
+
+test('requires the same persistent Center root to recover from the previous catalog gap and refresh current', () => {
+  const replacedRoot = evidence()
+  replacedRoot.runtimeRelease.observations.profile.centerRootRetained = false
+  assert.throws(() => assertReleaseReady(replacedRoot), /same-Profile lifecycle/u)
+
+  const hiddenPreviousGap = evidence()
+  hiddenPreviousGap.runtimeRelease.observations.previous.catalogDegraded = false
+  hiddenPreviousGap.runtimeRelease.observations.previous.catalogDegradedReason = null
+  assert.throws(() => assertReleaseReady(hiddenPreviousGap), /adjacent-only catalog degradation/u)
+
+  const degradedCurrent = evidence()
+  degradedCurrent.runtimeRelease.observations.current.catalogSource = 'bootstrap'
+  degradedCurrent.runtimeRelease.observations.current.catalogFreshness = 'bootstrap'
+  degradedCurrent.runtimeRelease.observations.current.catalogDegraded = true
+  degradedCurrent.runtimeRelease.observations.current.catalogDegradedReason = 'catalog revision chain contains a gap'
+  assert.throws(() => assertReleaseReady(degradedCurrent), /fresh public catalog/u)
 })
 
 test('rejects publication identity drift and a changed official DSH tree within one lifecycle', () => {
@@ -807,7 +1141,7 @@ test('rejects verifier workflow identity or CI binding drift', () => {
 })
 
 test('rejects rc.1 without previous-to-current evidence', () => {
-  assert.throws(() => assertReleaseReady(evidence(null, CURRENT)), /rc\.1 and stable require/u)
+  assert.throws(() => assertReleaseReady(evidence(null, CURRENT)), /rc\.1, recovery rc\.2, and stable require/u)
 })
 
 test('rejects an update without the exact previous release-ready receipt and run', () => {
@@ -851,10 +1185,56 @@ test('rejects a re-digested previous release-ready receipt with missing or drift
   }
 })
 
-test('rejects stable unless it advances directly from rc.1', () => {
-  const previous = { ...PREVIOUS, version: '0.1.0-rc.2' }
-  const current = { ...CURRENT, version: '0.1.0' }
-  assert.throws(() => assertReleaseReady(evidence(previous, current)), /must update from 0\.1\.0-rc\.1/u)
+test('accepts stable only from a successful rc.2 recovery receipt', () => {
+  const rc0 = {
+    ...PREVIOUS,
+    sha256: `sha256:${'3'.repeat(64)}`,
+    manifestSha256: `sha256:${'4'.repeat(64)}`,
+    sourceCommit: '5'.repeat(40),
+  }
+  const rc2 = { ...PREVIOUS, version: '0.1.0-rc.2' }
+  const stable = { ...CURRENT, version: '0.1.0' }
+  const input = evidence(rc2, stable)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc2)
+
+  const receipt = assertReleaseReady(input)
+  assert.equal(receipt.releaseStage, 'stable')
+  assert.equal(receipt.artifacts.previous.version, '0.1.0-rc.2')
+  assert.equal(receipt.artifacts.current.version, '0.1.0')
+  assert.equal(receipt.schemaVersion, 3)
+  assert.equal(receipt.evidence.publicationIncident, null)
+})
+
+test('stable rejects an rc.2 receipt that drops or drifts its transitive incident binding', () => {
+  const rc0 = {
+    ...PREVIOUS,
+    sourceCommit: RECOVERY_RC0_COMMIT,
+  }
+  const rc2 = { ...PREVIOUS, version: '0.1.0-rc.2' }
+  const stable = { ...CURRENT, version: '0.1.0' }
+  for (const mutate of [
+    receipt => {
+      receipt.schemaVersion = 2
+      delete receipt.evidence.publicationIncident
+    },
+    receipt => { receipt.evidence.publicationIncident = null },
+    receipt => { receipt.evidence.publicationIncident.targetCommit = '0'.repeat(40) },
+    receipt => { receipt.evidence.publicationIncident.verifierCommit = '0'.repeat(40) },
+    receipt => { receipt.evidence.publicationIncident.verifierGithubCiRunId += 1 },
+  ]) {
+    const input = evidence(rc2, stable)
+    input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc2)
+    mutate(input.previousReleaseReady)
+    const { receiptDigest: _oldDigest, ...body } = input.previousReleaseReady
+    input.previousReleaseReady.receiptDigest = canonicalSha256(body)
+    assert.throws(() => assertReleaseReady(input), /recovery rc\.2|publication incident|schema-2/u)
+  }
+})
+
+test('rejects stable directly from rc.1', () => {
+  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const stable = { ...CURRENT, version: '0.1.0' }
+  assert.throws(() => assertReleaseReady(evidence(rc1, stable)), /must update from 0\.1\.0-rc\.2/u)
 })
 
 test('rejects rc.1 to rc.2 even with an otherwise valid previous release-ready receipt', () => {
@@ -868,10 +1248,10 @@ test('rejects rc.1 to rc.2 even with an otherwise valid previous release-ready r
   const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
   const input = evidence(rc1, rc2)
   input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc1)
-  assert.throws(() => assertReleaseReady(input), /fixed rc\.0 to rc\.1 to stable sequence/u)
+  assert.throws(() => assertReleaseReady(input), /recovery rc\.2 must update from 0\.1\.0-rc\.0/u)
 })
 
-test('rejects stable when the previous release-ready receipt embeds an rc.9 to rc.1 transition', () => {
+test('rejects stable when the previous release-ready receipt embeds an rc.9 to rc.2 transition', () => {
   const rc9 = {
     ...PREVIOUS,
     version: '0.1.0-rc.9',
@@ -879,11 +1259,11 @@ test('rejects stable when the previous release-ready receipt embeds an rc.9 to r
     manifestSha256: `sha256:${'4'.repeat(64)}`,
     sourceCommit: '5'.repeat(40),
   }
-  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const rc2 = { ...PREVIOUS, version: '0.1.0-rc.2' }
   const stable = { ...CURRENT, version: '0.1.0' }
-  const input = evidence(rc1, stable)
-  input.previousReleaseReady = updateReleaseReadyReceipt(rc9, rc1)
-  assert.throws(() => assertReleaseReady(input), /previous release-ready.*fixed rc\.0 to rc\.1 to stable sequence/u)
+  const input = evidence(rc2, stable)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc9, rc2)
+  assert.throws(() => assertReleaseReady(input), /previous release-ready.*recovery rc\.2 must update from 0\.1\.0-rc\.0/u)
 })
 
 test('rejects a previous release-ready receipt whose release stage disagrees with its transition', () => {
@@ -893,11 +1273,11 @@ test('rejects a previous release-ready receipt whose release stage disagrees wit
     manifestSha256: `sha256:${'4'.repeat(64)}`,
     sourceCommit: '5'.repeat(40),
   }
-  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const rc2 = { ...PREVIOUS, version: '0.1.0-rc.2' }
   const stable = { ...CURRENT, version: '0.1.0' }
-  const input = evidence(rc1, stable)
-  input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc1)
-  input.previousReleaseReady.releaseStage = 'stable'
+  const input = evidence(rc2, stable)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc2)
+  input.previousReleaseReady.releaseStage = 'update-rc'
   const { receiptDigest: _oldDigest, ...body } = input.previousReleaseReady
   input.previousReleaseReady.receiptDigest = canonicalSha256(body)
   assert.throws(() => assertReleaseReady(input), /previous release-ready stage and artifact history disagree/u)
@@ -1029,6 +1409,22 @@ test('requires the previous release-ready path and canonical run id as one CLI p
     ]),
     /positive integer/u,
   )
+  assert.throws(
+    () => parseReleaseReadyArguments([
+      ...required,
+      '--publication-incident', 'incident.json',
+    ]),
+    /publication incident receipt, verifier CI, and run id must be supplied together/u,
+  )
+  assert.throws(
+    () => parseReleaseReadyArguments([
+      ...required,
+      '--publication-incident', 'incident.json',
+      '--publication-incident-verifier-github-ci', 'incident-ci.json',
+      '--publication-incident-run-id', '01',
+    ]),
+    /publication incident evidence run id must be a positive integer/u,
+  )
   const parsed = parseReleaseReadyArguments([
     ...required,
     '--previous-verifier-github-ci', 'previous-verifier-ci.json',
@@ -1042,6 +1438,16 @@ test('requires the previous release-ready path and canonical run id as one CLI p
   assert.match(parsed.verifierGithubCiPath, /verifier-ci\.json$/u)
   assert.match(parsed.previousVerifierGithubCiPath, /previous-verifier-ci\.json$/u)
   assert.match(parsed.previousReleaseReadyPath, /previous\.json$/u)
+
+  const withIncident = parseReleaseReadyArguments([
+    ...required,
+    '--publication-incident', 'incident.json',
+    '--publication-incident-verifier-github-ci', 'incident-ci.json',
+    '--publication-incident-run-id', String(RECOVERY_INCIDENT_RUN_ID),
+  ])
+  assert.equal(withIncident.publicationIncidentRunId, RECOVERY_INCIDENT_RUN_ID)
+  assert.match(withIncident.publicationIncidentPath, /incident\.json$/u)
+  assert.match(withIncident.publicationIncidentVerifierGithubCiPath, /incident-ci\.json$/u)
 })
 
 test('requires canonical verifier commit and run identity CLI inputs', () => {

@@ -201,6 +201,14 @@ function sameCoordinate(specification, observation) {
 
 function runtimeArtifact(specification, observationValue, label) {
   const observation = record(observationValue, `${label} observation`)
+  const admittedSource = ['bootstrap', 'remote', 'last-good'].includes(observation.catalogSource)
+  const admittedFreshness = ['bootstrap', 'fresh', 'cached'].includes(observation.catalogFreshness)
+  const admittedDegraded = typeof observation.catalogDegraded === 'boolean'
+    && (observation.catalogDegraded
+      ? typeof observation.catalogDegradedReason === 'string'
+        && observation.catalogDegradedReason.length > 0
+        && observation.catalogDegradedReason.length <= 160
+      : observation.catalogDegradedReason === null)
   if (!sameCoordinate(specification, observation)
     || observation.installedPnpmTreeSha256 !== specification.pnpmTreeSha256
     || observation.hostReady !== true
@@ -209,7 +217,8 @@ function runtimeArtifact(specification, observationValue, label) {
     || observation.rpcCatalogListRegistered !== true
     || !Number.isSafeInteger(observation.catalogRevision) || observation.catalogRevision < 1
     || typeof observation.catalogEntriesDigest !== 'string'
-    || !/^sha256:[0-9a-f]{64}$/u.test(observation.catalogEntriesDigest)) {
+    || !/^sha256:[0-9a-f]{64}$/u.test(observation.catalogEntriesDigest)
+    || !admittedSource || !admittedFreshness || !admittedDegraded) {
     fail('P0-RUNTIME-OBSERVATION', `${label} did not bind its exact artifact to Host, Client, and catalog/list observations`)
   }
   for (const field of ['browserExternalRequests', 'browserExternalWebSockets', 'browserConsoleFailures']) {
@@ -250,7 +259,8 @@ export function buildRuntimeAcceptanceReceipt(inputValue) {
   if (profile.profileId !== PROFILE_ID || profile.sameProfile !== true
     || profile.removalExactBaselineRestored !== true
     || (previous === null && profile.officialCliUpdate !== null)
-    || (previous !== null && profile.officialCliUpdate !== true)) {
+    || (previous === null && profile.centerRootRetained !== null)
+    || (previous !== null && (profile.officialCliUpdate !== true || profile.centerRootRetained !== true))) {
     fail('P0-RUNTIME-PROFILE', 'Profile lifecycle did not prove one exact official CLI install/update/remove path')
   }
   const previousArtifact = previous === null
@@ -394,6 +404,15 @@ async function profileIdentity(profileRoot) {
   return Object.freeze({ path, device: info.dev, inode: info.ino })
 }
 
+async function centerRootIdentity(centerRoot) {
+  const path = await realpath(centerRoot)
+  const info = await lstat(path)
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    fail('P0-RUNTIME-PROFILE', 'Center persistent root is not one real directory')
+  }
+  return Object.freeze({ path, device: info.dev, inode: info.ino })
+}
+
 function sameProfileIdentity(before, after) {
   return before.path === after.path && before.device === after.device && before.inode === after.inode
 }
@@ -495,6 +514,10 @@ async function observeCatalogList(origin, child, label) {
         rpcCatalogListRegistered: true,
         catalogRevision: parsed.catalog.revision,
         catalogEntriesDigest: parsed.catalog.entriesDigest,
+        catalogSource: parsed.catalog.source,
+        catalogFreshness: parsed.catalog.freshness,
+        catalogDegraded: parsed.catalog.degraded,
+        catalogDegradedReason: parsed.catalog.degradedReason,
       })
     } catch (error) {
       lastError = error
@@ -689,6 +712,7 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
 
     let previousObservation = null
     let previousInstallation = null
+    let previousCenterRootIdentity = null
     if (previous !== null) {
       previousInstallation = await addCenter(
         official.dshBin, profileRoot, previous, null, workspace, environment,
@@ -700,6 +724,7 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
         ...previousObservation,
         installedPnpmTreeSha256: previousInstallation.installedPnpmTreeSha256,
       })
+      previousCenterRootIdentity = await centerRootIdentity(join(dshHome, 'extension-center'))
     }
     const currentInstallation = await addCenter(
       official.dshBin, profileRoot, current, previous, workspace, environment,
@@ -720,6 +745,14 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
       ...currentBootObservation,
       installedPnpmTreeSha256: currentInstallation.installedPnpmTreeSha256,
     })
+    const centerRootRetained = previousCenterRootIdentity === null ? null
+      : sameProfileIdentity(
+          previousCenterRootIdentity,
+          await centerRootIdentity(join(dshHome, 'extension-center')),
+        )
+    if (previous !== null && centerRootRetained !== true) {
+      fail('P0-RUNTIME-PROFILE', 'Center persistent root was replaced during the same-Profile update')
+    }
     await runChecked(official.dshBin, [
       'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE,
     ], { cwd: workspace, env: environment, timeoutMs: 180_000 })
@@ -749,6 +782,7 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
         profileId: PROFILE_ID,
         sameProfile,
         officialCliUpdate,
+        centerRootRetained,
         removalExactBaselineRestored: true,
       },
     })

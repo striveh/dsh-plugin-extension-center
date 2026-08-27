@@ -28,7 +28,12 @@ const current = Object.freeze({
   pnpmTreeSha256: `sha256:${'b'.repeat(64)}`,
 })
 
-function observation(specification) {
+function observation(specification, admission = {
+  source: 'remote',
+  freshness: 'fresh',
+  degraded: false,
+  degradedReason: null,
+}) {
   return {
     version: specification.version,
     sha256: specification.sha256,
@@ -42,6 +47,10 @@ function observation(specification) {
     rpcCatalogListRegistered: true,
     catalogRevision: 9,
     catalogEntriesDigest: `sha256:${'5'.repeat(64)}`,
+    catalogSource: admission.source,
+    catalogFreshness: admission.freshness,
+    catalogDegraded: admission.degraded,
+    catalogDegradedReason: admission.degradedReason,
     browserExternalRequests: [],
     browserExternalWebSockets: [],
     browserConsoleFailures: [],
@@ -65,6 +74,7 @@ function receiptInput() {
       profileId: 'web',
       sameProfile: true,
       officialCliUpdate: true,
+      centerRootRetained: true,
       removalExactBaselineRestored: true,
     },
     ciAcceptance: {
@@ -161,6 +171,7 @@ test('emits the exact public-release runtime receipt schema', () => {
     officialDshPackageTreeUnchanged: true,
   })
   assert.equal(receipt.observations.profile.officialCliUpdate, true)
+  assert.equal(receipt.observations.profile.centerRootRetained, true)
   assert.equal(receipt.ciPackAttestation.artifact.sha256, current.sha256)
   assert.equal(receipt.artifacts.current.sizeBytes, current.sizeBytes)
   assert.deepEqual(receipt.observations.current.browserExternalRequests, [])
@@ -185,6 +196,14 @@ test('rejects forged artifact and browser observations', () => {
   forgedClient.currentObservation.clientEntryObserved = false
   assert.throws(
     () => buildRuntimeAcceptanceReceipt(forgedClient),
+    /did not bind its exact artifact/u,
+  )
+
+  const forgedAdmission = receiptInput()
+  forgedAdmission.currentObservation.catalogDegraded = false
+  forgedAdmission.currentObservation.catalogDegradedReason = 'hidden catalog failure'
+  assert.throws(
+    () => buildRuntimeAcceptanceReceipt(forgedAdmission),
     /did not bind its exact artifact/u,
   )
 
@@ -236,6 +255,7 @@ test('supports current-only boot while rejecting an injected previous observatio
   input.previous = null
   input.previousObservation = null
   input.profile.officialCliUpdate = null
+  input.profile.centerRootRetained = null
   const receipt = buildRuntimeAcceptanceReceipt(input)
   assert.equal(receipt.artifacts.previous, null)
   assert.doesNotThrow(() => validateRuntimeAcceptanceReceipt(receipt, null, current))

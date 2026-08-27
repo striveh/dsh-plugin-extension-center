@@ -17,6 +17,11 @@ on:
         required: false
         default: ''
         type: string
+      publication_incident_run_id:
+        description: Successful rc.1 incident evidence run; required only for the rc.0 to rc.2 recovery
+        required: false
+        default: ''
+        type: string
 
 permissions:
   actions: read
@@ -41,6 +46,7 @@ jobs:
           VERIFIER_COMMIT: ${{ github.sha }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+          PUBLICATION_INCIDENT_RUN_ID: ${{ inputs.publication_incident_run_id }}
         run: |
           case "$EXPECTED_COMMIT" in *[!0-9a-f]*|'') exit 1 ;; esac
           test "${#EXPECTED_COMMIT}" -eq 40
@@ -63,6 +69,11 @@ jobs:
             test "$PREVIOUS_EVIDENCE_RUN_ID" != "$GITHUB_RUN_ID"
           else
             test -z "$PREVIOUS_EVIDENCE_RUN_ID"
+          fi
+          if test -n "$PUBLICATION_INCIDENT_RUN_ID"; then
+            case "$PUBLICATION_INCIDENT_RUN_ID" in *[!0-9]*|''|0*) exit 1 ;; esac
+            test "$PUBLICATION_INCIDENT_RUN_ID" != "$GITHUB_RUN_ID"
+            test "$PUBLICATION_INCIDENT_RUN_ID" != "$PREVIOUS_EVIDENCE_RUN_ID"
           fi
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -113,6 +124,7 @@ jobs:
         env:
           EXPECTED_COMMIT: ${{ inputs.commit }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          PUBLICATION_INCIDENT_RUN_ID: ${{ inputs.publication_incident_run_id }}
         run: |
           current=.artifacts/acceptance/github-ci/current.json
           test "$(jq -er '.target.commit' "$current")" = "$EXPECTED_COMMIT"
@@ -136,14 +148,21 @@ jobs:
           if test -n "$PREVIOUS_COMMIT"; then
             previous=.artifacts/acceptance/github-ci/previous.json
             test "$(jq -er '.target.commit' "$previous")" = "$PREVIOUS_COMMIT"
+            previous_version=$(jq -er '.packAttestation.version' "$previous")
             {
-              echo "PREVIOUS_VERSION=$(jq -er '.packAttestation.version' "$previous")"
+              echo "PREVIOUS_VERSION=$previous_version"
               echo "PREVIOUS_FILENAME=$(jq -er '.packAttestation.filename' "$previous")"
               echo "PREVIOUS_SHA=$(jq -er '.packAttestation.sha256' "$previous")"
               echo "PREVIOUS_SIZE=$(jq -er '.packAttestation.sizeBytes' "$previous")"
               echo "PREVIOUS_MANIFEST_SHA=$(jq -er '.packAttestation.manifestSha256' "$previous")"
               echo "PREVIOUS_CI_RECEIPT_SHA=sha256:$(sha256sum "$previous" | cut -d ' ' -f 1)"
             } >> "$GITHUB_ENV"
+          fi
+          if test "$current_version" = '0.1.0-rc.2'; then
+            test "$previous_version" = '0.1.0-rc.0'
+            test -n "$PUBLICATION_INCIDENT_RUN_ID"
+          else
+            test -z "$PUBLICATION_INCIDENT_RUN_ID"
           fi
       - name: Download previous exact release-ready receipt
         if: inputs.previous_commit != ''
@@ -191,6 +210,37 @@ jobs:
           previous_target=$(realpath "${previous_target_receipts[0]}")
           previous_verifier_sha="sha256:$(sha256sum "$previous_verifier" | cut -d ' ' -f 1)"
           previous_target_sha="sha256:$(sha256sum "$previous_target" | cut -d ' ' -f 1)"
+          case "$PREVIOUS_VERSION" in
+            0.1.0-rc.0)
+              jq -e \
+                '.schemaVersion == 2
+                  and .releaseStage == "bootstrap-rc0"
+                  and (.evidence | has("publicationIncident") | not)' \
+                "$previous_ready" >/dev/null
+              ;;
+            0.1.0-rc.2)
+              jq -e \
+                --arg failed_commit '951c48cf7666991487eab9ef26d39f359b68cc20' \
+                --arg current_commit "$PREVIOUS_COMMIT" \
+                --argjson failed_run_id 33103882901 \
+                '.schemaVersion == 3
+                  and .releaseStage == "recovery-rc"
+                  and .evidence.publicationIncident.acceptanceId == "P0-EXTENSION-CENTER-PUBLICATION-INCIDENT"
+                  and .evidence.publicationIncident.targetCommit == $failed_commit
+                  and .evidence.publicationIncident.targetVersion == "0.1.0-rc.1"
+                  and .evidence.publicationIncident.failedRunId == $failed_run_id
+                  and .evidence.publicationIncident.failedRunAttempt == 1
+                  and .evidence.publicationIncident.runAttempt == 1
+                  and .evidence.publicationIncident.verifierCommit == $current_commit
+                  and .evidence.publicationIncident.runId != .verifier.runId
+                  and .evidence.publicationIncident.verifierGithubCiRunId == .evidence.verifierGithubCi.runId
+                  and .evidence.publicationIncident.verifierGithubCiRunAttempt == .evidence.verifierGithubCi.runAttempt
+                  and (.evidence.publicationIncident.sha256 | test("^sha256:[0-9a-f]{64}$"))
+                  and (.evidence.publicationIncident.receiptDigest | test("^sha256:[0-9a-f]{64}$"))' \
+                "$previous_ready" >/dev/null
+              ;;
+            *) exit 1 ;;
+          esac
           jq -e \
             --arg commit "$PREVIOUS_COMMIT" \
             --arg version "$PREVIOUS_VERSION" \
@@ -202,7 +252,7 @@ jobs:
             --arg target_sha "$previous_target_sha" \
             --argjson evidence_run_id "$PREVIOUS_EVIDENCE_RUN_ID" \
             --argjson evidence_run_attempt "$previous_attempt" \
-            '.schemaVersion == 2
+            '(.schemaVersion == 2 or .schemaVersion == 3)
               and .acceptanceId == "P0-EXTENSION-CENTER-RELEASE-READY"
               and .status == "passed"
               and .target.sourceCommit == $commit
@@ -265,6 +315,118 @@ jobs:
           echo "PREVIOUS_CI_RECEIPT_SHA=$previous_target_sha" >> "$GITHUB_ENV"
           echo "PREVIOUS_RELEASE_READY=$previous_ready" >> "$GITHUB_ENV"
           echo "PREVIOUS_VERIFIER_GITHUB_CI=$previous_verifier" >> "$GITHUB_ENV"
+      - name: Download exact rc.1 publication incident receipt
+        if: inputs.publication_incident_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ inputs.commit }}
+          PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+          PUBLICATION_INCIDENT_RUN_ID: ${{ inputs.publication_incident_run_id }}
+        run: |
+          incident_run=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PUBLICATION_INCIDENT_RUN_ID}")
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow '.github/workflows/publication-incident-evidence.yml' \
+            --arg commit "$EXPECTED_COMMIT" \
+            '.repository.full_name == $repository
+              and .head_repository.full_name == $repository
+              and .path == $workflow
+              and .event == "workflow_dispatch"
+              and .head_branch == "main"
+              and .head_sha == $commit
+              and .status == "completed"
+              and .conclusion == "success"' \
+            <<<"$incident_run" >/dev/null
+          incident_attempt=$(jq -er '.run_attempt' <<<"$incident_run")
+          test "$incident_attempt" = 1
+          artifact_name="publication-incident-951c48cf7666991487eab9ef26d39f359b68cc20-failed-run-33103882901-attempt-${incident_attempt}"
+          artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PUBLICATION_INCIDENT_RUN_ID}/artifacts")
+          jq -e \
+            --arg name "$artifact_name" \
+            --argjson run_id "$PUBLICATION_INCIDENT_RUN_ID" \
+            --arg commit "$EXPECTED_COMMIT" \
+            '.total_count == 1
+              and (.artifacts | length) == 1
+              and .artifacts[0].name == $name
+              and .artifacts[0].expired == false
+              and .artifacts[0].workflow_run.id == $run_id
+              and .artifacts[0].workflow_run.head_branch == "main"
+              and .artifacts[0].workflow_run.head_sha == $commit' \
+            <<<"$artifacts" >/dev/null
+          gh run download "$PUBLICATION_INCIDENT_RUN_ID" \
+            --name "$artifact_name" \
+            --dir .artifacts/publication-incident-input
+          mapfile -t incident_entries < <(
+            find .artifacts/publication-incident-input -mindepth 1 ! -type d | sort
+          )
+          mapfile -t incident_receipts < <(
+            find .artifacts/publication-incident-input -type f -path '*/publication-incident/receipt.json'
+          )
+          mapfile -t incident_verifier_receipts < <(
+            find .artifacts/publication-incident-input -type f -path '*/github-ci/incident-verifier.json'
+          )
+          test "${#incident_entries[@]}" -eq 2
+          test "${#incident_receipts[@]}" -eq 1
+          test "${#incident_verifier_receipts[@]}" -eq 1
+          incident_receipt=$(realpath "${incident_receipts[0]}")
+          incident_verifier=$(realpath "${incident_verifier_receipts[0]}")
+          incident_verifier_sha="sha256:$(sha256sum "$incident_verifier" | cut -d ' ' -f 1)"
+          previous_ready_sha="sha256:$(sha256sum "$PREVIOUS_RELEASE_READY" | cut -d ' ' -f 1)"
+          previous_ready_digest=$(jq -er '.receiptDigest' "$PREVIOUS_RELEASE_READY")
+          previous_ci_digest=$(jq -er '.receiptDigest' .artifacts/acceptance/github-ci/previous.json)
+          jq -e \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg target_commit '951c48cf7666991487eab9ef26d39f359b68cc20' \
+            --arg previous_commit "$PREVIOUS_COMMIT" \
+            --arg verifier_commit "$EXPECTED_COMMIT" \
+            --arg verifier_sha "$incident_verifier_sha" \
+            --arg previous_ci_sha "$PREVIOUS_CI_RECEIPT_SHA" \
+            --arg previous_ci_digest "$previous_ci_digest" \
+            --arg previous_ready_sha "$previous_ready_sha" \
+            --arg previous_ready_digest "$previous_ready_digest" \
+            --argjson incident_run_id "$PUBLICATION_INCIDENT_RUN_ID" \
+            --argjson failed_run_id 33103882901 \
+            --argjson previous_run_id "$PREVIOUS_EVIDENCE_RUN_ID" \
+            '.schemaVersion == 1
+              and .acceptanceId == "P0-EXTENSION-CENTER-PUBLICATION-INCIDENT"
+              and .status == "failed"
+              and .p0Status == "not-release-ready"
+              and .releaseReadyAcceptanceId == null
+              and .target.repository == $repository
+              and .target.sourceCommit == $target_commit
+              and .target.version == "0.1.0-rc.1"
+              and .verifier.commit == $verifier_commit
+              and .verifier.runId == $incident_run_id
+              and .verifier.runAttempt == 1
+              and .verifier.githubCi.fileSha256 == $verifier_sha
+              and .failure.run.id == $failed_run_id
+              and .failure.run.attempt == 1
+              and .failure.artifact.receipts.previous.commit == $previous_commit
+              and .failure.artifact.receipts.previous.version == "0.1.0-rc.0"
+              and .failure.artifact.receipts.previous.fileSha256 == $previous_ci_sha
+              and .failure.artifact.receipts.previous.receiptDigest == $previous_ci_digest
+              and .previousSuccessfulPublication.targetCommit == $previous_commit
+              and .previousSuccessfulPublication.run.id == $previous_run_id
+              and .previousSuccessfulPublication.run.attempt == 1
+              and .previousSuccessfulPublication.releaseReadyReceipt.fileSha256 == $previous_ready_sha
+              and .previousSuccessfulPublication.releaseReadyReceipt.receiptDigest == $previous_ready_digest' \
+            "$incident_receipt" >/dev/null
+          jq -e \
+            --arg commit "$EXPECTED_COMMIT" \
+            --arg receipt_digest "$(jq -er '.verifier.githubCi.receiptDigest' "$incident_receipt")" \
+            --argjson run_id "$(jq -er '.verifier.githubCi.runId' "$incident_receipt")" \
+            --argjson run_attempt "$(jq -er '.verifier.githubCi.runAttempt' "$incident_receipt")" \
+            '.schemaVersion == 1
+              and .acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
+              and .status == "passed"
+              and .target.commit == $commit
+              and .run.id == $run_id
+              and .run.attempt == $run_attempt
+              and .receiptDigest == $receipt_digest' \
+            "$incident_verifier" >/dev/null
+          echo "PUBLICATION_INCIDENT_RECEIPT=$incident_receipt" >> "$GITHUB_ENV"
+          echo "PUBLICATION_INCIDENT_VERIFIER_GITHUB_CI=$incident_verifier" >> "$GITHUB_ENV"
       - name: Download exact public Release assets
         env:
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
@@ -388,6 +550,7 @@ jobs:
           VERIFIER_RUN_ATTEMPT: ${{ github.run_attempt }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
+          PUBLICATION_INCIDENT_RUN_ID: ${{ inputs.publication_incident_run_id }}
         run: |
           args=(
             --full-p0 "$FULL_P0_RECEIPT"
@@ -410,6 +573,13 @@ jobs:
               --previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"
             )
           fi
+          if test -n "$PUBLICATION_INCIDENT_RUN_ID"; then
+            args+=(
+              --publication-incident "$PUBLICATION_INCIDENT_RECEIPT"
+              --publication-incident-verifier-github-ci "$PUBLICATION_INCIDENT_VERIFIER_GITHUB_CI"
+              --publication-incident-run-id "$PUBLICATION_INCIDENT_RUN_ID"
+            )
+          fi
           pnpm run test:release-ready "${args[@]}"
       - name: Upload bounded post-publication receipts
         if: always()
@@ -424,6 +594,7 @@ jobs:
             .artifacts/acceptance/catalog-sources/receipt.json
             .artifacts/acceptance/release-ready/receipt.json
             .artifacts/pnpm-binding.json
+            .artifacts/publication-incident-input/**/*.json
           if-no-files-found: warn
           include-hidden-files: true
           compression-level: 0

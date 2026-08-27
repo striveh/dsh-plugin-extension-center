@@ -11,7 +11,7 @@
 
 状态（2026-08-28）：源码实现了签名商店、带未过期 last-good 缓存的签名目录刷新、只产生线索的发现与 threshold signing、归一化 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与 receipt、Plugin/MCP/Skill 类型化操作、任务优先的本地 Capability RAG、恢复编排以及持久化续行 claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，扩展中心都会暂存并锁定准确 archive，并把 package membership 变更委托给官方 `dsh plugin --profile` CLI；只有官方 Profile package manager 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row。纯配置通过官方 Loader 在同一个 Host 进程替换并验证准确受管 row。MCP stdio connection 挂载官方 MCP Client，Skill 通过官方 registry 投影，续行使用官方 Agent 与 Session 服务。设计中不存在 fork 专用 package 或 DSH Host PR。准确边界见[纯插件架构](docs/plugin-only-architecture.zh.md)。
 
-证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。`0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`，不声明从更早 Center Release 更新。后续候选必须证明不同前一版本到当前版本的真实 artifact 更新，把前一次已部署签名目录提升为当前 package bootstrap，并部署其准确相邻签名后继。公开 Release 安装、Pages 刷新与跨边界完成状态只由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
+证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。成功的 `0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`。不可变 rc.1 候选没有成功 composite receipt：它唯一一次 post-publication 尝试在真实同 Profile 更新中暴露了持久目录缓存换锚缺陷，因此保持为 `not-release-ready` 事故。恢复候选 rc.2 必须直接从 rc.0 的最后一个成功 receipt 更新，保留并迁移同一个 Center root，继续使用 package 内置 `r9` 与已部署 `r10`，并绑定该 rc.1 事故；stable 只能从成功 rc.2 晋级。公开 Release 安装、Pages 刷新与跨边界完成状态只由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
 
 公开的 `main` 分支是开发源码预览，不是稳定 Release 或 npm 发布。Manifest 有意保留 `private: true` 以阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码或经过审查的 GitHub Release asset。GitHub Release、公开 Pages 目录或已完成 CI lane 的状态只由对应准确版本的 receipt 记录，绝不能从源码文件、workflow、repository setting 或本地测试中推断。
 
@@ -35,10 +35,10 @@ Release provenance 以 byte 为准。只有准确 `main` push 的 Node 22 CI job
 只有匹配的 GitHub Release 已存在且公开 Release receipt 通过后，下列坐标才有效；否则 Release 安装主张不可用，开发版本 checkout 不能替代它。对于已发布候选，应从不可变 GitHub Release asset 安装扩展中心，不能依赖移动分支。官方 DSH Plugin CLI 会把 Profile package management 委托给 pnpm，因此 `PATH` 中必须存在 `pnpm`：
 
 ```sh
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.1/dsh-plugin-extension-center-0.1.0-rc.1.tgz
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.1/SHA256SUMS
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.2/dsh-plugin-extension-center-0.1.0-rc.2.tgz
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.2/SHA256SUMS
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.1.tgz --ignore-scripts --save-exact
+dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.2.tgz --ignore-scripts --save-exact
 dsh plugin --profile web list --depth 0
 dsh --profile web --dump-config
 dsh web
@@ -62,7 +62,7 @@ dsh --profile web --dump-config
 dsh web
 ```
 
-仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。扩展中心自身必须只通过这个官方 CLI 从外部安装、更新、降级或卸载；运行中的扩展中心不会自我修改。`0.1.0-rc.0` bootstrap 有意不携带前一 Center artifact 或 release-ready receipt，并证明目录 `r8→r9`。从 `0.1.0-rc.1` 开始，每个 Release receipt 必须绑定并运行不同的前一与当前 artifact 以及准确成功的前一 post-publication receipt；rc.1 提升 `r9` 并部署 `r10`，stable 必须直接从 rc.1 晋级、提升 `r10` 并部署 `r11`。
+仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。扩展中心自身必须只通过这个官方 CLI 从外部安装、更新、降级或卸载；运行中的扩展中心不会自我修改。成功的 `0.1.0-rc.0` bootstrap 证明目录 `r8→r9`。不可变 rc.1 候选虽已部署 `r10`，但真实 rc.0 到 rc.1 的同 Profile 更新失败，未生成 composite receipt。恢复候选 rc.2 因此把 rc.0 作为最后一个成功前序，证明保留的 r8 cache 可以经 package 内置 r9 迁移到公开 r10，并把 rc.1 记录为失败候选。Stable 必须直接从成功 rc.2 晋级、提升 `r10` 并部署 `r11`。
 
 开发与验证命令：
 
@@ -79,7 +79,7 @@ pnpm run test:acceptance:official-rc2
 
 ## 在线目录刷新
 
-`catalogTrustedUrl` 只接受一个准确的 canonical HTTPS URL；Host 只接纳通过 package 固定签名根验证的完整 envelope。`catalogFetchTimeoutMs` 限制每次请求，`catalogRefreshIntervalMs` 控制可选后台刷新。启动、loopback `catalog/refresh` 动作、商店与任务 Capability RAG 共用同一份 admitted snapshot。商店检索文本与任务内容绝不会进入请求。刷新失败时只能继续使用未过期且已验证的 bootstrap 或 last-good snapshot，并报告 `source`、`freshness`、`degradedReason` 与 `lastRefreshAtMs`；snapshot 过期后 fail closed。
+`catalogTrustedUrl` 只接受一个准确的 canonical HTTPS URL；Host 只接纳通过 package 固定签名根验证的完整 envelope。`catalogFetchTimeoutMs` 限制每次请求，`catalogRefreshIntervalMs` 控制可选后台刷新。启动、loopback `catalog/refresh` 动作、商店与任务 Capability RAG 共用同一份 admitted snapshot。商店检索文本与任务内容绝不会进入请求。Package 更新时，扩展中心先验证完整历史签名 cache，再原子提升到 package 内置 bootstrap；同 revision 或更高 revision 冲突、断链、签名漂移、文件畸形或持久化替换失败都会中止启动，历史前缀不会暴露给 Store 或 Agent。所有持久 cache 读取、比较与替换都通过扩展中心自有 writer reservation 在多个 DSH 进程间串行化；网络请求位于 reservation 外，writer 会重新读取权威 chain，较晚完成的旧刷新不能覆盖更高的已验证 tip。进程退出后 SQLite 自动释放 reservation，下一 writer 无需删除用户状态即可正常恢复。网络刷新失败或落后时只能继续使用未过期且已验证的 bootstrap 或 last-good snapshot，并报告 `source`、`freshness`、`degradedReason` 与 `lastRefreshAtMs`；snapshot 过期后 fail closed。
 
 ## Break-glass 扩展中心恢复
 
