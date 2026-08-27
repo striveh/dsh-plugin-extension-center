@@ -8,15 +8,13 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
-  readlink,
   realpath,
   rm,
   unlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import {
@@ -34,6 +32,7 @@ import {
   AcceptanceFailure,
   TARGET_DSH_COMMIT,
   TARGET_DSH_VERSION,
+  assertNoManagedResolutionLinks,
   delay,
   hasBlockedCredentialEnvironment,
   hasProviderEndpointOverride,
@@ -41,6 +40,7 @@ import {
   installOfficialDshHost,
   keylessEnvironment,
   parseCatalogListEnvelope,
+  profileRemovalSurfaceDigest,
   runChecked,
   sanitizeDiagnostic,
   sha256,
@@ -362,30 +362,6 @@ function normalizedProfileManifest(manifest) {
   return { ...value, dependencies: value.dependencies ?? {} }
 }
 
-async function treeDigest(root, excluded) {
-  const canonicalRoot = await realpath(root)
-  const hash = createHash('sha256')
-  const visit = async path => {
-    const name = relative(canonicalRoot, path).split(sep).join('/') || '.'
-    if (excluded(name)) return
-    const info = await lstat(path)
-    if (info.isSymbolicLink()) {
-      hash.update(`link:${name}:${await readlink(path)}\0`)
-      return
-    }
-    if (info.isFile()) {
-      hash.update(`file:${name}:${String(info.size)}\0`)
-      hash.update(await readFile(path))
-      return
-    }
-    if (!info.isDirectory()) fail('P0-RUNTIME-PROFILE', `Profile contains unsupported entry ${name}`)
-    hash.update(`directory:${name}\0`)
-    for (const entry of (await readdir(path)).sort()) await visit(join(path, entry))
-  }
-  await visit(canonicalRoot)
-  return `sha256:${hash.digest('hex')}`
-}
-
 async function profileBaseline(dshBin, profileRoot, cwd, environment) {
   const [manifestText, lockfile, dump] = await Promise.all([
     readFile(join(profileRoot, 'package.json'), 'utf8'),
@@ -397,13 +373,14 @@ async function profileBaseline(dshBin, profileRoot, cwd, environment) {
   return Object.freeze({
     manifest: canonicalJson(manifest),
     lockSha256: `sha256:${sha256(Buffer.from(lockfile))}`,
-    treeWithoutManifestSha256: await treeDigest(profileRoot, name => name === 'package.json'),
+    profileRemovalSurfaceSha256: await profileRemovalSurfaceDigest(profileRoot),
     dumpSha256: `sha256:${sha256(Buffer.from(dump.stdout))}`,
   })
 }
 
-async function assertRemoved(dshBin, profileRoot, baseline, cwd, environment) {
+async function assertRemoved(dshBin, profileRoot, centerRoot, baseline, cwd, environment) {
   const observed = await profileBaseline(dshBin, profileRoot, cwd, environment)
+  await assertNoManagedResolutionLinks(profileRoot, centerRoot, [CENTER_PACKAGE])
   assertProfileBaselineRestored(baseline, observed)
   return true
 }
@@ -744,9 +721,16 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
       installedPnpmTreeSha256: currentInstallation.installedPnpmTreeSha256,
     })
     await runChecked(official.dshBin, [
-      'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE, '--ignore-scripts',
+      'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE,
     ], { cwd: workspace, env: environment, timeoutMs: 180_000 })
-    await assertRemoved(official.dshBin, profileRoot, baseline, workspace, environment)
+    await assertRemoved(
+      official.dshBin,
+      profileRoot,
+      join(dshHome, 'extension-center'),
+      baseline,
+      workspace,
+      environment,
+    )
     const packageTreeDigestAfter = await immutablePackageTreeDigest(official.packageRoot)
     receipt = buildRuntimeAcceptanceReceipt({
       previous,

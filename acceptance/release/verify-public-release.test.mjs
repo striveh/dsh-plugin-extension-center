@@ -700,7 +700,7 @@ test('requires exact semantic Profile baseline restoration', () => {
   const baseline = {
     manifest: '{"dependencies":{}}',
     lockSha256: 'sha256:' + '1'.repeat(64),
-    treeWithoutManifestSha256: 'sha256:' + '2'.repeat(64),
+    profileRemovalSurfaceSha256: 'sha256:' + '2'.repeat(64),
     dumpSha256: 'sha256:' + '3'.repeat(64),
   }
   assert.equal(assertProfileBaselineRestored(baseline, { ...baseline }), true)
@@ -708,6 +708,13 @@ test('requires exact semantic Profile baseline restoration', () => {
     () => assertProfileBaselineRestored(baseline, {
       ...baseline,
       lockSha256: 'sha256:' + '4'.repeat(64),
+    }),
+    acceptanceCode('P0-RELEASE-REMOVE-BASELINE'),
+  )
+  assert.throws(
+    () => assertProfileBaselineRestored(baseline, {
+      ...baseline,
+      profileRemovalSurfaceSha256: 'sha256:' + '5'.repeat(64),
     }),
     acceptanceCode('P0-RELEASE-REMOVE-BASELINE'),
   )
@@ -802,7 +809,13 @@ test('uses only official Plugin CLI mutations and keeps direct runtime proof exp
     'utf8',
   )
   assert.match(source, /'plugin', '--profile', 'web', 'add', artifact\.path,/u)
-  assert.match(source, /'plugin', '--profile', 'web', 'remove', CENTER_PACKAGE,/u)
+  assert.match(source, /'plugin', '--profile', 'web', 'remove', CENTER_PACKAGE,\n\s*\]/u)
+  assert.doesNotMatch(source, /'remove', CENTER_PACKAGE, '--ignore-scripts'/u)
+  assert.match(source, /profileRemovalSurfaceSha256: await profileRemovalSurfaceDigest\(profileRoot\)/u)
+  assert.match(source, /await assertNoManagedResolutionLinks\(profileRoot, centerRoot, \[CENTER_PACKAGE\]\)/u)
+  assert.match(source, /runChecked\('git', \['show', `\$\{spec\.commit\}:package\.json`\]/u)
+  assert.match(source, /await acquire\(previous, 'previous', previousCiAcceptance, previousAuthority\)/u)
+  assert.match(source, /await acquire\(current, 'current', ciAcceptance, currentAuthority\)/u)
   assert.match(source, /'--offline', '--ignore-scripts', '--save-exact'/u)
   assert.match(source, /host-client-runtime-directly-observed-by-this-release-runner/u)
   assert.match(source, /PATH: \[pnpm\.shimRoot/u)
