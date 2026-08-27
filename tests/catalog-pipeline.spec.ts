@@ -17,7 +17,7 @@ function digest(value: string): `sha256:${string}` {
 }
 
 function admissionFixture() {
-  const entry = structuredClone(BOOTSTRAP_CATALOG_ENTRIES[0]!)
+  const entry = structuredClone(BOOTSTRAP_CATALOG_ENTRIES.find(candidate => candidate.kind === 'plugin')!)
   entry.artifact.acquisitionUrl = 'https://artifacts.example.test/extension-1.0.0.tgz'
   entry.source.url = 'https://github.com/example/extension/releases/tag/v1.0.0'
   entry.source.upstreamUrl = 'https://github.com/example/extension'

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-extension-center",
-  "version": "0.1.0-rc.0",
+  "version": "0.1.0-rc.1",
   "description": "Independent DeepSeek Harness Extension Center for Plugin, MCP connection, and Skill lifecycles",
   "private": true,
   "license": "MIT",

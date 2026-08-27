@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
+import { BOOTSTRAP_CATALOG_ENVELOPE } from '../../lib/catalog-data.js'
 import {
   AcceptanceFailure,
   STORE_UI_EXTERNAL_NETWORK_OBSERVED,
@@ -766,7 +767,10 @@ async function assertStoreDefaultShell(activePage, observations) {
   const catalogStatus = storePanel.locator('[data-catalog-signature="verified"]')
   const revision = await catalogStatus.getAttribute('data-catalog-revision')
   const digest = await catalogStatus.locator('[data-catalog-digest]').getAttribute('data-catalog-digest')
-  if (revision !== '8' || digest === null || !/^sha256:[a-f0-9]{64}$/u.test(digest)) {
+  if (
+    revision !== String(BOOTSTRAP_CATALOG_ENVELOPE.revision)
+    || digest !== BOOTSTRAP_CATALOG_ENVELOPE.entriesDigest
+  ) {
     throw new AcceptanceFailure(STORE_UI_SHELL_MISSING, 'signed catalog did not expose its exact revision and entries digest')
   }
   observations.catalogSignatureObserved = true

@@ -1,5 +1,5 @@
 import type { CatalogEntry, CatalogEnvelope, CatalogRoot, CatalogSignature } from './catalog-contract.ts';
-/** Curated entries in bootstrap revision 8. Free-form upstream text is not included. */
+/** Curated entries in bootstrap revision 9. Free-form upstream text is not included. */
 export declare const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[];
 /** Packaged trust root. The private signing key is not part of this repository. */
 export declare const BOOTSTRAP_CATALOG_ROOT: CatalogRoot;
