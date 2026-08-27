@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/promises'
 import { join, posix, relative, resolve, sep } from 'node:path'
 import { parseDocument } from 'yaml'
-import { canonicalSha256, immutableJsonClone } from '../../domain/index.ts'
+import { canonicalJson, canonicalSha256, immutableJsonClone } from '../../domain/index.ts'
 import {
   CenterStateStore,
   captureCurrentProcessIdentity,
@@ -24,7 +24,8 @@ import { decodeManagedTarget } from '../../host/state-codec.ts'
 import { durableUnlink } from '../../host/durable-unlink.ts'
 import { inspectNpmArchive, materializeNpmArchive, type NpmPackageInspection } from '../../providers/npm-archive.ts'
 import {
-  profileMetadataCacheFromRecoveryPoint,
+  isCurrentProfileMetadataCacheBinding,
+  storedProfileMetadataCacheFromRecoveryPoint,
   type ProfileMetadataCacheBinding,
 } from '../../recovery/profile-metadata-cache.ts'
 import type { RpcJson } from '../../service/rpc-contract.ts'
@@ -86,6 +87,16 @@ interface ProfileExecutionRecord {
   readonly processGroupPid: number
   readonly supervisorSha256: `sha256:${string}`
   readonly startedAtMs: number
+}
+
+interface ProfileExecutionDispatchRecord {
+  readonly schemaVersion: 1
+  readonly profileId: string
+  readonly ownerId: string
+  readonly leaseId: string
+  readonly processGroupPid: number
+  readonly executionDigest: `sha256:${string}`
+  readonly dispatchedAtMs: number
 }
 
 interface ProfileQuarantineRecord {
@@ -198,6 +209,65 @@ function decodeProfileExecution(
     throw new Error('managed Plugin Profile execution lease is corrupt')
   }
   return value as unknown as ProfileExecutionRecord
+}
+
+function decodeProfileExecutionDispatch(
+  value: unknown,
+  owner: ProfileLockRecord,
+  execution: ProfileExecutionRecord,
+): ProfileExecutionDispatchRecord {
+  if (!plain(value) || Object.keys(value).sort().join(',')
+    !== 'dispatchedAtMs,executionDigest,leaseId,ownerId,processGroupPid,profileId,schemaVersion'
+    || value.schemaVersion !== 1 || value.profileId !== owner.profileId || value.ownerId !== owner.ownerId
+    || value.leaseId !== owner.leaseId || value.processGroupPid !== execution.processGroupPid
+    || value.executionDigest !== canonicalSha256(execution) || !Number.isSafeInteger(value.dispatchedAtMs)) {
+    throw new Error('managed Plugin Profile execution dispatch is corrupt')
+  }
+  return value as unknown as ProfileExecutionDispatchRecord
+}
+
+async function readProfileExecutionRecord(path: string, label: string): Promise<unknown | undefined> {
+  let handle: Awaited<ReturnType<typeof openRegularNoFollow>>
+  try {
+    handle = await openRegularNoFollow(path)
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  try {
+    const opened = await handle.stat()
+    if (opened.size <= 0 || opened.size > 64 * 1024) throw new Error(`${label} is not bounded`)
+    const bytes = await handle.readFile()
+    const current = await lstat(path)
+    if (bytes.length !== opened.size || !current.isFile() || current.isSymbolicLink()
+      || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error(`${label} changed while it was read`)
+    }
+    const text = bytes.toString('utf8')
+    if (!Buffer.from(text, 'utf8').equals(bytes) || !text.endsWith('\n')
+      || text.slice(0, -1).includes('\n') || text.includes('\r')) {
+      throw new Error(`${label} is not one canonical JSON record`)
+    }
+    let value: unknown
+    try {
+      value = JSON.parse(text.slice(0, -1)) as unknown
+    } catch (cause) {
+      throw new Error(`${label} is not valid JSON`, { cause })
+    }
+    if (`${canonicalJson(value)}\n` !== text) throw new Error(`${label} is not canonical JSON`)
+    return value
+  } finally {
+    await handle.close()
+  }
+}
+
+async function assertProfileLeaseEntries(path: string): Promise<void> {
+  const allowed = new Set(['owner.json', 'execution.json', 'execution-dispatch.json'])
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    if (!allowed.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      throw new Error('managed Plugin profile lock contains foreign state')
+    }
+  }
 }
 
 function processGroupStatus(processGroupPid: number): 'alive' | 'dead' | 'unknown' {
@@ -504,6 +574,8 @@ export class ManagedPluginOwner {
   private readonly hostHome: string
   private readonly centerPackageName: string
   private readonly cli: ManagedPluginCli
+  private readonly isOperationQuarantined: (operationId: string, targetKey: string, profileId: string) => boolean
+  private readonly isTargetQuarantined: (targetKey: string, profileId: string) => boolean
   private readonly ownerId = randomUUID()
   private processIdentity: Promise<ProcessIdentity> | null = null
   private initialized: Promise<void> | null = null
@@ -516,6 +588,8 @@ export class ManagedPluginOwner {
     this.root = resolve(store.root)
     this.hostHome = resolve(options.hostHome)
     this.centerPackageName = options.centerPackageName ?? 'dsh-plugin-extension-center'
+    this.isOperationQuarantined = options.isOperationQuarantined ?? (() => false)
+    this.isTargetQuarantined = options.isTargetQuarantined ?? (() => false)
     if (options.pluginCli === undefined && options.officialDsh === undefined) {
       throw new Error('managed Plugin owner requires a trusted official DSH execution binding')
     }
@@ -720,9 +794,8 @@ export class ManagedPluginOwner {
     return Object.freeze({ entryId: row.id, moduleName: row.options.name, fiberPhase: 'active' })
   }
 
-  /** Read the durable owner projection, including a sidecar ahead of Center state after a crash. */
+  /** Read the durable owner projection without reconciling Loader or Profile state. */
   async sidecar(profileId: string, targetKey: string): Promise<ManagedPluginSidecar | null> {
-    await this.initialize()
     return await this.readSidecar(profileSegment(profileId), targetKey)
   }
 
@@ -873,6 +946,15 @@ export class ManagedPluginOwner {
     await this.recoverAbsentRollbacks()
     const records = (await this.store.listManaged()).filter(record => record.kind === 'plugin')
     for (const record of records.sort((left, right) => left.targetKey.localeCompare(right.targetKey))) {
+      if (this.isTargetQuarantined(record.targetKey, record.profileId)) continue
+      const recovery = this.recoveryMutation(record)
+      if (recovery !== null && (this.isOperationQuarantined(
+        recovery.operationId,
+        recovery.targetKey,
+        record.profileId,
+      ) || await this.operationUsesRetiredMetadataCache(recovery.operationId, record.profileId))) {
+        continue
+      }
       await this.withProfileLock(record.profileId, async () => {
         let sidecar = await this.readSidecar(record.profileId, record.targetKey)
         let effective = record
@@ -958,6 +1040,9 @@ export class ManagedPluginOwner {
         throw new Error('managed Plugin absent rollback filename does not bind its operation')
       }
       if (receipt.status === 'pending') {
+        if (this.isTargetQuarantined(receipt.targetKey, receipt.profileId)
+          || this.isOperationQuarantined(receipt.operationId, receipt.targetKey, receipt.profileId)
+          || await this.operationUsesRetiredMetadataCache(receipt.operationId, receipt.profileId)) continue
         await this.withProfileLock(receipt.profileId, async () => {
           await this.completeAbsentRollback(receipt, await this.readSidecar(receipt.profileId, receipt.targetKey))
         })
@@ -1110,12 +1195,19 @@ export class ManagedPluginOwner {
       requireCurrentProfile: boolean
     }> | null = null,
   ): Promise<void> {
-    await this.assertProfileNoAmbiguity(profileId)
-    const before = await this.stableOfficialObservation(profileId, packageName, 'before', mutation)
-    if (this.observationHolds(before, packageName, activation)) return
+    if (mutation !== null && (this.isTargetQuarantined(mutation.targetKey, profileId)
+      || this.isOperationQuarantined(mutation.operationId, mutation.targetKey, profileId))) {
+      throw new Error('retired Plugin operation is quarantined from owner reconciliation')
+    }
     const metadataCache = mutation === null
       ? null
       : mutation.metadataCache ?? await this.operationMetadataCache(mutation.operationId, profileId)
+    if (metadataCache !== null && !isCurrentProfileMetadataCacheBinding(metadataCache)) {
+      throw new Error('retired Plugin metadata cache is read-only history')
+    }
+    await this.assertProfileNoAmbiguity(profileId)
+    const before = await this.stableOfficialObservation(profileId, packageName, 'before', mutation)
+    if (this.observationHolds(before, packageName, activation)) return
     await this.cli.audit(profileId, metadataCache, mutation?.requireCurrentProfile ?? false)
     let commandFailure: Readonly<{ error: unknown }> | null = null
     try {
@@ -1215,11 +1307,16 @@ export class ManagedPluginOwner {
   ): Promise<ProfileMetadataCacheBinding | null> {
     const snapshot = await this.store.getProviderSnapshot(operationId)
     if (snapshot === undefined) return null
-    const metadataCache = profileMetadataCacheFromRecoveryPoint(snapshot.recoveryPoint)
+    const metadataCache = storedProfileMetadataCacheFromRecoveryPoint(snapshot.recoveryPoint)
     if (metadataCache !== null && metadataCache.profileId !== profileId) {
       throw new Error('Plugin recovery metadata cache does not bind the Profile')
     }
     return metadataCache
+  }
+
+  private async operationUsesRetiredMetadataCache(operationId: string, profileId: string): Promise<boolean> {
+    const metadataCache = await this.operationMetadataCache(operationId, profileId)
+    return metadataCache !== null && !isCurrentProfileMetadataCacheBinding(metadataCache)
   }
 
   private async applyCanonicalLoader(
@@ -1698,9 +1795,17 @@ export class ManagedPluginOwner {
       await this.assertProfileNoAmbiguity(safeProfile)
       return await action()
     } finally {
+      await assertProfileLeaseEntries(destination)
       const owner = decodeProfileLock(await readCanonicalOptional(join(destination, 'owner.json')))
       if (!sameProfileLock(owner, record)) throw new Error('managed Plugin profile lock ownership changed')
-      if (await readCanonicalOptional(join(destination, 'execution.json')) !== undefined) {
+      const [execution, dispatch] = await Promise.all([
+        readProfileExecutionRecord(join(destination, 'execution.json'), 'managed Plugin Profile execution lease'),
+        readProfileExecutionRecord(
+          join(destination, 'execution-dispatch.json'),
+          'managed Plugin Profile execution dispatch',
+        ),
+      ])
+      if (execution !== undefined || dispatch !== undefined) {
         throw new Error('managed Plugin profile execution subtree has not reached quiescence')
       }
       await this.assertNoProfileTakeover(safeProfile)
@@ -1744,16 +1849,27 @@ export class ManagedPluginOwner {
   }
 
   private async assertProfileOwnerDead(path: string, owner: ProfileLockRecord): Promise<void> {
+    await assertProfileLeaseEntries(path)
     const status = await inspectProcessIdentity(owner.processIdentity)
     if (status === 'alive') throw new Error(`managed Plugin profile is owned by live process ${String(owner.processIdentity.pid)}`)
     if (status === 'unknown') throw new Error('managed Plugin profile owner identity cannot be verified; manual recovery is required')
-    const executionValue = await readCanonicalOptional(join(path, 'execution.json'))
-    if (executionValue === undefined) return
+    const [executionValue, dispatchValue] = await Promise.all([
+      readProfileExecutionRecord(join(path, 'execution.json'), 'managed Plugin Profile execution lease'),
+      readProfileExecutionRecord(
+        join(path, 'execution-dispatch.json'),
+        'managed Plugin Profile execution dispatch',
+      ),
+    ])
+    if (executionValue === undefined) {
+      if (dispatchValue !== undefined) throw new Error('managed Plugin Profile execution dispatch has no execution lease')
+      return
+    }
     const execution = decodeProfileExecution(executionValue, {
       profileId: owner.profileId,
       ownerId: owner.ownerId,
       processIdentity: owner.processIdentity,
     })
+    if (dispatchValue !== undefined) decodeProfileExecutionDispatch(dispatchValue, owner, execution)
     const group = processGroupStatus(execution.processGroupPid)
     if (group === 'alive') throw new Error(`managed Plugin profile has a live official CLI subtree ${String(execution.processGroupPid)}`)
     if (group === 'unknown') throw new Error('managed Plugin profile CLI subtree cannot be verified; manual recovery is required')

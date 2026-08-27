@@ -2,14 +2,17 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { closeSync, constants, fsyncSync, openSync, writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rm, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { performance } from 'node:perf_hooks'
+import { canonicalJson, canonicalSha256 } from '../domain/index.ts'
 import {
   captureCurrentProcessIdentity,
   decodeProcessIdentity,
 } from '../host/process-identity.ts'
 import type { OfficialDshRecoveryBinding } from '../plans/types.ts'
+import { isCurrentPnpmExecutionIdentity } from '../plans/pnpm-runtime.ts'
 import {
   verifyProfileMetadataCache,
   type ProfileMetadataCacheBinding,
@@ -24,7 +27,10 @@ autoInstallPeers: false
 const MAX_FILE_BYTES = 256 * 1024 * 1024
 const MAX_MODULES_METADATA_BYTES = 1024 * 1024
 const MAX_OUTPUT_BYTES = 32 * 1024
+const SUPERVISOR_CHILD_OUTCOME_BYTES = 4_096
 const SUPERVISOR_FALLBACK_MS = 2_000
+const PROCESS_GROUP_QUIESCENCE_MS = 5_000
+const PROCESS_GROUP_POLL_MS = 10
 const PNPM_11_PACKAGE_MANAGER = /^pnpm@11\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
 const PROFILE_CONTROLS = [
   '.npmrc', '.pnpmfile.cjs', '.pnpmfile.js', '.pnpmfile.mjs', 'pnpmfile.cjs', 'pnpmfile.js', 'pnpmfile.mjs',
@@ -32,6 +38,44 @@ const PROFILE_CONTROLS = [
 const MANIFEST_EXECUTION_FIELDS = [
   'scripts', 'pnpm', 'packageManager', 'devEngines', 'workspaces', 'config', 'publishConfig',
 ] as const
+
+interface ExecutionValue {
+  readonly ownerId: string
+  readonly parentPid: number
+  readonly processGroupPid: number
+  readonly profileId: string
+  readonly schemaVersion: 1
+  readonly startedAtMs: number
+  readonly supervisorSha256: string
+}
+
+interface ExecutionRecord {
+  readonly path: string
+  readonly body: string
+  readonly value: ExecutionValue
+  readonly leaseId: string
+}
+
+interface ExecutionDispatchRecord {
+  readonly path: string
+  readonly body: string
+  readonly value: Readonly<{
+    readonly schemaVersion: 1
+    readonly profileId: string
+    readonly ownerId: string
+    readonly leaseId: string
+    readonly processGroupPid: number
+    readonly executionDigest: `sha256:${string}`
+    readonly dispatchedAtMs: number
+  }>
+}
+
+interface SupervisorChildOutcome {
+  readonly schemaVersion: 1
+  readonly code: number | null
+  readonly signal: NodeJS.Signals | null
+  readonly launchError: boolean
+}
 
 function fail(message: string): never {
   throw new Error(message)
@@ -48,6 +92,34 @@ function storageKey(value: string): string {
 function appendOutput(held: string, chunk: Buffer): string {
   if (held.length >= MAX_OUTPUT_BYTES) return held
   return (held + chunk.toString('utf8')).slice(0, MAX_OUTPUT_BYTES)
+}
+
+function isCompleteSupervisorChildOutcome(bytes: Buffer): boolean {
+  return bytes.length > 0 && bytes.length <= SUPERVISOR_CHILD_OUTCOME_BYTES
+    && bytes[bytes.length - 1] === 0x0a && bytes.subarray(0, -1).indexOf(0x0a) === -1
+    && bytes.indexOf(0x0d) === -1
+}
+
+function decodeSupervisorChildOutcome(bytes: Buffer, label: string): SupervisorChildOutcome {
+  if (!isCompleteSupervisorChildOutcome(bytes)) {
+    fail(`${label} is not one bounded JSON record`)
+  }
+  const value = bytes.toString('utf8')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value.slice(0, -1)) as unknown
+  } catch (cause) {
+    throw new Error(`${label} is not valid JSON`, { cause })
+  }
+  if (!plain(parsed) || Object.keys(parsed).sort().join(',') !== 'code,launchError,schemaVersion,signal'
+    || parsed.schemaVersion !== 1 || typeof parsed.launchError !== 'boolean'
+    || !(parsed.code === null || typeof parsed.code === 'number' && Number.isSafeInteger(parsed.code)
+      && parsed.code >= 0 && parsed.code <= 255)
+    || !(parsed.signal === null || typeof parsed.signal === 'string' && /^[A-Z0-9]+$/u.test(parsed.signal))
+    || (parsed.code === null) === (parsed.signal === null)) {
+    fail(`${label} fields are invalid`)
+  }
+  return Object.freeze(parsed as unknown as SupervisorChildOutcome)
 }
 
 async function readRegular(path: string, label: string, maximumBytes = MAX_FILE_BYTES): Promise<Buffer> {
@@ -150,6 +222,9 @@ async function probeNodeVersion(binding: OfficialDshRecoveryBinding): Promise<vo
 /** Verify every executable and package identity in one official execution binding. */
 export async function verifyOfficialExecutionBinding(binding: OfficialDshRecoveryBinding): Promise<void> {
   if (process.platform === 'win32') fail('official DSH Plugin mutation and recovery are unsupported on Windows')
+  if (!isCurrentPnpmExecutionIdentity(binding.pnpm)) {
+    fail('retired private pnpm identity cannot execute official DSH')
+  }
   await verifyRegularPin(binding.node.executablePath, binding.node.executableSha256, 'bound Node executable')
   await probeNodeVersion(binding)
   await verifyRegularPin(binding.supervisorPath, binding.supervisorSha256, 'bound official DSH supervisor')
@@ -196,6 +271,9 @@ function profileSegment(profileId: string): string {
 
 /** Reject Profile-local package-manager execution controls before any mutation starts. */
 export async function auditOfficialProfileExecution(binding: OfficialDshRecoveryBinding, profileId: string): Promise<string> {
+  if (!isCurrentPnpmExecutionIdentity(binding.pnpm)) {
+    fail('retired private pnpm identity cannot execute official DSH')
+  }
   const profilePath = join(binding.hostHome, 'profiles', profileSegment(profileId))
   const canonical = await realpath(profilePath)
   const info = await lstat(profilePath)
@@ -362,6 +440,7 @@ function hardenPnpmArguments(
 async function readLeaseOwner(binding: OfficialDshRecoveryBinding, profileId: string): Promise<Readonly<{
   path: string
   ownerId: string
+  leaseId: string
 }>> {
   const path = join(
     binding.hostHome,
@@ -388,17 +467,53 @@ async function readLeaseOwner(binding: OfficialDshRecoveryBinding, profileId: st
   if (identity.pid !== current.pid || identity.platform !== current.platform
     || identity.machineDigest !== current.machineDigest || identity.bootDigest !== current.bootDigest
     || identity.birthDigest !== current.birthDigest) fail('official DSH Profile lease is not owned by this process')
-  return Object.freeze({ path, ownerId: value.ownerId })
+  return Object.freeze({
+    path,
+    ownerId: value.ownerId,
+    leaseId: value.leaseId,
+  })
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+function syncDirectorySync(path: string): void {
+  const descriptor = openSync(path, constants.O_RDONLY)
+  try {
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+async function waitForProcessGroupQuiescence(processGroupPid: number): Promise<boolean> {
+  const deadline = performance.now() + PROCESS_GROUP_QUIESCENCE_MS
+  for (;;) {
+    try {
+      process.kill(-processGroupPid, 0)
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true
+      if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error
+    }
+    if (performance.now() >= deadline) return false
+    await new Promise(resolveDelay => setTimeout(resolveDelay, PROCESS_GROUP_POLL_MS))
+  }
 }
 
 async function writeExecutionRecord(
   binding: OfficialDshRecoveryBinding,
   profileId: string,
   processGroupPid: number,
-): Promise<Readonly<{ path: string; body: string }>> {
+): Promise<ExecutionRecord> {
   const owner = await readLeaseOwner(binding, profileId)
   const path = join(owner.path, 'execution.json')
-  const body = `${JSON.stringify({
+  const value: ExecutionValue = Object.freeze({
     ownerId: owner.ownerId,
     parentPid: process.pid,
     processGroupPid,
@@ -406,7 +521,8 @@ async function writeExecutionRecord(
     schemaVersion: 1,
     startedAtMs: Date.now(),
     supervisorSha256: binding.supervisorSha256,
-  })}\n`
+  })
+  const body = `${canonicalJson(value)}\n`
   const handle = await open(path, 'wx', 0o600)
   try {
     await handle.writeFile(body, 'utf8')
@@ -414,19 +530,83 @@ async function writeExecutionRecord(
   } finally {
     await handle.close()
   }
-  return Object.freeze({ path, body })
+  await syncDirectory(owner.path)
+  return Object.freeze({
+    path,
+    body,
+    value,
+    leaseId: owner.leaseId,
+  })
 }
 
-async function clearExecutionRecord(record: Readonly<{ path: string; body: string }>): Promise<void> {
+function executionDispatchRecord(record: ExecutionRecord): ExecutionDispatchRecord {
+  const value = Object.freeze({
+    schemaVersion: 1 as const,
+    profileId: record.value.profileId,
+    ownerId: record.value.ownerId,
+    leaseId: record.leaseId,
+    processGroupPid: record.value.processGroupPid,
+    executionDigest: canonicalSha256(record.value),
+    dispatchedAtMs: Date.now(),
+  })
+  return Object.freeze({
+    path: join(dirname(record.path), 'execution-dispatch.json'),
+    body: `${canonicalJson(value)}\n`,
+    value,
+  })
+}
+
+function writeExecutionDispatch(record: ExecutionDispatchRecord): void {
+  if (constants.O_NOFOLLOW === undefined) fail('official DSH execution dispatch cannot exclude symlinks')
+  const descriptor = openSync(
+    record.path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  )
+  try {
+    writeFileSync(descriptor, record.body, 'utf8')
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+  syncDirectorySync(dirname(record.path))
+}
+
+async function clearExecutionFile(
+  record: Readonly<{ path: string; body: string }>,
+  label: string,
+): Promise<void> {
   let body: string
   try {
-    body = (await readRegular(record.path, 'official DSH execution lease', 64 * 1024)).toString('utf8')
+    body = (await readRegular(record.path, label, 64 * 1024)).toString('utf8')
   } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail('official DSH execution lease disappeared')
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail(`${label} disappeared`)
     throw error
   }
-  if (body !== record.body) fail('official DSH execution lease changed')
+  if (body !== record.body) fail(`${label} changed`)
   await unlink(record.path)
+  await syncDirectory(dirname(record.path))
+}
+
+async function clearOptionalExecutionFile(
+  record: Readonly<{ path: string; body: string }>,
+  label: string,
+): Promise<void> {
+  try {
+    await clearExecutionFile(record, label)
+  } catch (error: unknown) {
+    if (!(error instanceof Error && error.message === `${label} disappeared`)) throw error
+  }
+}
+
+async function assertExecutionFileAbsent(path: string, label: string): Promise<void> {
+  try {
+    await readRegular(path, label, 64 * 1024)
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  fail(`${label} exists without an exact dispatch attempt`)
 }
 
 /** Run one mutation through the pinned supervisor, private pnpm shim, and minimal environment. */
@@ -460,64 +640,198 @@ export async function runBoundOfficialDsh(
     arguments: hardenedArguments,
     environment: runtime.environment,
   }), 'utf8').toString('base64url')
-  let execution: Readonly<{ path: string; body: string }> | null = null
+  const durableRecords: {
+    execution: ExecutionRecord | null
+    dispatch: ExecutionDispatchRecord | null
+    dispatchDurable: boolean
+  } = { execution: null, dispatch: null, dispatchDurable: false }
+  let processGroupQuiescent = false
   try {
-    await new Promise<void>((accept, reject) => {
-      const child = spawn(binding.node.executablePath, [binding.supervisorPath, encoded], {
-        cwd: dirname(binding.supervisorPath),
-        detached: true,
-        env: {},
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-      let stdout = ''
-      let stderr = ''
-      let launchError: unknown
-      let fallback: NodeJS.Timeout | null = null
-      let timeoutObservation: NodeJS.Timeout | null = null
-      let timedOut = false
-      let settled = false
-      child.stdout.on('data', (chunk: Buffer) => { stdout = appendOutput(stdout, chunk) })
-      child.stderr.on('data', (chunk: Buffer) => { stderr = appendOutput(stderr, chunk) })
-      child.once('error', cause => { launchError = cause })
-      const abort = (cause: unknown) => {
-        if (settled) return
-        settled = true
-        const pid = child.pid
-        if (pid !== undefined) {
-          try { process.kill(-pid, 'SIGKILL') } catch { /* group may not have started */ }
-        }
+    const child = spawn(binding.node.executablePath, [binding.supervisorPath, encoded], {
+      cwd: dirname(binding.supervisorPath),
+      detached: true,
+      env: {},
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    const childOutcomeChunks: Buffer[] = []
+    let childOutcomeBytes = 0
+    let childOutcomeOverflow = false
+    let childOutcomeReadError: unknown
+    let launchError: unknown
+    let fallback: NodeJS.Timeout | null = null
+    let timeoutObservation: NodeJS.Timeout | null = null
+    let timedOut = false
+    let deadlineAtMs: number | null = null
+    let outcomeObservedAtMs: number | null = null
+    let closeObserved = false
+    let exitObserved = false
+    let dispatchSettled = false
+    let executionWrite: Promise<void> = Promise.resolve()
+    let resolveDispatch!: () => void
+    let rejectDispatch!: (cause: unknown) => void
+    const dispatchPromise = new Promise<void>((accept, reject) => {
+      resolveDispatch = () => {
+        if (dispatchSettled) return
+        dispatchSettled = true
+        accept()
+      }
+      rejectDispatch = cause => {
+        if (dispatchSettled) return
+        dispatchSettled = true
         reject(cause)
       }
-      child.once('spawn', () => {
-        const pid = child.pid
-        if (pid === undefined) return abort(new Error('official DSH supervisor has no process id'))
-        void writeExecutionRecord(binding, profileId, pid).then(record => {
-          execution = record
-          child.stdin.write('START\n')
-          timeoutObservation = setTimeout(() => { timedOut = true }, binding.timeoutMs)
-          timeoutObservation.unref()
-          fallback = setTimeout(() => {
-            try { process.kill(-pid, 'SIGKILL') } catch { /* supervisor already exited */ }
-          }, binding.timeoutMs + SUPERVISOR_FALLBACK_MS)
-          fallback.unref()
-        }, abort)
-      })
-      child.once('close', (code, signal) => {
-        if (fallback !== null) clearTimeout(fallback)
-        if (timeoutObservation !== null) clearTimeout(timeoutObservation)
-        if (settled) return
-        settled = true
-        if (launchError !== undefined) return reject(new Error(`official DSH Plugin ${label} could not start`, { cause: launchError }))
-        if (code === 0) return accept()
-        if (code === 124 || timedOut) return reject(new Error(`official DSH Plugin ${label} timed out`))
-        if (code === 125) return reject(new Error(`official DSH Plugin ${label} lost its parent`))
-        const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n')
-          || `exit=${String(code)} signal=${String(signal)}`
-        reject(new Error(`official DSH Plugin ${label} failed: ${detail}`))
+    })
+    let resolveClose!: (value: Readonly<{ code: number | null; signal: NodeJS.Signals | null }>) => void
+    const closePromise = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(accept => {
+      resolveClose = accept
+    })
+    child.stdout.on('data', (chunk: Buffer) => { stdout = appendOutput(stdout, chunk) })
+    child.stderr.on('data', (chunk: Buffer) => { stderr = appendOutput(stderr, chunk) })
+    child.stdio[3]!.on('data', (chunk: Buffer) => {
+      if (childOutcomeOverflow) return
+      childOutcomeBytes += chunk.length
+      if (childOutcomeBytes > SUPERVISOR_CHILD_OUTCOME_BYTES) {
+        childOutcomeOverflow = true
+        childOutcomeChunks.length = 0
+        return
+      }
+      childOutcomeChunks.push(Buffer.from(chunk))
+      if (outcomeObservedAtMs === null
+        && isCompleteSupervisorChildOutcome(Buffer.concat(childOutcomeChunks, childOutcomeBytes))) {
+        outcomeObservedAtMs = performance.now()
+        if (timeoutObservation !== null) {
+          clearTimeout(timeoutObservation)
+          timeoutObservation = null
+        }
+      }
+    })
+    child.stdio[3]!.once('error', cause => { childOutcomeReadError = cause })
+    child.stdin.once('error', cause => {
+      rejectDispatch(new Error('official DSH supervisor start dispatch failed', { cause }))
+    })
+    child.once('error', cause => {
+      launchError = cause
+      rejectDispatch(new Error(`official DSH Plugin ${label} could not start`, { cause }))
+    })
+    child.once('spawn', () => {
+      const pid = child.pid
+      if (pid === undefined) {
+        rejectDispatch(new Error('official DSH supervisor has no process id'))
+        return
+      }
+      fallback = setTimeout(() => {
+        if (exitObserved) return
+        try { process.kill(-pid, 'SIGKILL') } catch { /* supervisor already exited */ }
+      }, binding.timeoutMs + SUPERVISOR_FALLBACK_MS)
+      fallback.unref()
+      executionWrite = writeExecutionRecord(binding, profileId, pid).then(record => {
+        durableRecords.execution = record
+        if (dispatchSettled || closeObserved) return
+        try {
+          child.stdin.write('START\n', error => {
+            if (dispatchSettled) return
+            if (closeObserved) {
+              rejectDispatch(new Error('official DSH supervisor closed before its start dispatch became durable'))
+              return
+            }
+            if (error !== undefined && error !== null) {
+              rejectDispatch(new Error('official DSH supervisor start dispatch failed', { cause: error }))
+              return
+            }
+            const candidate = executionDispatchRecord(record)
+            durableRecords.dispatch = candidate
+            try {
+              writeExecutionDispatch(candidate)
+              durableRecords.dispatchDurable = true
+              resolveDispatch()
+            } catch (cause: unknown) {
+              rejectDispatch(new Error('official DSH supervisor start dispatch could not be recorded', { cause }))
+            }
+          })
+        } catch (cause: unknown) {
+          rejectDispatch(new Error('official DSH supervisor start dispatch failed', { cause }))
+          return
+        }
+        const deadline = performance.now() + binding.timeoutMs
+        deadlineAtMs = deadline
+        timeoutObservation = setTimeout(() => { timedOut = true }, Math.max(0, deadline - performance.now()))
+        timeoutObservation.unref()
+      }, cause => {
+        rejectDispatch(cause)
       })
     })
+    child.once('exit', () => {
+      exitObserved = true
+      if (fallback !== null) {
+        clearTimeout(fallback)
+        fallback = null
+      }
+    })
+    child.once('close', (code, signal) => {
+      closeObserved = true
+      if (fallback !== null) {
+        clearTimeout(fallback)
+        fallback = null
+      }
+      if (timeoutObservation !== null) {
+        clearTimeout(timeoutObservation)
+        timeoutObservation = null
+      }
+      rejectDispatch(new Error('official DSH supervisor closed before its start dispatch became durable'))
+      resolveClose(Object.freeze({ code, signal }))
+    })
+    let dispatchError: unknown
+    try {
+      await dispatchPromise
+    } catch (cause: unknown) {
+      dispatchError = cause
+      if (!exitObserved) child.stdin.destroy()
+    }
+    const supervisorClose = await closePromise
+    await executionWrite
+    const pid = child.pid
+    processGroupQuiescent = pid === undefined || await waitForProcessGroupQuiescence(pid)
+    if (!processGroupQuiescent) {
+      throw new Error('official DSH supervisor process group did not reach quiescence; durable execution fence retained')
+    }
+    if (dispatchError !== undefined) throw dispatchError
+    if (launchError !== undefined) throw new Error(`official DSH Plugin ${label} could not start`, { cause: launchError })
+    const deadlineExpired = deadlineAtMs !== null && (timedOut || (outcomeObservedAtMs === null
+      ? performance.now() >= deadlineAtMs
+      : outcomeObservedAtMs >= deadlineAtMs))
+    if (deadlineExpired) {
+      throw new Error(`official DSH Plugin ${label} timed out`)
+    }
+    if (childOutcomeReadError !== undefined) {
+      throw new Error('official DSH supervisor child outcome could not be read', { cause: childOutcomeReadError })
+    }
+    if (childOutcomeOverflow) fail('official DSH supervisor child outcome is not one bounded JSON record')
+    if (childOutcomeBytes === 0) {
+      if (supervisorClose.code === 125) throw new Error(`official DSH Plugin ${label} lost its parent`)
+      throw new Error('official DSH supervisor closed without a child outcome')
+    }
+    const childOutcome = decodeSupervisorChildOutcome(
+      Buffer.concat(childOutcomeChunks, childOutcomeBytes),
+      'official DSH supervisor child outcome',
+    )
+    if (supervisorClose.code !== null || supervisorClose.signal !== 'SIGKILL') {
+      fail('official DSH supervisor did not finish through its bound process-group cleanup')
+    }
+    if (childOutcome.launchError) {
+      throw new Error(`official DSH Plugin ${label} could not start`)
+    } else if (childOutcome.code === 124) {
+      throw new Error(`official DSH Plugin ${label} timed out`)
+    } else if (childOutcome.code === 0) {
+      // Continue with post-mutation verification only after dispatch and group quiescence are both proven.
+    } else {
+      const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n')
+        || `exit=${String(childOutcome.code)} signal=${String(childOutcome.signal)}`
+      throw new Error(`official DSH Plugin ${label} failed: ${detail}`)
+    }
     const auditedProfilePath = await auditOfficialProfileExecution(binding, profileId)
     const observedStore = await readInstalledProfileStore(auditedProfilePath)
     if (observedStore !== null && observedStore !== runtime.expectedStore
@@ -527,8 +841,26 @@ export async function runBoundOfficialDsh(
     await verifyProfileMetadataCache(binding, metadataCache, false)
     await verifyOfficialExecutionBinding(binding)
   } finally {
-    if (execution !== null) await clearExecutionRecord(execution)
-    const canonical = await realpath(runtime.directory).catch(() => null)
-    if (canonical === runtime.directory) await rm(runtime.directory, { recursive: true })
+    const execution = durableRecords.execution
+    const dispatch = durableRecords.dispatch
+    if (execution !== null && processGroupQuiescent) {
+      if (dispatch === null) {
+        await assertExecutionFileAbsent(
+          join(dirname(execution.path), 'execution-dispatch.json'),
+          'official DSH execution dispatch',
+        )
+      } else {
+        if (durableRecords.dispatchDurable) {
+          await clearExecutionFile(dispatch, 'official DSH execution dispatch')
+        } else {
+          await clearOptionalExecutionFile(dispatch, 'official DSH execution dispatch')
+        }
+      }
+      await clearExecutionFile(execution, 'official DSH execution lease')
+    }
+    if (execution === null || processGroupQuiescent) {
+      const canonical = await realpath(runtime.directory).catch(() => null)
+      if (canonical === runtime.directory) await rm(runtime.directory, { recursive: true })
+    }
   }
 }

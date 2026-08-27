@@ -4,6 +4,7 @@ import type { LoaderOwner, ManagedTargetRecord, ManagedVersion } from '../host/i
 import { CenterStateStore, openRegularNoFollow } from '../host/index.ts'
 import {
   ManagedPluginOwner,
+  OfficialProfileAmbiguityError,
   type ManagedPluginActivation,
   type ManagedPluginLoader,
   type ManagedPluginOwnerOptions,
@@ -260,6 +261,18 @@ export class PluginLifecycleProvider implements LifecycleProvider {
     return await this.store.getManaged(targetKey) ?? null
   }
 
+  /** Check durable Center and owner projections without reconciling Loader or Profile state. */
+  async referencesDurableOperation(operationId: string, targetKey: string, profileId: string): Promise<boolean> {
+    const [record, sidecar] = await Promise.all([
+      this.store.getManaged(targetKey),
+      this.owner.sidecar(profileId, targetKey),
+    ])
+    if (record !== undefined && record.profileId !== profileId) {
+      throw new Error('managed Plugin Center state does not bind its Profile')
+    }
+    return record?.lastOperationId === operationId || sidecar?.lastOperationId === operationId
+  }
+
   async prepare(request: ProviderOperationRequest): Promise<PreparedProviderOperation> {
     if (request.plan.operationKind === 'purge') {
       throw new Error('Plugin purge is unavailable while Center recovery material is retained')
@@ -393,7 +406,14 @@ export class PluginLifecycleProvider implements LifecycleProvider {
       plannedPackageName(request),
       detail.metadataCache,
     )
-    await this.store.putManaged(committed.sidecar.managed, prepared.before?.revision ?? 0)
+    try {
+      await this.store.putManaged(committed.sidecar.managed, prepared.before?.revision ?? 0)
+    } catch (error: unknown) {
+      throw new OfficialProfileAmbiguityError(
+        'managed Plugin owner state advanced before the Center projection was persisted',
+        { cause: error },
+      )
+    }
     return this.applied(prepared, committed.sidecar.managed, committed.restartRequired, false)
   }
 

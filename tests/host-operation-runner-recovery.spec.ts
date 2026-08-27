@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { verifyBootstrapCatalog } from '../src/catalog.ts'
-import { canonicalSha256 } from '../src/domain/index.ts'
+import { canonicalJson, canonicalSha256 } from '../src/domain/index.ts'
 import {
   ArtifactFetcher,
   CenterStateStore,
@@ -20,11 +20,13 @@ import {
   recordOperationMutation,
   recordOperationVerification,
   transitionOperation,
+  verifyOperationJournal,
   type JournalCheckpoint,
   type OperationJournal,
 } from '../src/operations/index.ts'
 import {
   createImmutablePlan,
+  RETIRED_PNPM_EXECUTION_IDENTITY,
   type ImmutablePlan,
   type OperationAuthorization,
   type PlanUseContext,
@@ -66,6 +68,7 @@ class RecoveryProvider implements LifecycleProvider {
   rollbackFailures = 0
   recoveredRestartRequired = false
   recoveredRestartToken: string | null = null
+  readonly durableOperationReferences = new Set<string>()
 
   constructor(
     private readonly state: CenterStateStore,
@@ -120,6 +123,10 @@ class RecoveryProvider implements LifecycleProvider {
   }
 
   cleanup(): Promise<void> { return Promise.resolve() }
+
+  referencesDurableOperation(operationId: string, targetKey: string, profileId: string): Promise<boolean> {
+    return Promise.resolve(this.durableOperationReferences.has(`${operationId}\0${targetKey}\0${profileId}`))
+  }
 }
 
 class RestartingPluginProvider implements LifecycleProvider {
@@ -454,7 +461,10 @@ interface Fixture {
   journal: OperationJournal
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(
+  retiredRuntime = false,
+  extensionKind: 'plugin' | 'skill' = 'skill',
+): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), 'extension-runner-recovery-'))
   roots.push(root)
   const state = new CenterStateStore(root)
@@ -463,15 +473,17 @@ async function fixture(): Promise<Fixture> {
   const operations = new FileOperationStore(root)
   const locks = new FileTargetLock(root)
   const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
-  const entry = catalog.envelope.entries.find(candidate => candidate.kind === 'skill')!
+  const entry = catalog.envelope.entries.find(candidate => candidate.kind === extensionKind)!
   const createdAtMs = Date.now() - 1_000
+  const plugin = extensionKind === 'plugin'
+  const selectedScope = plugin ? 'profile:web' : 'user'
   const authorityDeltaDigest = canonicalSha256({ root, authority: true })
   const authorityDigest = admittedAuthorityDigest({
     candidateRef: entry.candidateRef,
     authorityDeltaDigest,
     operationKind: 'install',
     desiredState: 'enabled',
-    selectedScope: 'user',
+    selectedScope,
   })
   const plan = createImmutablePlan({
     schemaVersion: 1,
@@ -480,7 +492,7 @@ async function fixture(): Promise<Fixture> {
     intentId: `intent:${canonicalSha256({ root, intent: true }).slice(7, 23)}`,
     origin: 'store',
     candidateRef: entry.candidateRef,
-    extensionKind: 'skill',
+    extensionKind,
     extensionId: entry.name,
     managedObject: 'artifact',
     externalRuntimeAction: 'download',
@@ -491,17 +503,17 @@ async function fixture(): Promise<Fixture> {
     artifactSizeBytes: entry.artifact.sizeBytes,
     operationKind: 'install',
     desiredState: 'enabled',
-    targetKey: `skill:web:user:${entry.name}`,
-    ownerKey: 'skills',
-    scopeKey: 'user',
+    targetKey: plugin ? `plugin:web:profile:web:${entry.name}` : `skill:web:user:${entry.name}`,
+    ownerKey: plugin ? 'managedPlugins' : 'skills',
+    scopeKey: selectedScope,
     profileId: 'web',
     idempotencyKey: canonicalSha256({ root, idempotency: true }),
     authorityDigest,
     configurationDigest: canonicalSha256({}),
     retentionDigest: canonicalSha256({ candidateRef: entry.candidateRef, retainedData: entry.retainedData }),
-    reviewEvidence: testReviewEvidence('skill', 'install'),
+    reviewEvidence: testReviewEvidence(extensionKind, 'install'),
     mutationDigest: canonicalSha256({ root, mutation: true }),
-    verificationDigest: verificationRecipeDigest('skill', 'install', 'enabled'),
+    verificationDigest: verificationRecipeDigest(extensionKind, 'install', 'enabled'),
     restartRequired: entry.restart.required,
     createdAtMs,
     expiresAtMs: createdAtMs + 60_000,
@@ -509,9 +521,9 @@ async function fixture(): Promise<Fixture> {
       catalogRevision: catalog.envelope.revision,
       inventoryRevision: canonicalSha256({ root, inventory: true }),
       targetRevision: 'absent',
-      ownerRevision: 'skills:empty',
+      ownerRevision: plugin ? 'managed-plugin:0:live' : 'skills:empty',
       scopeRevision: canonicalSha256({ root, scope: true }),
-      profileRevision: 'profile:0:tree',
+      profileRevision: plugin ? 'managed-plugin:0:live' : 'profile:0:tree',
     },
   })
   const context: PlanUseContext = {
@@ -531,6 +543,7 @@ async function fixture(): Promise<Fixture> {
   }, context, createdAtMs + 1)
   const operationId = `operation:${canonicalSha256({ root, operation: true }).slice(7, 23)}`
   const consumed = await plans.consume(plan.hash, operationId, context, createdAtMs + 2)
+  let authorization = consumed.authorization
   const intentCore = {
     kind: plan.content.extensionKind,
     extensionId: plan.content.extensionId,
@@ -583,9 +596,36 @@ async function fixture(): Promise<Fixture> {
     { context: () => Promise.resolve(context) } as never,
     { plugin: provider, mcp: provider, skill: provider },
   )
-  const journal = createOperationJournal(consumed.authorization, canonicalSha256(null), createdAtMs + 3)
+  let journal = createOperationJournal(consumed.authorization, canonicalSha256(null), createdAtMs + 3)
+  if (retiredRuntime) {
+    if (consumed.state.status !== 'consumed') throw new Error('fixture plan was not consumed')
+    const retiredState = structuredClone(consumed.state)
+    Object.assign(
+      retiredState.authorization.recoveryExecutable.officialDsh.pnpm,
+      RETIRED_PNPM_EXECUTION_IDENTITY,
+    )
+    await writeFile(
+      join(root, 'plans', plan.hash.slice('sha256:'.length), 'consumption.json'),
+      `${canonicalJson(retiredState)}\n`,
+      'utf8',
+    )
+    const loaded = await plans.load(plan.hash)
+    if (loaded?.status !== 'consumed') throw new Error('retired fixture plan was not readable')
+    authorization = loaded.authorization
+
+    const retiredJournal = structuredClone(journal)
+    const opening = retiredJournal.events[0]!
+    if (opening.entry.type !== 'operation-opened') throw new Error('fixture journal opening changed')
+    Object.assign(
+      opening.entry.planEvidence.recoveryExecutable.officialDsh.pnpm,
+      RETIRED_PNPM_EXECUTION_IDENTITY,
+    )
+    const { digest: _digest, ...unsigned } = opening
+    Object.assign(opening, { digest: canonicalSha256(unsigned) })
+    journal = retiredJournal
+  }
   await operations.persist(journal)
-  return { root, state, plans, operations, locks, provider, runner, plan, authorization: consumed.authorization, journal }
+  return { root, state, plans, operations, locks, provider, runner, plan, authorization, journal }
 }
 
 function alternateRecoveryRunner(
@@ -1063,6 +1103,164 @@ function setRunContext(runner: OperationRunner, context: PlanUseContext | undefi
 }
 
 describe('phase-aware operation recovery', () => {
+  it('keeps retired nonterminal history immutable, locked, and hidden from recovery execution', async () => {
+    const value = await fixture(true)
+    const before = (await value.operations.load(value.authorization.operationId))!
+    const reservation = {
+      schemaVersion: 1 as const,
+      operationId: value.authorization.operationId,
+      planHash: value.authorization.planHash,
+      targetKey: value.authorization.targetKey,
+      beforeDigest: before.projection.beforeDigest,
+      reservedAtMs: before.projection.lastAtMs,
+    }
+    await value.operations.reserve(reservation)
+
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal)).resolves.toEqual([])
+    await expect(value.runner.recover(new AbortController().signal)).resolves.toBeUndefined()
+
+    const after = (await value.operations.load(value.authorization.operationId))!
+    expect(after.journal).toEqual(before.journal)
+    expect(after.projection).toMatchObject({ phase: 'authorized', receipt: null })
+    expect(await value.operations.listReservations()).toEqual([reservation])
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toHaveLength(1)
+    expect(await value.runner.list()).toMatchObject([{
+      operationId: value.authorization.operationId,
+      recoveryCommand: null,
+      recoveryNotice: 'retired-runtime-quarantined',
+    }])
+  })
+
+  it('rejects explicit retired recovery before claiming a lease or invoking a provider', async () => {
+    const value = await fixture(true)
+    await append(value, transitionOperation(value.journal, 'staging', null, null, Date.now()))
+    await append(value, transitionOperation(value.journal, 'rolling-back', null, null, Date.now()))
+    await append(value, transitionOperation(value.journal, 'recovery-required', null, 'rollback-failed', Date.now()))
+    const beforeLock = (await value.locks.list())[0]!
+    const beforeEvents = value.journal.events.length
+
+    await expect(value.runner.recoverOperation(value.authorization.operationId, new AbortController().signal))
+      .rejects.toThrow('retired recovery runtime is quarantined and cannot execute')
+
+    expect((await value.operations.load(value.authorization.operationId))?.journal.events).toHaveLength(beforeEvents)
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toEqual([beforeLock])
+  })
+
+  it('issues a missing retired failed receipt without provider execution and releases its exact lock', async () => {
+    const value = await fixture(true)
+    await append(value, transitionOperation(
+      value.journal,
+      'failed',
+      canonicalSha256(null),
+      'provider-failure',
+      Date.now(),
+    ))
+
+    await expect(value.runner.recover(new AbortController().signal)).resolves.toBeUndefined()
+
+    expect((await value.operations.load(value.authorization.operationId))?.projection).toMatchObject({
+      phase: 'failed',
+      receipt: { body: { outcome: 'failed' } },
+    })
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toEqual([])
+  })
+
+  it('quarantines a retired failed Plugin journal that still owns durable sidecar state', async () => {
+    const value = await fixture(true, 'plugin')
+    await append(value, transitionOperation(value.journal, 'staging', null, null, Date.now()))
+    await value.state.putProviderSnapshot({
+      schemaVersion: 1,
+      operationId: value.authorization.operationId,
+      targetKey: value.plan.content.targetKey,
+      before: null,
+      beforeDigest: verifyOperationJournal(value.journal).beforeDigest,
+      recoveryPoint: {
+        kind: 'plugin',
+        snapshot: {
+          profileId: value.plan.content.profileId,
+          revision: 0,
+          digest: canonicalSha256({ retiredPlugin: true }),
+          materialRoot: join(value.root, 'material', 'plugins'),
+          bootStatus: 'live',
+          ownerRevision: `managed-plugin:0:${canonicalSha256({ retiredPlugin: true })}`,
+        },
+        artifactPath: join(value.root, 'artifacts', 'retired-plugin.tgz'),
+        metadataCache: null,
+      },
+    })
+    await append(value, transitionOperation(value.journal, 'applying', null, null, Date.now()))
+    await append(value, transitionOperation(
+      value.journal,
+      'failed',
+      verifyOperationJournal(value.journal).beforeDigest,
+      'provider-failure',
+      Date.now(),
+    ))
+    await append(value, issueOperationReceipt(value.journal, Date.now()).journal)
+    value.provider.durableOperationReferences.add(
+      `${value.authorization.operationId}\0${value.plan.content.targetKey}\0${value.plan.content.profileId}`,
+    )
+    const before = (await value.operations.load(value.authorization.operationId))!
+
+    await value.locks.release(value.plan.content.targetKey, value.authorization.operationId)
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal))
+      .rejects.toThrow('retired operation does not have one exact durable target quarantine')
+
+    await value.locks.acquire(value.plan.content.targetKey, value.authorization.operationId, Date.now())
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal)).resolves.toEqual([{
+      operationId: value.authorization.operationId,
+      targetKey: value.plan.content.targetKey,
+      profileId: value.plan.content.profileId,
+    }])
+    await expect(value.runner.list()).resolves.toMatchObject([{
+      operationId: value.authorization.operationId,
+      phase: 'failed',
+      recoveryCommand: null,
+      recoveryNotice: 'retired-runtime-quarantined',
+    }])
+    await expect(value.runner.recover(new AbortController().signal)).resolves.toBeUndefined()
+
+    expect((await value.operations.load(value.authorization.operationId))?.journal).toEqual(before.journal)
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toHaveLength(1)
+
+    const duplicateTarget = `${value.plan.content.targetKey}:duplicate`
+    await value.locks.acquire(duplicateTarget, value.authorization.operationId, Date.now())
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal))
+      .rejects.toThrow('retired operation does not have one exact durable target quarantine')
+    await value.locks.release(duplicateTarget, value.authorization.operationId)
+
+    await rm(join(
+      value.root,
+      'state',
+      'provider-snapshots',
+      `${storageKey(value.authorization.operationId)}.json`,
+    ))
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal))
+      .rejects.toThrow('retired failed Plugin provider snapshot is missing')
+  })
+
+  it('rejects a cross-store current journal and retired consumed authorization', async () => {
+    const value = await fixture()
+    const consumed = await value.plans.load(value.plan.hash)
+    if (consumed?.status !== 'consumed') throw new Error('fixture plan was not consumed')
+    const retired = structuredClone(consumed)
+    Object.assign(retired.authorization.recoveryExecutable.officialDsh.pnpm, RETIRED_PNPM_EXECUTION_IDENTITY)
+    await writeFile(
+      join(value.root, 'plans', value.plan.hash.slice('sha256:'.length), 'consumption.json'),
+      `${canonicalJson(retired)}\n`,
+      'utf8',
+    )
+
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal))
+      .rejects.toThrow('operation journal has no exact consumed plan')
+    expect(value.provider.observedPhases).toEqual([])
+    expect(await value.locks.list()).toHaveLength(1)
+  })
+
   it('fails an interrupted staging phase with no provider snapshot without invoking recovery', async () => {
     const value = await fixture()
     expect(await value.state.listOperationIndexes()).toEqual([])
@@ -1752,6 +1950,35 @@ describe('phase-aware operation recovery', () => {
     expect(await value.locks.list()).toHaveLength(1)
   })
 
+  it('parks an attempted mutation when the provider cannot prove whether it changed state', async () => {
+    const value = await runFixture()
+    const approved = await approvedRunPlan({
+      root: value.root,
+      state: value.state,
+      plans: value.plans,
+      suffix: 'apply-attempt-unknown',
+      persistIntent: true,
+    })
+    setRunContext(value.runner, approved.context)
+    value.provider.applyError = new Error('simulated post-dispatch failure')
+
+    await expect(value.runner.run(approved.plan.hash, new AbortController().signal)).resolves.toMatchObject({
+      status: 'recovery-required',
+      receipt: null,
+    })
+
+    const [loaded] = await value.operations.list()
+    expect(loaded?.projection).toMatchObject({ phase: 'recovery-required', receipt: null })
+    expect(loaded?.journal.events.at(-1)?.entry).toMatchObject({
+      type: 'phase-transition',
+      to: 'recovery-required',
+      reason: 'mutation-recovery-unavailable',
+    })
+    expect(value.provider.recoverCalls).toBe(1)
+    expect(value.provider.rollbackCalls).toBe(0)
+    expect(await value.locks.list()).toHaveLength(1)
+  })
+
   it('recovers a consumed plan from its durable reservation after the initial journal write fails', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-initial-journal-'))
     roots.push(root)
@@ -1780,6 +2007,62 @@ describe('phase-aware operation recovery', () => {
 
     await expect(value.runner.run(second.plan.hash, new AbortController().signal)).resolves.toMatchObject({ status: 'committed' })
     expect(await value.locks.list()).toEqual([])
+  })
+
+  it('keeps a retired consumed reservation immutable, visible, and locked without provider execution', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-retired-reservation-'))
+    roots.push(root)
+    const operations = new FailOnceInitialOperationStore(root)
+    const value = await runFixture(operations)
+    const approved = await approvedRunPlan({
+      root,
+      state: value.state,
+      plans: value.plans,
+      suffix: 'retired-reservation',
+      persistIntent: true,
+      kind: 'plugin',
+    })
+    setRunContext(value.runner, approved.context)
+    operations.failInitialWrites = 1
+
+    await expect(value.runner.run(approved.plan.hash, new AbortController().signal))
+      .rejects.toThrow('simulated initial journal failure')
+    const [reservation] = await operations.listReservations()
+    const consumed = await value.plans.load(approved.plan.hash)
+    if (reservation === undefined || consumed?.status !== 'consumed') throw new Error('missing consumed reservation')
+    const retired = structuredClone(consumed)
+    Object.assign(retired.authorization.recoveryExecutable.officialDsh.pnpm, RETIRED_PNPM_EXECUTION_IDENTITY)
+    const consumptionPath = join(root, 'plans', approved.plan.hash.slice('sha256:'.length), 'consumption.json')
+    await writeFile(consumptionPath, `${canonicalJson(retired)}\n`, 'utf8')
+    const beforeConsumption = await readFile(consumptionPath)
+
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal)).resolves.toEqual([{
+      operationId: reservation.operationId,
+      targetKey: reservation.targetKey,
+      profileId: approved.plan.content.profileId,
+    }])
+    await expect(value.runner.list()).resolves.toMatchObject([{
+      operationId: reservation.operationId,
+      phase: 'authorized',
+      operationKind: approved.plan.content.operationKind,
+      recoveryCommand: null,
+      recoveryNotice: 'retired-runtime-quarantined',
+    }])
+    await expect(value.runner.recover(new AbortController().signal)).resolves.toBeUndefined()
+
+    expect(await operations.listReservations()).toEqual([reservation])
+    expect(await operations.list()).toEqual([])
+    expect(await readFile(consumptionPath)).toEqual(beforeConsumption)
+    expect(value.provider.recoverCalls).toBe(0)
+    expect(value.provider.rollbackCalls).toBe(0)
+    expect(value.provider.cleanupCalls).toBe(0)
+    expect(await value.locks.list()).toHaveLength(1)
+
+    await value.locks.release(reservation.targetKey, reservation.operationId)
+    await expect(value.runner.retiredPluginObligations(new AbortController().signal))
+      .rejects.toThrow('retired operation does not have one exact durable target quarantine')
+    await expect(value.runner.list())
+      .rejects.toThrow('retired operation does not have one exact durable target quarantine')
   })
 
   it('continues from an exact durable consumption when the final consumption fsync reports an ambiguous failure', async () => {

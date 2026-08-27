@@ -79,6 +79,18 @@ class MemoryLoader implements ManagedPluginLoader {
   }
 }
 
+class FailOnceManagedStore extends CenterStateStore {
+  failManagedWrite = false
+
+  override async putManaged(record: Parameters<CenterStateStore['putManaged']>[0], expectedRevision: number): Promise<void> {
+    if (this.failManagedWrite) {
+      this.failManagedWrite = false
+      throw new Error('simulated kill after owner sidecar commit')
+    }
+    await super.putManaged(record, expectedRevision)
+  }
+}
+
 class ProfileCli implements ManagedPluginCli {
   readonly calls: Array<Readonly<{ kind: 'add' | 'remove'; profileId: string; packageName: string; version?: string; artifactPath?: string }>> = []
   readonly auditModes: boolean[] = []
@@ -506,6 +518,147 @@ describe('Center-owned managed Plugin owner', () => {
     expect(cli.auditModes).toEqual([true, false, false])
   })
 
+  it('skips exact operation and target quarantines before CLI or Loader startup reconciliation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-plugin-retired-quarantine-'))
+    roots.push(root)
+    const centerRoot = join(root, 'center')
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), JSON.stringify({
+      name: 'official-profile', dependencies: {}, dsh: { profile: { bundles: [] } },
+    }))
+    const archive = await pluginArchive(join(centerRoot, 'artifacts', 'sha256'), {
+      name: 'fixture-retired-plugin', version: '1.0.0', client: false,
+    })
+    const state = new CenterStateStore(centerRoot)
+    await state.initialize()
+    const cli = new ProfileCli(hostHome)
+    const operationId = 'operation:retired-quarantine'
+    const first = new PluginLifecycleProvider(state, new MemoryLoader(), { hostHome, pluginCli: cli })
+    const operation = await request(first, {
+      operationId,
+      operationKind: 'install',
+      entry: entry('fixture-retired-plugin', '1.0.0', archive.integrity),
+      artifactPath: archive.path,
+    })
+    await apply(first, state, operation)
+    expect(cli.calls).toHaveLength(1)
+
+    const loader = new MemoryLoader()
+    const restarted = new PluginLifecycleProvider(new CenterStateStore(centerRoot), loader, {
+      hostHome,
+      pluginCli: cli,
+      isOperationQuarantined: (candidateOperationId, targetKey, profileId) => (
+        candidateOperationId === operationId
+        && targetKey === operation.plan.targetKey
+        && profileId === operation.plan.profileId
+      ),
+    })
+    await expect(restarted.initialize()).resolves.toBeUndefined()
+    expect(cli.calls).toHaveLength(1)
+    expect(cli.auditModes).toEqual([true])
+    expect(loader.writes).toBe(0)
+
+    const targetLoader = new MemoryLoader()
+    const targetQuarantined = new PluginLifecycleProvider(new CenterStateStore(centerRoot), targetLoader, {
+      hostHome,
+      pluginCli: cli,
+      isOperationQuarantined: () => false,
+      isTargetQuarantined: (targetKey, profileId) => (
+        targetKey === operation.plan.targetKey && profileId === operation.plan.profileId
+      ),
+    })
+    await expect(targetQuarantined.initialize()).resolves.toBeUndefined()
+    expect(cli.calls).toHaveLength(1)
+    expect(cli.auditModes).toEqual([true])
+    expect(targetLoader.writes).toBe(0)
+  })
+
+  it('does not promote a sidecar-ahead retired target or reconcile its Loader at startup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-plugin-retired-sidecar-ahead-'))
+    roots.push(root)
+    const centerRoot = join(root, 'center')
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), JSON.stringify({
+      name: 'official-profile', dependencies: {}, dsh: { profile: { bundles: [] } },
+    }))
+    const archive = await pluginArchive(join(centerRoot, 'artifacts', 'sha256'), {
+      name: 'fixture-sidecar-ahead-plugin', version: '1.0.0', client: false,
+    })
+    const catalog = entry('fixture-sidecar-ahead-plugin', '1.0.0', archive.integrity)
+    const state = new FailOnceManagedStore(centerRoot)
+    await state.initialize()
+    const cli = new ProfileCli(hostHome)
+    const first = new PluginLifecycleProvider(state, new MemoryLoader(), { hostHome, pluginCli: cli })
+    const installed = await apply(first, state, await request(first, {
+      operationId: 'operation:sidecar-ahead-install',
+      operationKind: 'install',
+      entry: catalog,
+      artifactPath: archive.path,
+    }))
+    expect(installed.restartRequired).toBe(true)
+
+    const activeLoader = new MemoryLoader()
+    activeLoader.seed('fixture-sidecar-ahead-plugin')
+    const active = new PluginLifecycleProvider(state, activeLoader, { hostHome, pluginCli: cli })
+    await active.initialize()
+    const before = await state.getManaged(installed.prepared.request.plan.targetKey)
+    if (before === undefined) throw new Error('settled Plugin record is unavailable')
+    const configure = await request(active, {
+      operationId: 'operation:sidecar-ahead-retired',
+      operationKind: 'configure',
+      entry: catalog,
+      configuration: {
+        freshCacheMs: 5_000,
+        staleCacheMs: 30_000,
+        fetchTimeoutMs: 10_000,
+        maxCatalogBytes: 1_048_576,
+        maxCatalogEntries: 1_000,
+        maxTaskChars: 4_000,
+        maxResults: 5,
+        maxCurrentMatches: 10,
+        maxDescriptionChars: 500,
+        maxMatchedTerms: 10,
+      },
+    })
+    state.failManagedWrite = true
+    await expect(apply(active, state, configure)).rejects.toMatchObject({
+      name: 'OfficialProfileAmbiguityError',
+      code: 'profile-state-ambiguous',
+      cause: { message: 'simulated kill after owner sidecar commit' },
+    })
+    expect(await state.getManaged(configure.plan.targetKey)).toEqual(before)
+    const sidecarPath = join(
+      centerRoot,
+      'plugin',
+      'profiles',
+      storageKey(configure.plan.profileId),
+      'packages',
+      `${storageKey(configure.plan.targetKey)}.json`,
+    )
+    expect(await readFile(sidecarPath, 'utf8')).toContain(configure.authorization.operationId)
+
+    const callsBeforeRestart = cli.calls.length
+    const auditsBeforeRestart = cli.auditModes.length
+    const quarantinedLoader = new MemoryLoader()
+    const restarted = new PluginLifecycleProvider(new CenterStateStore(centerRoot), quarantinedLoader, {
+      hostHome,
+      pluginCli: cli,
+      isOperationQuarantined: () => false,
+      isTargetQuarantined: (targetKey, profileId) => (
+        targetKey === configure.plan.targetKey && profileId === configure.plan.profileId
+      ),
+    })
+    await expect(restarted.initialize()).resolves.toBeUndefined()
+
+    expect(await state.getManaged(configure.plan.targetKey)).toEqual(before)
+    expect(cli.calls).toHaveLength(callsBeforeRestart)
+    expect(cli.auditModes).toHaveLength(auditsBeforeRestart)
+    expect(quarantinedLoader.rows.size).toBe(0)
+    expect(quarantinedLoader.writes).toBe(0)
+  })
+
   it('delegates Host+Client material to the official CLI and verifies its canonical row after restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-plugin-client-owner-'))
     roots.push(root)
@@ -872,7 +1025,7 @@ describe('Center-owned managed Plugin owner', () => {
     await mkdir(lease, { recursive: true })
     const ownerBody = `${canonicalJson(owner)}\n`
     await writeFile(join(lease, 'owner.json'), ownerBody)
-    await writeFile(join(lease, 'execution.json'), `${canonicalJson({
+    const execution = {
       schemaVersion: 1,
       profileId: 'web',
       ownerId: owner.ownerId,
@@ -880,6 +1033,16 @@ describe('Center-owned managed Plugin owner', () => {
       processGroupPid: 424_242,
       supervisorSha256: `sha256:${'1'.repeat(64)}`,
       startedAtMs: 1,
+    }
+    await writeFile(join(lease, 'execution.json'), `${canonicalJson(execution)}\n`)
+    await writeFile(join(lease, 'execution-dispatch.json'), `${canonicalJson({
+      schemaVersion: 1,
+      profileId: 'web',
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: execution.processGroupPid,
+      executionDigest: canonicalSha256(execution),
+      dispatchedAtMs: 2,
     })}\n`)
     const processError = Object.assign(new Error(`simulated ${code}`), { code })
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw processError })
@@ -907,6 +1070,49 @@ describe('Center-owned managed Plugin owner', () => {
       'lease-quarantine',
       storageKey('web'),
     ))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects an orphan execution dispatch without deleting the Profile lease', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-plugin-orphan-dispatch-'))
+    roots.push(root)
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), JSON.stringify({
+      name: 'official-profile', dependencies: {}, dsh: { profile: { bundles: [] } },
+    }))
+    const lease = join(hostHome, '.extension-center-plugin-coordination', 'leases', storageKey('web'))
+    const currentIdentity = await captureCurrentProcessIdentity()
+    const owner = {
+      schemaVersion: 2,
+      profileId: 'web',
+      ownerId: 'dead-owner-with-orphan-dispatch',
+      leaseId: `lease:${randomUUID()}`,
+      processIdentity: {
+        ...currentIdentity,
+        pid: 2_147_483_647,
+        birthDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      acquiredAtMs: 1,
+    }
+    await mkdir(lease, { recursive: true })
+    await writeFile(join(lease, 'owner.json'), `${canonicalJson(owner)}\n`)
+    await writeFile(join(lease, 'execution-dispatch.json'), `${canonicalJson({
+      schemaVersion: 1,
+      profileId: 'web',
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: 424_242,
+      executionDigest: `sha256:${'1'.repeat(64)}`,
+      dispatchedAtMs: 2,
+    })}\n`)
+    const provider = new PluginLifecycleProvider(
+      new CenterStateStore(join(root, 'center')),
+      new MemoryLoader(),
+      { hostHome, pluginCli: new ProfileCli(hostHome) },
+    )
+
+    await expect(provider.initialize()).rejects.toThrow('execution dispatch has no execution lease')
+    await expect(readFile(join(lease, 'owner.json'), 'utf8')).resolves.toContain(owner.ownerId)
   })
 
   it.each(['canonical', 'retired'] as const)(

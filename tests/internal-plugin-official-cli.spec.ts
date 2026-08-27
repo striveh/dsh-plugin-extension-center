@@ -5,10 +5,10 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symli
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OfficialDshPluginCli } from '../src/internal/plugin/index.ts'
 import { captureCurrentProcessIdentity } from '../src/host/process-identity.ts'
-import type { OfficialDshRecoveryBinding } from '../src/plans/index.ts'
+import { RETIRED_PNPM_EXECUTION_IDENTITY, type OfficialDshRecoveryBinding } from '../src/plans/index.ts'
 import { installRecoveryExecutable } from '../src/recovery/install.ts'
 import { prepareProfileMetadataCache } from '../src/recovery/profile-metadata-cache.ts'
 
@@ -71,6 +71,7 @@ async function bindFixture(
   fixture: Readonly<{ entrypoint: string; hostHome: string }>,
   timeoutMs = 5_000,
   nodePath?: string,
+  supervisorPath = resolve(process.cwd(), 'lib/recovery/supervisor.js'),
 ): Promise<OfficialDshRecoveryBinding> {
   const centerRoot = await mkdtemp(join(tmpdir(), 'extension-official-dsh-toolchain-'))
   roots.push(centerRoot)
@@ -78,7 +79,7 @@ async function bindFixture(
     root: centerRoot,
     packageVersion: '0.0.0-test',
     cliPath: resolve(process.cwd(), 'lib/recovery/break-glass.js'),
-    supervisorPath: resolve(process.cwd(), 'lib/recovery/supervisor.js'),
+    supervisorPath,
     nodePath,
     officialDsh: {
       entrypointPath: fixture.entrypoint,
@@ -146,6 +147,58 @@ async function hangingOfficialCli(): Promise<Readonly<{ entrypoint: string; host
   return { entrypoint: fixture.entrypoint, hostHome: fixture.hostHome, pids }
 }
 
+async function noisyHangingOfficialCli(): Promise<Readonly<{ entrypoint: string; hostHome: string; pids: string }>> {
+  const fixture = await hangingOfficialCli()
+  await writeFile(fixture.entrypoint, `${await readFile(fixture.entrypoint, 'utf8')}\nsetInterval(() => process.stdout.write('late output\\n'), 1)\n`)
+  return fixture
+}
+
+async function nearDeadlineSuccessfulOfficialCli(
+  delayMs: number,
+): Promise<Readonly<{ entrypoint: string; hostHome: string; log: string }>> {
+  const fixture = await officialCli()
+  await writeFile(
+    fixture.entrypoint,
+    `${await readFile(fixture.entrypoint, 'utf8')}\nawait new Promise(resolveDelay => setTimeout(resolveDelay, ${String(delayMs)}))\n`,
+  )
+  return fixture
+}
+
+async function exitingParentOfficialCli(): Promise<Readonly<{ entrypoint: string; hostHome: string; pids: string }>> {
+  const fixture = await officialCli()
+  const pids = join(dirname(dirname(fixture.entrypoint)), 'pids.json')
+  const grandchild = [
+    "process.on('SIGTERM', () => {})",
+    'setInterval(() => {}, 1000)',
+  ].join(';')
+  await writeFile(fixture.entrypoint, [
+    "import { spawn } from 'node:child_process'",
+    "import { writeFileSync } from 'node:fs'",
+    `const child = spawn(process.execPath, ['--input-type=module', '--eval', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+    `writeFileSync(${JSON.stringify(pids)}, JSON.stringify([process.pid, child.pid]))`,
+    "process.on('SIGTERM', () => process.exit(143))",
+    'setInterval(() => {}, 1000)',
+  ].join('\n'))
+  return { entrypoint: fixture.entrypoint, hostHome: fixture.hostHome, pids }
+}
+
+async function successfulOrphaningOfficialCli(): Promise<Readonly<{ entrypoint: string; hostHome: string; pids: string }>> {
+  const fixture = await officialCli()
+  const pids = join(dirname(dirname(dirname(fixture.entrypoint))), 'successful-orphan-pids.json')
+  const grandchild = [
+    "process.on('SIGTERM', () => {})",
+    'setInterval(() => {}, 1000)',
+  ].join(';')
+  await writeFile(fixture.entrypoint, [
+    "import { spawn } from 'node:child_process'",
+    "import { writeFileSync } from 'node:fs'",
+    `const child = spawn(process.execPath, ['--input-type=module', '--eval', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+    'child.unref()',
+    `writeFileSync(${JSON.stringify(pids)}, JSON.stringify([process.pid, child.pid]))`,
+  ].join('\n'))
+  return { entrypoint: fixture.entrypoint, hostHome: fixture.hostHome, pids }
+}
+
 async function expectProcessAbsent(pid: number): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
@@ -166,7 +219,7 @@ async function waitForJson(path: string, child?: ReturnType<typeof spawn>): Prom
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
-    if (child?.exitCode !== null || child.signalCode !== null) {
+    if (child !== undefined && (child.exitCode !== null || child.signalCode !== null)) {
       throw new Error('watchdog fixture parent exited before publishing process evidence')
     }
     await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
@@ -302,6 +355,8 @@ describe('official DSH Plugin CLI adapter', () => {
       'dsh-llm-replay.jsonl',
     )
     const records = (await readFile(metadataPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    const fullMetadataPath = metadataPath.replace('/metadata/', '/metadata-full/')
+    expect(await readFile(fullMetadataPath)).toEqual(await readFile(metadataPath))
     expect(records).toHaveLength(2)
     expect(records[1]).toMatchObject({
       name: packageName,
@@ -486,6 +541,21 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
+  it('rejects a retired private pnpm identity before probing or spawning official DSH', async () => {
+    const fixture = await officialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const current = await bindFixture(fixture)
+    const cache = await prepareProfileMetadataCache(current, 'web')
+    const retired = structuredClone(current)
+    Object.assign(retired.pnpm, RETIRED_PNPM_EXECUTION_IDENTITY)
+
+    await expect(prepareProfileMetadataCache(retired, 'web'))
+      .rejects.toThrow('retired private pnpm identity cannot prepare official DSH execution metadata')
+    await expect(new OfficialDshPluginCli(retired).remove('web', 'fixture-plugin', cache))
+      .rejects.toThrow('retired private pnpm identity cannot execute official DSH')
+    await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
   it('rejects missing, corrupt, and non-canonical installed Profile store metadata', async () => {
     const fixture = await officialCli()
     const profile = await prepareProfile(fixture.hostHome, 'web')
@@ -603,6 +673,71 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   }, 30_000)
 
+  it('handles an EPIPE start dispatch without terminating the Host process', async () => {
+    const fixture = await officialCli()
+    const profileId = 'web'
+    await prepareProfile(fixture.hostHome, profileId)
+    const root = await mkdtemp(join(tmpdir(), 'extension-closed-supervisor-stdin-'))
+    roots.push(root)
+    const supervisorPath = join(root, 'closed-stdin.mjs')
+    await writeFile(supervisorPath, [
+      "import { closeSync } from 'node:fs'",
+      'closeSync(0)',
+      'process.exit(125)',
+    ].join('\n'))
+    const cli = new OfficialDshPluginCli(await bindFixture(fixture, 5_000, undefined, supervisorPath))
+
+    await expect(cli.remove(profileId, 'fixture-plugin')).rejects.toThrow(
+      /start dispatch failed|closed before its start dispatch became durable|lost its parent/u,
+    )
+    const lease = join(
+      fixture.hostHome,
+      '.extension-center-plugin-coordination',
+      'leases',
+      storageKey(profileId),
+    )
+    await expect(readdir(lease)).resolves.toEqual(['owner.json'])
+  }, 10_000)
+
+  it('observes both Node EPIPE delivery paths after a child closes its stdin', async () => {
+    const script = [
+      "import { closeSync } from 'node:fs'",
+      'closeSync(0)',
+      "process.stdout.write('READY\\n')",
+      'setInterval(() => {}, 1000)',
+    ].join(';')
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', script], {
+      env: {},
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    try {
+      await new Promise<void>((accept, reject) => {
+        let output = ''
+        child.stdout.on('data', (chunk: Buffer) => {
+          output += chunk.toString('utf8')
+          if (output.includes('READY\n')) accept()
+        })
+        child.once('error', reject)
+        child.once('close', code => reject(new Error(`EPIPE probe closed before READY: ${String(code)}`)))
+      })
+      const emittedError = new Promise<NodeJS.ErrnoException>(accept => {
+        child.stdin.once('error', cause => { accept(cause as NodeJS.ErrnoException) })
+      })
+      const callbackError = await new Promise<NodeJS.ErrnoException | null | undefined>(accept => {
+        child.stdin.write('START\n', cause => { accept(cause as NodeJS.ErrnoException | null | undefined) })
+      })
+      expect(callbackError?.code).toBe('EPIPE')
+      await expect(emittedError).resolves.toMatchObject({ code: 'EPIPE' })
+    } finally {
+      const closed = child.exitCode === null && child.signalCode === null
+        ? new Promise<void>(accept => { child.once('close', () => accept()) })
+        : Promise.resolve()
+      child.kill('SIGKILL')
+      await closed
+    }
+  }, 5_000)
+
   it('terminates the complete timed-out process tree before rejecting', async () => {
     const fixture = await hangingOfficialCli()
     await prepareProfile(fixture.hostHome, 'web')
@@ -614,8 +749,107 @@ describe('official DSH Plugin CLI adapter', () => {
     await Promise.all(pids.map(expectProcessAbsent))
   }, 10_000)
 
+  it('hard-kills a resistant descendant after the timed-out direct child exits', async () => {
+    const fixture = await exitingParentOfficialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const cli = new OfficialDshPluginCli(await bindFixture(fixture, 1_000))
+
+    await expect(cli.remove('web', 'fixture-plugin')).rejects.toThrow('timed out')
+    const pids = JSON.parse(await readFile(fixture.pids, 'utf8')) as number[]
+    spawnedPids.push(...pids)
+    await Promise.all(pids.map(expectProcessAbsent))
+  }, 10_000)
+
+  it('accepts an early child outcome when supervisor cleanup closes after the deadline', async () => {
+    const fixture = await officialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const root = await mkdtemp(join(tmpdir(), 'extension-delayed-supervisor-close-'))
+    roots.push(root)
+    const supervisorPath = join(root, 'delayed-close.mjs')
+    const outcome = `${JSON.stringify({
+      schemaVersion: 1,
+      code: 0,
+      signal: null,
+      launchError: false,
+    })}\n`
+    await writeFile(supervisorPath, [
+      "import { writeSync } from 'node:fs'",
+      "process.stdin.setEncoding('utf8')",
+      "let buffered = ''",
+      "process.stdin.on('data', chunk => {",
+      "  buffered += chunk",
+      "  if (buffered !== 'START\\n') return",
+      `  setTimeout(() => writeSync(3, ${JSON.stringify(outcome)}), 100)`,
+      "  setTimeout(() => process.kill(process.pid, 'SIGKILL'), 1500)",
+      "})",
+      'process.stdin.resume()',
+    ].join('\n'))
+    const cli = new OfficialDshPluginCli(await bindFixture(fixture, 1_000, undefined, supervisorPath))
+
+    await expect(cli.remove('web', 'fixture-plugin')).resolves.toBeUndefined()
+    await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 10_000)
+
+  it('rejects a child completion observed only after the caller deadline', async () => {
+    const fixture = await nearDeadlineSuccessfulOfficialCli(500)
+    const profileId = 'web'
+    await prepareProfile(fixture.hostHome, profileId)
+    const cli = new OfficialDshPluginCli(await bindFixture(fixture, 1_000))
+    const executionPath = join(
+      fixture.hostHome,
+      '.extension-center-plugin-coordination',
+      'leases',
+      storageKey(profileId),
+      'execution.json',
+    )
+    const mutation = cli.remove(profileId, 'fixture-plugin')
+    const execution = await waitForJson(executionPath) as { processGroupPid: number }
+    await waitForJson(join(dirname(executionPath), 'execution-dispatch.json'))
+    spawnedPids.push(execution.processGroupPid)
+    let stopped = false
+    try {
+      process.kill(-execution.processGroupPid, 'SIGSTOP')
+      stopped = true
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 1_250))
+      process.kill(-execution.processGroupPid, 'SIGCONT')
+      stopped = false
+      await expect(mutation).rejects.toThrow('timed out')
+      await expectProcessAbsent(execution.processGroupPid)
+    } finally {
+      if (stopped) {
+        try { process.kill(-execution.processGroupPid, 'SIGCONT') } catch { /* group may have exited */ }
+      }
+    }
+  }, 10_000)
+
+  it('cleans a successful orphan group without signaling its old PGID after supervisor close', async () => {
+    const fixture = await successfulOrphaningOfficialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const cli = new OfficialDshPluginCli(await bindFixture(fixture, 1_000))
+
+    const realKill = process.kill.bind(process)
+    const staleHardKills: number[] = []
+    const callerKill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid < 0 && signal === 'SIGKILL') {
+        staleHardKills.push(pid)
+        return true
+      }
+      return realKill(pid, signal)
+    })
+    try {
+      await expect(cli.remove('web', 'fixture-plugin')).resolves.toBeUndefined()
+      const pids = JSON.parse(await readFile(fixture.pids, 'utf8')) as number[]
+      spawnedPids.push(...pids)
+      await Promise.all(pids.map(expectProcessAbsent))
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 3_250))
+      expect(staleHardKills).toEqual([])
+    } finally {
+      callerKill.mockRestore()
+    }
+  }, 15_000)
+
   it('terminates the complete process tree when its mutation parent is killed', async () => {
-    const fixture = await hangingOfficialCli()
+    const fixture = await noisyHangingOfficialCli()
     const profileId = 'web'
     await prepareProfile(fixture.hostHome, profileId)
     const root = await mkdtemp(join(tmpdir(), 'extension-watchdog-parent-'))
@@ -630,6 +864,7 @@ describe('official DSH Plugin CLI adapter', () => {
       storageKey(profileId),
       'execution.json',
     )
+    const dispatchPath = join(dirname(executionPath), 'execution-dispatch.json')
     await writeFile(helperPath, [
       "import { createHash, randomUUID } from 'node:crypto'",
       "import { mkdir, writeFile } from 'node:fs/promises'",
@@ -663,6 +898,8 @@ describe('official DSH Plugin CLI adapter', () => {
     parent.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
     const pids = await waitForJson(fixture.pids, parent) as number[]
     const execution = await waitForJson(executionPath, parent) as { processGroupPid: number }
+    const dispatch = await waitForJson(dispatchPath, parent) as { processGroupPid: number }
+    expect(dispatch.processGroupPid).toBe(execution.processGroupPid)
     spawnedPids.push(execution.processGroupPid, ...pids)
     if (parent.pid === undefined) throw new Error('watchdog fixture parent has no process id')
     process.kill(parent.pid, 'SIGKILL')
@@ -674,6 +911,7 @@ describe('official DSH Plugin CLI adapter', () => {
     })
     await Promise.all([execution.processGroupPid, ...pids].map(expectProcessAbsent))
     await expect(readFile(executionPath, 'utf8')).resolves.toContain('watchdog-parent')
+    await expect(readFile(dispatchPath, 'utf8')).resolves.toContain('watchdog-parent')
   }, 30_000)
 
   it('runs add and remove through the installed official rc.2 CLI and pnpm', async () => {

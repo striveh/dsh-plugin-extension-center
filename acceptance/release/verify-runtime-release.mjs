@@ -26,7 +26,10 @@ import {
   parseReleaseVersion,
   validateArchiveEntries,
 } from './verify-public-release.mjs'
-import { loadGitHubCiArtifactReceipt } from './verify-github-ci.mjs'
+import {
+  inspectPackedPnpmTreeSha256,
+  loadGitHubCiArtifactReceipt,
+} from './verify-github-ci.mjs'
 import {
   AcceptanceFailure,
   TARGET_DSH_COMMIT,
@@ -199,6 +202,7 @@ function sameCoordinate(specification, observation) {
 function runtimeArtifact(specification, observationValue, label) {
   const observation = record(observationValue, `${label} observation`)
   if (!sameCoordinate(specification, observation)
+    || observation.installedPnpmTreeSha256 !== specification.pnpmTreeSha256
     || observation.hostReady !== true
     || observation.clientEntryObserved !== true
     || observation.clientBundleRequested !== true
@@ -219,6 +223,7 @@ function runtimeArtifact(specification, observationValue, label) {
     sizeBytes: specification.sizeBytes,
     filename: basename(specification.source),
     manifestSha256: specification.manifestSha256,
+    pnpmTreeSha256: specification.pnpmTreeSha256,
     sourceCommit: specification.commit,
     hostBoot: true,
     clientBoot: true,
@@ -261,6 +266,7 @@ export function buildRuntimeAcceptanceReceipt(inputValue) {
     || ciArtifact.version !== currentArtifact.version || ciArtifact.sha256 !== currentArtifact.sha256
     || ciArtifact.sizeBytes !== currentArtifact.sizeBytes
     || ciArtifact.manifestSha256 !== currentArtifact.manifestSha256
+    || ciArtifact.pnpmTreeSha256 !== currentArtifact.pnpmTreeSha256
     || ciArtifact.sourceCommit !== currentArtifact.sourceCommit) {
     fail('P0-RUNTIME-CI-ATTESTATION', 'runtime artifact is not the exact CI-attested deterministic pack')
   }
@@ -336,7 +342,11 @@ async function inspectArtifact(specification, environment) {
     ...specification,
     source: path,
   }, authorityManifest)
-  return Object.freeze({ ...specification, source: path })
+  return Object.freeze({
+    ...specification,
+    source: path,
+    pnpmTreeSha256: await inspectPackedPnpmTreeSha256(bytes, 'P0-RUNTIME-ARTIFACT'),
+  })
 }
 
 function canonicalJson(value) {
@@ -432,16 +442,24 @@ async function installedProfile(dshBin, profileRoot, artifact, forbidden, cwd, e
   const dependency = manifest.dependencies[CENTER_PACKAGE]
   const installedRoot = await realpath(join(profileRoot, 'node_modules', CENTER_PACKAGE))
   const installedManifest = JSON.parse(await readFile(join(installedRoot, 'package.json'), 'utf8'))
+  const installedPnpmTreeSha256 = await immutablePackageTreeDigest(
+    join(installedRoot, 'node_modules', 'pnpm'),
+  )
   if (dependency !== `file:${artifact.source}` || !Array.isArray(bundles)
     || bundles.filter(value => value === CENTER_PACKAGE).length !== 1
     || installedManifest.name !== CENTER_PACKAGE || installedManifest.version !== artifact.version
     || !lockfile.includes(`specifier: file:${artifact.source}`)
     || !dump.includes('# == dsh-plugin-extension-center') || !dump.includes('name: dsh-plugin-extension-center')
+    || installedPnpmTreeSha256 !== artifact.pnpmTreeSha256
     || forbidden !== null && (lockfile.includes(`file:${forbidden.source}`)
       || lockfile.includes(basename(forbidden.source)))) {
     fail('P0-RUNTIME-PROFILE', `official Profile did not select only ${CENTER_PACKAGE}@${artifact.version}`)
   }
-  return Object.freeze({ dependency, installedVersion: installedManifest.version })
+  return Object.freeze({
+    dependency,
+    installedVersion: installedManifest.version,
+    installedPnpmTreeSha256,
+  })
 }
 
 async function addCenter(dshBin, profileRoot, artifact, forbidden, cwd, environment) {
@@ -654,6 +672,9 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
   const previous = input.previous === null ? null : await inspectArtifact(input.previous, baseEnv)
   const current = await inspectArtifact(input.current, baseEnv)
   const ciAcceptance = await loadGitHubCiArtifactReceipt(input.ciReceipt, current)
+  if (ciAcceptance.artifact.pnpmTreeSha256 !== current.pnpmTreeSha256) {
+    fail('P0-RUNTIME-CI-ATTESTATION', 'recomputed packed pnpm tree differs from the CI pack attestation')
+  }
   const receiptPath = await prepareReceiptDestination(
     resolve(bounded(input.receiptPath, 'receipt path')),
     previous === null ? [current] : [previous, current],
@@ -698,6 +719,10 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
       previousObservation = await observeArtifactBoot(
         official.dshBin, previous, workspace, environment, 'previous',
       )
+      previousObservation = Object.freeze({
+        ...previousObservation,
+        installedPnpmTreeSha256: previousInstallation.installedPnpmTreeSha256,
+      })
     }
     const currentInstallation = await addCenter(
       official.dshBin, profileRoot, current, previous, workspace, environment,
@@ -711,9 +736,13 @@ export async function runRuntimeReleaseAcceptance(inputValue) {
     }
     const sameProfile = sameProfileIdentity(profileBefore, await profileIdentity(profileRoot))
     if (!sameProfile) fail('P0-RUNTIME-PROFILE', 'official CLI replaced the selected Profile root during update')
-    const currentObservation = await observeArtifactBoot(
+    const currentBootObservation = await observeArtifactBoot(
       official.dshBin, current, workspace, environment, 'current',
     )
+    const currentObservation = Object.freeze({
+      ...currentBootObservation,
+      installedPnpmTreeSha256: currentInstallation.installedPnpmTreeSha256,
+    })
     await runChecked(official.dshBin, [
       'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE, '--ignore-scripts',
     ], { cwd: workspace, env: environment, timeoutMs: 180_000 })

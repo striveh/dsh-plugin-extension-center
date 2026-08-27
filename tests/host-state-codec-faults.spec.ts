@@ -196,6 +196,48 @@ function providerSnapshot(centerRoot: string, before: ManagedTargetRecord): Stor
   }
 }
 
+function retiredPluginProviderSnapshot(centerRoot: string, pnpmVersion = '11.7.0'): StoredProviderSnapshot {
+  const targetKey = 'plugin:web:profile:web:fixture'
+  const generationPath = join(centerRoot, 'metadata-cache', 'generation')
+  return {
+    schemaVersion: 1,
+    operationId: OPERATION_ID,
+    targetKey,
+    before: null,
+    beforeDigest: durableManagedStateDigest(null),
+    recoveryPoint: {
+      kind: 'plugin',
+      artifactPath: null,
+      metadataCache: {
+        schemaVersion: 1,
+        profileId: 'web',
+        profilePath: join(centerRoot, 'profiles', 'web'),
+        generationPath,
+        generationSha256: DIGEST,
+        cachePath: join(generationPath, 'cache'),
+        manifestPath: join(generationPath, 'manifest.json'),
+        manifestSha256: DIGEST,
+        profileManifestSha256: DIGEST,
+        lockfileSha256: null,
+        modulesSha256: null,
+        sourcePnpmVersion: null,
+        storeDir: join(centerRoot, 'store'),
+        expectedStoreDir: join(centerRoot, 'store'),
+        pnpmMajor: 11,
+        pnpmVersion,
+      },
+      snapshot: {
+        profileId: 'web',
+        revision: 0,
+        digest: DIGEST,
+        materialRoot: join(centerRoot, 'material', 'plugins'),
+        bootStatus: 'pending-restart',
+        ownerRevision: `managed-plugin:0:${DIGEST}`,
+      },
+    },
+  }
+}
+
 function taskReceipt(): StoredTaskReceipt {
   return {
     schemaVersion: 1,
@@ -249,6 +291,15 @@ function withExtra(value: object): object {
 }
 
 describe('Host durable state codec faults', () => {
+  it('loads the exact retired metadata cache as history but rejects unknown generations', async () => {
+    const centerRoot = await root()
+    const retired = decodeProviderSnapshot(retiredPluginProviderSnapshot(centerRoot), centerRoot)
+    expect((retired.recoveryPoint as Readonly<{ metadataCache: { pnpmVersion: string } }>).metadataCache.pnpmVersion)
+      .toBe('11.7.0')
+    expect(() => decodeProviderSnapshot(retiredPluginProviderSnapshot(centerRoot, '11.8.0'), centerRoot))
+      .toThrow(/fields are invalid/)
+  })
+
   it('rejects continuation routes that exceed the published Host limits', () => {
     const oversizedRoute = resolution()
     ;(oversizedRoute.value as Record<string, unknown>).resumeAgentOptions = { provider: '界'.repeat(100) }

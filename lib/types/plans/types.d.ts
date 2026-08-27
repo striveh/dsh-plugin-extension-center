@@ -1,4 +1,5 @@
 import type { ArtifactIntegrity, Sha256Digest } from '../domain/json.ts';
+import type { ReadablePnpmExecutionIdentity } from './pnpm-runtime.ts';
 /** Current immutable plan schema. */
 export declare const IMMUTABLE_PLAN_SCHEMA_VERSION: 1;
 /** Lifecycle mutations represented by one exact plan. */
@@ -278,11 +279,9 @@ export interface NodeExecutionBinding {
     readonly version: string;
 }
 /** Center-private pnpm runtime and shim consumed by the official DSH CLI. */
-export interface PnpmExecutionBinding {
+export type PnpmExecutionBinding = ReadablePnpmExecutionIdentity & Readonly<{
     readonly schemaVersion: 1;
     readonly packageName: 'pnpm';
-    readonly packageVersion: '11.7.0';
-    readonly registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==';
     readonly packageRoot: string;
     readonly packageTreeSha256: Sha256Digest;
     readonly entrypointPath: string;
@@ -292,7 +291,7 @@ export interface PnpmExecutionBinding {
     readonly shellPath: string;
     readonly shellSha256: Sha256Digest;
     readonly runtimeRoot: string;
-}
+}>;
 /** Exact official DSH CLI and private execution identities available to recovery. */
 export interface OfficialDshRecoveryBinding {
     readonly schemaVersion: 2;

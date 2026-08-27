@@ -20,8 +20,8 @@ const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const OFFICIAL_DSH_PACKAGE = '@deepseek-ai/dsh'
 const OFFICIAL_DSH_VERSION = '0.1.1-rc.2'
 const PNPM_PACKAGE = 'pnpm'
-const PNPM_VERSION = '11.7.0'
-const PNPM_REGISTRY_INTEGRITY = 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
+const PNPM_VERSION = '11.21.0'
+const PNPM_REGISTRY_INTEGRITY = 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ=='
 
 /** Inputs whose exact bytes become one durable recovery executable binding. */
 export interface InstallRecoveryExecutableInput {

@@ -215,7 +215,7 @@ export interface OperationSummary {
     readonly lastAtMs: number;
     /** Exact secret-free standalone argv for recovery-required Plugin operations. */
     readonly recoveryCommand: readonly [string, string, string] | null;
-    readonly recoveryNotice: 'journal-reconciliation-pending' | null;
+    readonly recoveryNotice: 'journal-reconciliation-pending' | 'retired-runtime-quarantined' | null;
 }
 /** Deterministic operation projection list. */
 export interface OperationListResponse extends RpcVersioned {

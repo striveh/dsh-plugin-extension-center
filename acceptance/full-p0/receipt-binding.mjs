@@ -2,6 +2,16 @@ import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
+const READABLE_PNPM_IDENTITIES = Object.freeze([
+  Object.freeze({
+    packageVersion: '11.21.0',
+    registryIntegrity: 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ==',
+  }),
+  Object.freeze({
+    packageVersion: '11.7.0',
+    registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+  }),
+])
 const OPERATION_KINDS = Object.freeze([
   'install', 'configure', 'update', 'enable', 'disable', 'uninstall', 'restore', 'purge',
 ])
@@ -789,8 +799,9 @@ function planEvidence(value, label) {
     'entrypointPath', 'entrypointSha256', 'packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion',
     'registryIntegrity', 'runtimeRoot', 'schemaVersion', 'shellPath', 'shellSha256', 'shimPath', 'shimSha256',
   ], `${label}.recoveryExecutable.officialDsh.pnpm`)
-  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
-    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==') {
+  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm'
+    || !READABLE_PNPM_IDENTITIES.some(identity => identity.packageVersion === pnpm.packageVersion
+      && identity.registryIntegrity === pnpm.registryIntegrity)) {
     fail(`${label}.recoveryExecutable.officialDsh.pnpm identity is invalid`)
   }
   for (const field of ['packageRoot', 'entrypointPath', 'shimPath', 'shellPath', 'runtimeRoot']) {

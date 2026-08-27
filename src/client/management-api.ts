@@ -3,6 +3,7 @@ import { EXTENSION_CENTER_RPC_CHANNEL } from '../catalog-contract.ts'
 import type { InventoryRow } from '../inventory/types.ts'
 import type { OperationReceipt } from '../operations/types.ts'
 import type { ImmutablePlan, OperationKind, PlanAuthorizationState } from '../plans/types.ts'
+import { isReadablePnpmExecutionIdentity } from '../plans/pnpm-runtime.ts'
 import type {
   HostCapabilityProjection,
   IntentPreviewRequest,
@@ -1267,8 +1268,11 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
     'entrypointPath', 'entrypointSha256', 'packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion',
     'registryIntegrity', 'runtimeRoot', 'schemaVersion', 'shellPath', 'shellSha256', 'shimPath', 'shimSha256',
   ])
-  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
-    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==') {
+  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm'
+    || !isReadablePnpmExecutionIdentity({
+      packageVersion: pnpm.packageVersion,
+      registryIntegrity: pnpm.registryIntegrity,
+    })) {
     fail(`${subject}.recoveryExecutable.officialDsh.pnpm identity`)
   }
   for (const field of ['packageRoot', 'entrypointPath', 'shimPath', 'shellPath', 'runtimeRoot'] as const) {
@@ -1376,7 +1380,11 @@ export function parseOperationListResponse(value: unknown): OperationListRespons
     ]), `${subject}.phase`)
     literal(row.operationKind, OPERATIONS, `${subject}.operationKind`)
     timestamp(row.lastAtMs, `${subject}.lastAtMs`)
-    if (phase === 'recovery-required') {
+    if (row.recoveryNotice === 'retired-runtime-quarantined') {
+      if (row.recoveryCommand !== null || phase === 'committed') {
+        fail(`${subject}.recovery fields`)
+      }
+    } else if (phase === 'recovery-required') {
       if (row.recoveryCommand === null) {
         if (row.recoveryNotice !== null) fail(`${subject}.recoveryNotice`)
       } else {

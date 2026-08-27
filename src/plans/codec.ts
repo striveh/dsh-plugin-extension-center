@@ -25,6 +25,11 @@ import {
   type PlanUseContext,
 } from './types.ts'
 import { decodePlanReviewEvidence } from './review-codec.ts'
+import {
+  isCurrentPnpmExecutionIdentity,
+  isReadablePnpmExecutionIdentity,
+  type ReadablePnpmExecutionIdentity,
+} from './pnpm-runtime.ts'
 
 const OPERATION_KINDS: readonly OperationKind[] = [
   'install',
@@ -51,8 +56,11 @@ function decodeRuntimeBinding(value: unknown, path: string): PlanContent['runtim
   }) as PlanContent['runtimeBinding']
 }
 
-/** Strictly decode the absolute hash-pinned break-glass executable and Center state root. */
-export function decodeRecoveryExecutableBinding(value: unknown, path = 'recoveryExecutable'): RecoveryExecutableBinding {
+function decodeRecoveryExecutableBindingWithIdentity(
+  value: unknown,
+  path: string,
+  readRetired: boolean,
+): RecoveryExecutableBinding {
   const record = readStrictRecord(value, [
     'arch', 'centerRoot', 'executablePath', 'executableSha256', 'officialDsh', 'packageVersion', 'platform', 'schemaVersion',
   ], path)
@@ -83,6 +91,10 @@ export function decodeRecoveryExecutableBinding(value: unknown, path = 'recovery
   const pnpmShim = readBoundedString(pnpm.shimPath, `${path}.officialDsh.pnpm.shimPath`, 4_096)
   const pnpmShell = readBoundedString(pnpm.shellPath, `${path}.officialDsh.pnpm.shellPath`, 4_096)
   const runtimeRoot = readBoundedString(pnpm.runtimeRoot, `${path}.officialDsh.pnpm.runtimeRoot`, 4_096)
+  const pnpmIdentity = {
+    packageVersion: pnpm.packageVersion,
+    registryIntegrity: pnpm.registryIntegrity,
+  }
   if (record.schemaVersion !== 5 || !isAbsolute(executablePath) || !isAbsolute(centerRoot)
     || !/^[a-z0-9][a-z0-9._-]*$/u.test(arch)) {
     failDomain('invalid-data', `${path} values are invalid`)
@@ -92,8 +104,8 @@ export function decodeRecoveryExecutableBinding(value: unknown, path = 'recovery
     || !isAbsolute(entrypointPath) || !isAbsolute(hostHome) || !isAbsolute(supervisorPath)
     || timeoutMs < 1_000 || timeoutMs > 600_000 || node.schemaVersion !== 1 || !isAbsolute(nodePath)
     || !/^v\d+\.\d+\.\d+(?:[-+].*)?$/u.test(nodeVersion) || pnpm.schemaVersion !== 1
-    || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
-    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
+    || pnpm.packageName !== 'pnpm'
+    || !(readRetired ? isReadablePnpmExecutionIdentity(pnpmIdentity) : isCurrentPnpmExecutionIdentity(pnpmIdentity))
     || ![pnpmPackageRoot, pnpmEntrypoint, pnpmShim, pnpmShell, runtimeRoot].every(isAbsolute)) {
     failDomain('invalid-data', `${path}.officialDsh values are invalid`)
   }
@@ -158,8 +170,7 @@ export function decodeRecoveryExecutableBinding(value: unknown, path = 'recovery
       pnpm: {
         schemaVersion: 1,
         packageName: 'pnpm',
-        packageVersion: '11.7.0',
-        registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+        ...(pnpmIdentity as ReadablePnpmExecutionIdentity),
         packageRoot: pnpmPackageRoot,
         packageTreeSha256: readSha256Digest(
           pnpm.packageTreeSha256,
@@ -178,6 +189,32 @@ export function decodeRecoveryExecutableBinding(value: unknown, path = 'recovery
       },
     },
   }) as RecoveryExecutableBinding
+}
+
+/**
+ * Strictly decode the current absolute hash-pinned recovery executable.
+ * @param value Untrusted current-generation binding.
+ * @param path Diagnostic field path.
+ * @returns Recursively frozen current binding.
+ */
+export function decodeRecoveryExecutableBinding(
+  value: unknown,
+  path = 'recoveryExecutable',
+): RecoveryExecutableBinding {
+  return decodeRecoveryExecutableBindingWithIdentity(value, path, false)
+}
+
+/**
+ * Strictly decode a current or retired durable recovery binding for read-only history.
+ * @param value Untrusted persisted binding.
+ * @param path Diagnostic field path.
+ * @returns Recursively frozen recognized binding.
+ */
+export function decodeStoredRecoveryExecutableBinding(
+  value: unknown,
+  path = 'recoveryExecutable',
+): RecoveryExecutableBinding {
+  return decodeRecoveryExecutableBindingWithIdentity(value, path, true)
 }
 
 function assertManagedObjectBinding(value: Readonly<{
@@ -390,13 +427,10 @@ export function decodePlanUseContext(value: unknown): PlanUseContext {
   }) as unknown as PlanUseContext
 }
 
-/**
- * Strictly decode an operation authorization produced by plan consumption.
- *
- * @param value Untrusted authorization payload.
- * @returns Recursively frozen authorization.
- */
-export function decodeOperationAuthorization(value: unknown): OperationAuthorization {
+function decodeOperationAuthorizationWithRecovery(
+  value: unknown,
+  readRetired: boolean,
+): OperationAuthorization {
   const record = readStrictRecord(value, [
     'operationId',
     'planId',
@@ -464,7 +498,10 @@ export function decodeOperationAuthorization(value: unknown): OperationAuthoriza
         ? false
         : failDomain('invalid-data', 'authorization.restartRequired must be boolean'),
     fences: decodeFences(record.fences, 'authorization.fences'),
-    recoveryExecutable: decodeRecoveryExecutableBinding(record.recoveryExecutable, 'authorization.recoveryExecutable'),
+    recoveryExecutable: (readRetired ? decodeStoredRecoveryExecutableBinding : decodeRecoveryExecutableBinding)(
+      record.recoveryExecutable,
+      'authorization.recoveryExecutable',
+    ),
     authorizedAtMs: readNonNegativeInteger(record.authorizedAtMs, 'authorization.authorizedAtMs'),
   }) as unknown as OperationAuthorization
   assertManagedObjectBinding(decoded, 'authorization')
@@ -473,6 +510,24 @@ export function decodeOperationAuthorization(value: unknown): OperationAuthoriza
     failDomain('invalid-data', 'authorization review evidence does not match the operation')
   }
   return decoded
+}
+
+/**
+ * Strictly decode an operation authorization produced by the current plan consumer.
+ * @param value Untrusted authorization payload.
+ * @returns Recursively frozen current authorization.
+ */
+export function decodeOperationAuthorization(value: unknown): OperationAuthorization {
+  return decodeOperationAuthorizationWithRecovery(value, false)
+}
+
+/**
+ * Strictly decode a current or retired consumed authorization from durable storage.
+ * @param value Untrusted persisted authorization.
+ * @returns Recursively frozen recognized authorization.
+ */
+export function decodeStoredOperationAuthorization(value: unknown): OperationAuthorization {
+  return decodeOperationAuthorizationWithRecovery(value, true)
 }
 
 function decodeDecisionRecord(value: unknown): PlanDecisionRecord {
@@ -597,7 +652,7 @@ function assertStateBindings(state: PlanAuthorizationState): PlanAuthorizationSt
  * @param value Untrusted persisted plan state.
  * @returns Recursively frozen verified state.
  */
-export function decodePlanAuthorizationState(value: unknown): PlanAuthorizationState {
+function decodePlanAuthorizationStateWithRecovery(value: unknown, readRetired: boolean): PlanAuthorizationState {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     failDomain('invalid-data', 'planState must be an object')
   }
@@ -634,6 +689,24 @@ export function decodePlanAuthorizationState(value: unknown): PlanAuthorizationS
     status,
     plan: decodeImmutablePlan(record.plan),
     decision: decodeDecisionRecord(record.decision),
-    authorization: decodeOperationAuthorization(record.authorization),
+    authorization: (readRetired ? decodeStoredOperationAuthorization : decodeOperationAuthorization)(record.authorization),
   }) as unknown as PlanAuthorizationState)
+}
+
+/**
+ * Strictly decode a plan authorization state emitted by the current generation.
+ * @param value Untrusted state payload.
+ * @returns Recursively frozen current state.
+ */
+export function decodePlanAuthorizationState(value: unknown): PlanAuthorizationState {
+  return decodePlanAuthorizationStateWithRecovery(value, false)
+}
+
+/**
+ * Strictly decode a current or retired consumed plan state from durable storage.
+ * @param value Untrusted persisted state.
+ * @returns Recursively frozen recognized state.
+ */
+export function decodeStoredPlanAuthorizationState(value: unknown): PlanAuthorizationState {
+  return decodePlanAuthorizationStateWithRecovery(value, true)
 }

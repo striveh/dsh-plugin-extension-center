@@ -26,6 +26,7 @@ import {
   assertPackedManifestIdentity,
   assertProfileBaselineRestored,
   assertProfileLockBindsArtifact,
+  assertReleasePnpmTreeBinding,
   normalizeReleaseArtifactSource,
   parseReleaseAcceptanceArguments,
   parseReleaseVersion,
@@ -165,6 +166,7 @@ function runtimeReceipt(previous, current) {
     version: spec.version,
     sha256: spec.sha256,
     manifestSha256: spec.manifestSha256,
+    pnpmTreeSha256: spec.pnpmTreeSha256 ?? pnpmTreeSha,
     sourceCommit: spec.commit,
     hostBoot: true,
     clientBoot: true,
@@ -670,6 +672,28 @@ test('requires an external Host, Client, and RPC receipt bound to both releases'
     () => validateRuntimeAcceptanceReceipt(wrongHost, previous, current),
     acceptanceCode('P0-RELEASE-RUNTIME-RECEIPT'),
   )
+  const wrongPnpmTree = structuredClone(receipt)
+  wrongPnpmTree.ciPackAttestation.artifact.pnpmTreeSha256 = previousArtifactSha
+  assert.throws(
+    () => validateRuntimeAcceptanceReceipt(wrongPnpmTree, previous, current),
+    acceptanceCode('P0-RELEASE-RUNTIME-RECEIPT'),
+  )
+})
+
+test('rejects packed or installed pnpm trees that differ from the pack attestation', () => {
+  assert.equal(
+    assertReleasePnpmTreeBinding(pnpmTreeSha, pnpmTreeSha, pnpmTreeSha),
+    pnpmTreeSha,
+  )
+  for (const [packed, installed] of [
+    [previousArtifactSha, pnpmTreeSha],
+    [pnpmTreeSha, previousArtifactSha],
+  ]) {
+    assert.throws(
+      () => assertReleasePnpmTreeBinding(pnpmTreeSha, packed, installed),
+      acceptanceCode('P0-RELEASE-PNPM-ATTESTATION'),
+    )
+  }
 })
 
 test('requires exact semantic Profile baseline restoration', () => {

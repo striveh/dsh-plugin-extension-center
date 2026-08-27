@@ -9,11 +9,13 @@ import {
   bindControlledAbaSetupTransition,
   controlledAbaProcessGroupQuiescent,
   controlledAbaProcessGroupStopped,
+  decodeControlledAbaDispatch,
   decodeControlledAbaLease,
   parseControlledAbaProcessTable,
   waitForControlledAbaLease,
   withGuaranteedHostResume,
 } from './controlled-aba.mjs'
+import { canonicalSha256 } from './receipt-binding.mjs'
 import { AcceptanceFailure } from './support.mjs'
 
 const digest = `sha256:${'a'.repeat(64)}`
@@ -74,14 +76,15 @@ test('binds an execution lease to the exact live Host, Profile, owner, and proce
     birthDigest: digest,
   }
   const processIdentityDigest = `sha256:${createHash('sha256').update(JSON.stringify(processIdentity)).digest('hex')}`
-  const decoded = decodeControlledAbaLease({
+  const owner = {
     schemaVersion: 2,
     profileId: 'web',
     ownerId: 'center-owner',
     leaseId: 'lease:11111111-1111-4111-8111-111111111111',
     processIdentity,
     acquiredAtMs: 1000,
-  }, {
+  }
+  const execution = {
     schemaVersion: 1,
     profileId: 'web',
     ownerId: 'center-owner',
@@ -89,7 +92,9 @@ test('binds an execution lease to the exact live Host, Profile, owner, and proce
     processGroupPid: 5678,
     supervisorSha256: digest,
     startedAtMs: 1001,
-  }, {
+  }
+  const executionDigest = canonicalSha256(execution)
+  const decoded = decodeControlledAbaLease(owner, execution, {
     profileId: 'web',
     hostPid: 1234,
   })
@@ -101,7 +106,40 @@ test('binds an execution lease to the exact live Host, Profile, owner, and proce
     processGroupPid: 5678,
     supervisorSha256: digest,
     startedAtMs: 1001,
+    executionDigest,
   })
+
+  assert.equal(decodeControlledAbaDispatch({
+    schemaVersion: 1,
+    profileId: 'web',
+    ownerId: 'center-owner',
+    leaseId: owner.leaseId,
+    processGroupPid: 5678,
+    executionDigest,
+    dispatchedAtMs: 1002,
+  }, {
+    profileId: 'web',
+    ownerId: 'center-owner',
+    leaseId: owner.leaseId,
+    processGroupPid: 5678,
+    executionDigest,
+  }), 1002)
+
+  assert.throws(() => decodeControlledAbaDispatch({
+    schemaVersion: 1,
+    profileId: 'web',
+    ownerId: 'center-owner',
+    leaseId: owner.leaseId,
+    processGroupPid: 5678,
+    executionDigest: `sha256:${'b'.repeat(64)}`,
+    dispatchedAtMs: 1002,
+  }, {
+    profileId: 'web',
+    ownerId: 'center-owner',
+    leaseId: owner.leaseId,
+    processGroupPid: 5678,
+    executionDigest,
+  }), error => error instanceof AcceptanceFailure && error.code === 'P0-CONTROLLED-ABA-DISPATCH')
 
   assert.throws(
     () => decodeControlledAbaLease({
@@ -203,6 +241,13 @@ test('the controlled ABA helper has no filesystem mutation primitive for journal
     leaseCapture
       < source.indexOf('value.startReplacementHost()'),
     'the execution-lease observer must be armed before the replacement Host is spawned',
+  )
+  const captureProbe = source.indexOf('function armExecutionLeaseCapture')
+  const leaseStop = source.indexOf("process.kill(-value.processGroupPid, 'SIGSTOP')", captureProbe)
+  const dispatchProof = source.indexOf('const dispatchedAtMs = readExecutionDispatchSync', leaseStop)
+  assert.ok(
+    leaseStop >= 0 && leaseStop < dispatchProof,
+    'the supervisor must stop before its durable START dispatch proof is accepted',
   )
   const groupStopped = source.indexOf('await waitForGroupStopped(lease.processGroupPid')
   const stateAtLeaseStop = source.indexOf('stateAtLeaseStop = await observeProfileTarget', groupStopped)

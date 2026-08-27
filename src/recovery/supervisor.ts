@@ -9,10 +9,15 @@
  */
 
 import { spawn } from 'node:child_process'
+import { writeSync } from 'node:fs'
 
 const START = 'START\n'
 const TERMINATION_GRACE_MS = 250
 const MAX_CONFIG_BYTES = 64 * 1024
+
+function outputClosed(error: unknown): boolean {
+  return ['EPIPE', 'ERR_STREAM_DESTROYED'].includes((error as NodeJS.ErrnoException).code ?? '')
+}
 
 interface SupervisorConfig {
   readonly schemaVersion: 1
@@ -74,8 +79,7 @@ function decodeConfig(encoded: string | undefined): SupervisorConfig {
 const config = decodeConfig(process.argv[2])
 let child: ReturnType<typeof spawn> | null = null
 let started = false
-let finished = false
-let termination: 'parent-eof' | 'signal' | 'timeout' | null = null
+let termination: 'child-exit' | 'parent-eof' | 'signal' | 'timeout' | null = null
 let buffered = ''
 let killTimer: NodeJS.Timeout | null = null
 let timeoutTimer: NodeJS.Timeout | null = null
@@ -88,27 +92,39 @@ function signalGroup(signal: NodeJS.Signals): void {
   }
 }
 
+function forwardOutput(stream: NodeJS.WriteStream, chunk: Buffer): void {
+  try {
+    stream.write(chunk)
+  } catch (error: unknown) {
+    if (!outputClosed(error)) terminate('signal')
+  }
+}
+
 function terminate(reason: NonNullable<typeof termination>): void {
-  if (finished || termination !== null) return
+  if (termination !== null) return
   termination = reason
   signalGroup('SIGTERM')
   killTimer = setTimeout(() => signalGroup('SIGKILL'), TERMINATION_GRACE_MS)
-  killTimer.unref()
 }
 
-function exitAfterChild(code: number | null, signal: NodeJS.Signals | null, launchError: unknown): never {
-  finished = true
-  if (killTimer !== null) clearTimeout(killTimer)
+function exitAfterChild(code: number | null, signal: NodeJS.Signals | null, launchError: unknown): void {
+  if (termination !== null) return
   if (timeoutTimer !== null) clearTimeout(timeoutTimer)
   process.stdin.pause()
-  if (termination === 'timeout') process.exit(124)
-  if (termination === 'parent-eof') process.exit(125)
-  if (termination === 'signal') process.exit(143)
-  if (launchError !== undefined) {
-    process.stderr.write(`official DSH supervisor could not start its child: ${String(launchError)}\n`)
-    process.exit(126)
+  const outcome = `${JSON.stringify({
+    schemaVersion: 1,
+    code: launchError === undefined ? code : 126,
+    signal: launchError === undefined ? signal : null,
+    launchError: launchError !== undefined,
+  })}\n`
+  try {
+    writeSync(3, outcome)
+  } catch (error: unknown) {
+    if (!outputClosed(error)) {
+      try { process.stderr.write(`official DSH supervisor could not publish its child outcome: ${String(error)}\n`) } catch { /* output may be closed */ }
+    }
   }
-  process.exit(code ?? (signal === null ? 1 : 128))
+  terminate('child-exit')
 }
 
 function startChild(): void {
@@ -123,8 +139,8 @@ function startChild(): void {
     windowsHide: true,
   })
   let launchError: unknown
-  child.stdout!.on('data', (chunk: Buffer) => { process.stdout.write(chunk) })
-  child.stderr!.on('data', (chunk: Buffer) => { process.stderr.write(chunk) })
+  child.stdout!.on('data', (chunk: Buffer) => { forwardOutput(process.stdout, chunk) })
+  child.stderr!.on('data', (chunk: Buffer) => { forwardOutput(process.stderr, chunk) })
   child.once('error', cause => { launchError = cause })
   child.once('close', (code, signal) => exitAfterChild(code, signal, launchError))
   timeoutTimer = setTimeout(() => terminate('timeout'), config.timeoutMs)
@@ -133,6 +149,8 @@ function startChild(): void {
 
 process.on('SIGTERM', () => terminate('signal'))
 process.on('SIGINT', () => terminate('signal'))
+process.stdout.on('error', error => { if (!outputClosed(error)) terminate('signal') })
+process.stderr.on('error', error => { if (!outputClosed(error)) terminate('signal') })
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk: string) => {
   buffered += chunk

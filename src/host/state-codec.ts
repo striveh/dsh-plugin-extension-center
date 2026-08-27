@@ -13,7 +13,7 @@ import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { AcquisitionIntent, AcquisitionIntentCore } from '../policy/index.ts'
 import type { DesiredState, ManagedExtensionKind, OperationKind } from '../plans/index.ts'
 import type { OperationPhase } from '../operations/index.ts'
-import { decodeProfileMetadataCacheBinding } from '../recovery/profile-metadata-cache.ts'
+import { decodeStoredProfileMetadataCacheBinding } from '../recovery/profile-metadata-cache.ts'
 import type { RpcJson } from '../service/rpc-contract.ts'
 import { storageKey } from './files.ts'
 import type {
@@ -857,7 +857,7 @@ function pluginRecoveryPoint(value: unknown, path: string, root: string, targetK
   }
   const metadataCache = record.metadataCache === null
     ? null
-    : decodeProfileMetadataCacheBinding(record.metadataCache, `${path}.metadataCache`)
+    : decodeStoredProfileMetadataCacheBinding(record.metadataCache, `${path}.metadataCache`)
   if (metadataCache !== null && metadataCache.profileId !== profileId) {
     fail(`${path}.metadataCache.profileId`, 'does not bind the Plugin snapshot')
   }

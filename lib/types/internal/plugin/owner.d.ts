@@ -10,6 +10,8 @@ export declare class ManagedPluginOwner {
     private readonly hostHome;
     private readonly centerPackageName;
     private readonly cli;
+    private readonly isOperationQuarantined;
+    private readonly isTargetQuarantined;
     private readonly ownerId;
     private processIdentity;
     private initialized;
@@ -36,7 +38,7 @@ export declare class ManagedPluginOwner {
         moduleName: string;
         fiberPhase: 'active' | 'absent';
     }>>;
-    /** Read the durable owner projection, including a sidecar ahead of Center state after a crash. */
+    /** Read the durable owner projection without reconciling Loader or Profile state. */
     sidecar(profileId: string, targetKey: string): Promise<ManagedPluginSidecar | null>;
     /** Restore a Plugin whose exact provider before-state was absent. */
     rollbackToAbsent(before: ManagedTargetRecord, packageName: string, operationId: string, metadataCache?: ProfileMetadataCacheBinding | null): Promise<ManagedPluginAbsentRollback>;
@@ -80,6 +82,7 @@ export declare class ManagedPluginOwner {
     private runOfficialDesired;
     private recoveryMutation;
     private operationMetadataCache;
+    private operationUsesRetiredMetadataCache;
     private applyCanonicalLoader;
     private awaitCanonicalLoaderRow;
     private settled;

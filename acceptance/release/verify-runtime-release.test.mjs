@@ -16,6 +16,7 @@ const previous = Object.freeze({
   sizeBytes: 101,
   commit: 'a'.repeat(40),
   manifestSha256: `sha256:${'2'.repeat(64)}`,
+  pnpmTreeSha256: `sha256:${'a'.repeat(64)}`,
 })
 const current = Object.freeze({
   source: '/tmp/dsh-plugin-extension-center-0.1.0-rc.1.tgz',
@@ -24,6 +25,7 @@ const current = Object.freeze({
   sizeBytes: 102,
   commit: 'b'.repeat(40),
   manifestSha256: `sha256:${'4'.repeat(64)}`,
+  pnpmTreeSha256: `sha256:${'b'.repeat(64)}`,
 })
 
 function observation(specification) {
@@ -33,6 +35,7 @@ function observation(specification) {
     sizeBytes: specification.sizeBytes,
     manifestSha256: specification.manifestSha256,
     sourceCommit: specification.commit,
+    installedPnpmTreeSha256: specification.pnpmTreeSha256,
     hostReady: true,
     clientEntryObserved: true,
     clientBundleRequested: true,
@@ -75,6 +78,7 @@ function receiptInput() {
         sha256: current.sha256,
         sizeBytes: current.sizeBytes,
         manifestSha256: current.manifestSha256,
+        pnpmTreeSha256: current.pnpmTreeSha256,
         sourceCommit: current.commit,
         attestationDigest: `sha256:${'9'.repeat(64)}`,
         actionsArtifactId: 88,
@@ -131,12 +135,14 @@ test('emits the exact public-release runtime receipt schema', () => {
       version: previous.version,
       sha256: previous.sha256,
       manifestSha256: previous.manifestSha256,
+      pnpmTreeSha256: previous.pnpmTreeSha256,
       sourceCommit: previous.commit,
     },
     current: {
       version: current.version,
       sha256: current.sha256,
       manifestSha256: current.manifestSha256,
+      pnpmTreeSha256: current.pnpmTreeSha256,
       sourceCommit: current.commit,
     },
     ciPackAttestation: {
@@ -148,6 +154,7 @@ test('emits the exact public-release runtime receipt schema', () => {
         sha256: current.sha256,
         sizeBytes: current.sizeBytes,
         manifestSha256: current.manifestSha256,
+        pnpmTreeSha256: current.pnpmTreeSha256,
         sourceCommit: current.commit,
       },
     },
@@ -180,6 +187,13 @@ test('rejects forged artifact and browser observations', () => {
     () => buildRuntimeAcceptanceReceipt(forgedClient),
     /did not bind its exact artifact/u,
   )
+
+  const forgedInstalledPnpm = receiptInput()
+  forgedInstalledPnpm.currentObservation.installedPnpmTreeSha256 = `sha256:${'0'.repeat(64)}`
+  assert.throws(
+    () => buildRuntimeAcceptanceReceipt(forgedInstalledPnpm),
+    /did not bind its exact artifact/u,
+  )
 })
 
 test('rejects unrelated runs, modified official Host, and incomplete previous coordinates', () => {
@@ -201,6 +215,13 @@ test('rejects unrelated runs, modified official Host, and incomplete previous co
   forgedCiPack.ciAcceptance.artifact.sha256 = `sha256:${'0'.repeat(64)}`
   assert.throws(
     () => buildRuntimeAcceptanceReceipt(forgedCiPack),
+    /exact CI-attested deterministic pack/u,
+  )
+
+  const forgedCiPnpm = receiptInput()
+  forgedCiPnpm.ciAcceptance.artifact.pnpmTreeSha256 = `sha256:${'0'.repeat(64)}`
+  assert.throws(
+    () => buildRuntimeAcceptanceReceipt(forgedCiPnpm),
     /exact CI-attested deterministic pack/u,
   )
 

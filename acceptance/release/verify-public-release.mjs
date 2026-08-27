@@ -105,6 +105,23 @@ function expectedSha256(value, label) {
   return `sha256:${match[1]}`
 }
 
+/**
+ * Require one attested bundled pnpm tree to match its recomputed packed and installed trees.
+ * @param {unknown} attestedValue Attested pnpm tree SHA-256.
+ * @param {unknown} packedValue Recomputed packed pnpm tree SHA-256.
+ * @param {unknown} installedValue Recomputed installed pnpm tree SHA-256.
+ * @returns {string} The common canonical SHA-256.
+ */
+export function assertReleasePnpmTreeBinding(attestedValue, packedValue, installedValue = packedValue) {
+  const attested = expectedSha256(attestedValue, 'attested pnpm tree sha256')
+  const packed = expectedSha256(packedValue, 'packed pnpm tree sha256')
+  const installed = expectedSha256(installedValue, 'installed pnpm tree sha256')
+  if (packed !== attested || installed !== attested) {
+    fail('P0-RELEASE-PNPM-ATTESTATION', 'attested, packed, and installed pnpm trees do not match')
+  }
+  return attested
+}
+
 function positiveSize(value, label) {
   const parsed = typeof value === 'number' ? value
     : typeof value === 'string' && /^[0-9]+$/u.test(value) ? Number(value)
@@ -1131,6 +1148,11 @@ async function profileObservation(dshHome, artifact, forbiddenArtifactPath = nul
     || bundledPnpmTreeSha256 !== artifact.packed.bundledPnpmTreeSha256) {
     fail('P0-RELEASE-INSTALLED-IDENTITY', 'installed Center tree, patch, or bundled pnpm differed from the packed artifact')
   }
+  assertReleasePnpmTreeBinding(
+    artifact.pnpmTreeSha256,
+    artifact.packed.bundledPnpmTreeSha256,
+    bundledPnpmTreeSha256,
+  )
   const lockfile = await readFile(join(profileRoot, 'pnpm-lock.yaml'), 'utf8')
   const lock = assertProfileLockBindsArtifact(
     lockfile,
@@ -1213,6 +1235,7 @@ export function assertProfileBaselineRestored(baselineValue, observedValue) {
 
 function runtimeArtifact(value, spec, label) {
   const observed = record(value, label)
+  const pnpmTreeSha256 = expectedSha256(observed.pnpmTreeSha256, `${label} pnpm tree sha256`)
   if (observed.version !== spec.version || observed.sha256 !== spec.sha256
     || observed.manifestSha256 !== spec.manifestSha256 || observed.sourceCommit !== spec.commit
     || observed.hostBoot !== true || observed.clientBoot !== true || observed.rpcRegistration !== true) {
@@ -1222,6 +1245,7 @@ function runtimeArtifact(value, spec, label) {
     version: observed.version,
     sha256: observed.sha256,
     manifestSha256: observed.manifestSha256,
+    pnpmTreeSha256,
     sourceCommit: observed.sourceCommit,
   })
 }
@@ -1244,10 +1268,15 @@ export function validateRuntimeAcceptanceReceipt(receiptValue, previous, current
   const expectedCurrent = runtimeArtifact(artifacts.current, current, 'current runtime artifact')
   const ci = record(receipt.ciPackAttestation, 'runtime CI pack attestation')
   const ciArtifactValue = record(ci.artifact, 'runtime CI-attested artifact')
+  const ciPnpmTreeSha256 = expectedSha256(
+    ciArtifactValue.pnpmTreeSha256,
+    'runtime CI-attested pnpm tree sha256',
+  )
   if (ciArtifactValue.version !== current.version || ciArtifactValue.sha256 !== current.sha256
     || ciArtifactValue.sizeBytes !== current.sizeBytes
     || ciArtifactValue.manifestSha256 !== current.manifestSha256
-    || ciArtifactValue.sourceCommit !== current.commit) {
+    || ciArtifactValue.sourceCommit !== current.commit
+    || ciPnpmTreeSha256 !== expectedCurrent.pnpmTreeSha256) {
     fail('P0-RELEASE-RUNTIME-RECEIPT', 'runtime CI-attested artifact does not match the current Release')
   }
   const ciArtifact = Object.freeze({
@@ -1255,6 +1284,7 @@ export function validateRuntimeAcceptanceReceipt(receiptValue, previous, current
     sha256: ciArtifactValue.sha256,
     sizeBytes: ciArtifactValue.sizeBytes,
     manifestSha256: ciArtifactValue.manifestSha256,
+    pnpmTreeSha256: ciPnpmTreeSha256,
     sourceCommit: ciArtifactValue.sourceCommit,
   })
   if (ci.acceptanceId !== 'P0-GITHUB-CI-EXACT-COMMIT'
@@ -1427,7 +1457,9 @@ export async function runReleaseAcceptance(input) {
   const runtimeAcceptance = await loadRuntimeAcceptance(runtimeInput, previous, current)
   if (runtimeAcceptance.ciPackAttestation.fileSha256 !== ciAcceptance.fileSha256
     || runtimeAcceptance.ciPackAttestation.receiptDigest !== ciAcceptance.receiptDigest
-    || runtimeAcceptance.ciPackAttestation.artifact.sha256 !== ciAcceptance.artifact.sha256) {
+    || runtimeAcceptance.ciPackAttestation.artifact.sha256 !== ciAcceptance.artifact.sha256
+    || runtimeAcceptance.ciPackAttestation.artifact.pnpmTreeSha256
+      !== ciAcceptance.artifact.pnpmTreeSha256) {
     fail('P0-RELEASE-CI-ATTESTATION', 'runtime acceptance and public Release do not share one CI pack attestation')
   }
   const receiptPath = await prepareReceiptDestination(
@@ -1497,10 +1529,18 @@ export async function runReleaseAcceptance(input) {
         join(unpacked, name),
         authorityManifest,
       )
-      return Object.freeze({ path: await realpath(path), spec, evidence, packed })
+      const pnpmTreeSha256 = assertReleasePnpmTreeBinding(
+        ci.artifact.pnpmTreeSha256,
+        packed.bundledPnpmTreeSha256,
+      )
+      return Object.freeze({ path: await realpath(path), spec, evidence, packed, pnpmTreeSha256 })
     }
     const prior = previous === null ? null : await acquire(previous, 'previous', previousCiAcceptance)
     const next = await acquire(current, 'current', ciAcceptance)
+    if (runtimeAcceptance.current.pnpmTreeSha256 !== next.pnpmTreeSha256
+      || prior !== null && runtimeAcceptance.previous?.pnpmTreeSha256 !== prior.pnpmTreeSha256) {
+      fail('P0-RELEASE-PNPM-ATTESTATION', 'runtime and public Release pnpm tree evidence differ')
+    }
     const previousInstall = prior === null ? null : await addCenter(
       official.dshBin,
       prior,
@@ -1551,11 +1591,13 @@ export async function runReleaseAcceptance(input) {
         previous: prior === null ? null : Object.freeze({
           ...prior.evidence,
           manifestSha256: prior.spec.manifestSha256,
+          pnpmTreeSha256: prior.pnpmTreeSha256,
           packed: packedReceiptEvidence(prior),
         }),
         current: Object.freeze({
           ...next.evidence,
           manifestSha256: next.spec.manifestSha256,
+          pnpmTreeSha256: next.pnpmTreeSha256,
           packed: packedReceiptEvidence(next),
         }),
         runtimeAcceptance: Object.freeze({

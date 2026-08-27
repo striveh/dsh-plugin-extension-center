@@ -846,10 +846,13 @@ export function ActivityPanel({ management, context, candidates, t }: Management
                     </dl>
                   )}
                   {stored === undefined ? null : <ReviewEvidenceDetails evidence={stored.receipt.body.planEvidence.reviewEvidence} t={t} />}
-                  {operation.phase !== 'recovery-required' ? null : (
+                  {operation.phase !== 'recovery-required'
+                    && operation.recoveryNotice !== 'retired-runtime-quarantined' ? null : (
                     <div className={css.recoveryCallout} role="alert">
                       <strong>{t('recovery.required')}</strong>
-                      <p>{t('recovery.required.body')}</p>
+                      <p>{operation.recoveryNotice === 'retired-runtime-quarantined'
+                        ? t('recovery.retiredRuntime')
+                        : t('recovery.required.body')}</p>
                       {operation.recoveryCommand === null ? null : (
                         <>
                           <p>{t('recovery.command')}</p>
@@ -858,9 +861,11 @@ export function ActivityPanel({ management, context, candidates, t }: Management
                         </>
                       )}
                       {recoveryError === undefined ? null : <code>{recoveryError}</code>}
-                      <button type="button" disabled={!writable || recovering} onClick={() => { recover(operation.operationId) }}>
-                        {recovering ? t('recovery.running') : t('action.recover')}
-                      </button>
+                      {operation.recoveryNotice === 'retired-runtime-quarantined' ? null : (
+                        <button type="button" disabled={!writable || recovering} onClick={() => { recover(operation.operationId) }}>
+                          {recovering ? t('recovery.running') : t('action.recover')}
+                        </button>
+                      )}
                     </div>
                   )}
                 </article>

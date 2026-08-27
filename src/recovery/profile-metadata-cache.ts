@@ -6,6 +6,11 @@ import { lstat, mkdir, open, readdir, realpath, rename, rm } from 'node:fs/promi
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { parseDocument } from 'yaml'
 import { canonicalJson, canonicalSha256, immutableJsonClone } from '../domain/index.ts'
+import {
+  CURRENT_PNPM_EXECUTION_IDENTITY,
+  RETIRED_PNPM_EXECUTION_IDENTITY,
+  isCurrentPnpmExecutionIdentity,
+} from '../plans/pnpm-runtime.ts'
 import type { OfficialDshRecoveryBinding } from '../plans/types.ts'
 
 const MAX_MANIFEST_BYTES = 8 * 1024 * 1024
@@ -17,6 +22,7 @@ const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u
 const PNPM_11 = /^pnpm@11\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
 const REGISTRY = 'https://registry.npmjs.org/'
+const PNPM_METADATA_DIRECTORIES = ['metadata', 'metadata-full'] as const
 
 /** One content-addressed metadata-cache generation verified by normal and break-glass official CLI paths. */
 export interface ProfileMetadataCacheBinding {
@@ -35,7 +41,9 @@ export interface ProfileMetadataCacheBinding {
   readonly storeDir: string
   readonly expectedStoreDir: string
   readonly pnpmMajor: 11
-  readonly pnpmVersion: '11.7.0'
+  readonly pnpmVersion:
+    | typeof CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion
+    | typeof RETIRED_PNPM_EXECUTION_IDENTITY.packageVersion
 }
 
 interface CacheFile {
@@ -385,7 +393,7 @@ async function profileSource(binding: OfficialDshRecoveryBinding, profileId: str
   })
 }
 
-function bindingFields(value: unknown, label: string): ProfileMetadataCacheBinding {
+function bindingFields(value: unknown, label: string, readRetired = false): ProfileMetadataCacheBinding {
   if (!plain(value)) fail(`${label} must be an object`)
   const expected = [
     'cachePath', 'expectedStoreDir', 'generationPath', 'generationSha256', 'lockfileSha256', 'manifestPath',
@@ -393,7 +401,11 @@ function bindingFields(value: unknown, label: string): ProfileMetadataCacheBindi
     'profilePath', 'schemaVersion', 'sourcePnpmVersion', 'storeDir',
   ]
   if (Object.keys(value).sort(compareText).join('\0') !== expected.sort(compareText).join('\0') || value.schemaVersion !== 1
-    || value.pnpmMajor !== 11 || value.pnpmVersion !== '11.7.0') fail(`${label} fields are invalid`)
+    || value.pnpmMajor !== 11
+    || value.pnpmVersion !== CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion
+      && !(readRetired && value.pnpmVersion === RETIRED_PNPM_EXECUTION_IDENTITY.packageVersion)) {
+    fail(`${label} fields are invalid`)
+  }
   for (const field of ['profileId', 'profilePath', 'generationPath', 'cachePath', 'manifestPath', 'storeDir', 'expectedStoreDir'] as const) {
     if (typeof value[field] !== 'string' || value[field].length === 0 || value[field].length > 4_096) fail(`${label}.${field} is invalid`)
   }
@@ -417,12 +429,37 @@ export function decodeProfileMetadataCacheBinding(value: unknown, label = 'Plugi
   return bindingFields(value, label)
 }
 
+/** Strictly decode a current or retired metadata-cache binding for durable history. */
+export function decodeStoredProfileMetadataCacheBinding(
+  value: unknown,
+  label = 'Plugin metadata cache',
+): ProfileMetadataCacheBinding {
+  return bindingFields(value, label, true)
+}
+
+/** Return whether a metadata-cache binding belongs to the current writable generation. */
+export function isCurrentProfileMetadataCacheBinding(
+  value: ProfileMetadataCacheBinding,
+): value is ProfileMetadataCacheBinding & Readonly<{
+  pnpmVersion: typeof CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion
+}> {
+  return value.pnpmVersion === CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion
+}
+
 /** Extract one nullable cache binding from a durable Plugin provider recovery point. */
 export function profileMetadataCacheFromRecoveryPoint(value: unknown): ProfileMetadataCacheBinding | null {
   if (!plain(value) || value.kind !== 'plugin') fail('Plugin recovery point cannot supply a metadata cache binding')
   return value.metadataCache === null
     ? null
     : decodeProfileMetadataCacheBinding(value.metadataCache, 'Plugin recovery point metadata cache')
+}
+
+/** Extract one nullable current or retired cache binding from durable Plugin history. */
+export function storedProfileMetadataCacheFromRecoveryPoint(value: unknown): ProfileMetadataCacheBinding | null {
+  if (!plain(value) || value.kind !== 'plugin') fail('Plugin recovery point cannot supply a metadata cache binding')
+  return value.metadataCache === null
+    ? null
+    : decodeStoredProfileMetadataCacheBinding(value.metadataCache, 'Plugin recovery point metadata cache')
 }
 
 function manifestSeed(
@@ -441,7 +478,7 @@ function manifestSeed(
     storeDir: source.storeDir,
     expectedStoreDir: source.expectedStoreDir,
     pnpmMajor: 11,
-    pnpmVersion: '11.7.0',
+    pnpmVersion: CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion,
     files,
   })
   return Object.freeze({
@@ -456,7 +493,7 @@ function manifestSeed(
     storeDir: source.storeDir,
     expectedStoreDir: source.expectedStoreDir,
     pnpmMajor: 11,
-    pnpmVersion: '11.7.0',
+    pnpmVersion: CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion,
     files,
   })
 }
@@ -486,14 +523,16 @@ async function cacheFiles(root: string): Promise<readonly CacheFile[]> {
 
 async function writeMetadata(root: string, metadata: ProfileSource['metadata']): Promise<readonly CacheFile[]> {
   for (const [name, body] of Object.entries(metadata)) {
-    const path = join(root, 'pnpm', 'v11', 'metadata', 'registry.npmjs.org', ...name.split('/')) + '.jsonl'
-    await ensurePrivate(dirname(path))
-    const handle = await open(path, 'wx', 0o600)
-    try {
-      await handle.writeFile(`${canonicalJson({})}\n${canonicalJson(body)}\n`, 'utf8')
-      await handle.sync()
-    } finally {
-      await handle.close()
+    for (const metadataDirectory of PNPM_METADATA_DIRECTORIES) {
+      const path = join(root, 'pnpm', 'v11', metadataDirectory, 'registry.npmjs.org', ...name.split('/')) + '.jsonl'
+      await ensurePrivate(dirname(path))
+      const handle = await open(path, 'wx', 0o600)
+      try {
+        await handle.writeFile(`${canonicalJson({})}\n${canonicalJson(body)}\n`, 'utf8')
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
     }
   }
   return await cacheFiles(root)
@@ -504,6 +543,9 @@ export async function prepareProfileMetadataCache(
   official: OfficialDshRecoveryBinding,
   profileIdValue: string,
 ): Promise<ProfileMetadataCacheBinding> {
+  if (!isCurrentPnpmExecutionIdentity(official.pnpm)) {
+    fail('retired private pnpm identity cannot prepare official DSH execution metadata')
+  }
   const profileId = profileSegment(profileIdValue)
   const source = await profileSource(official, profileId)
   const root = join(official.pnpm.runtimeRoot, 'metadata-cache', createHash('sha256').update(profileId).digest('hex'))
@@ -566,6 +608,7 @@ export async function verifyProfileMetadataCache(
     || binding.cachePath !== join(binding.generationPath, 'cache')
     || binding.manifestPath !== join(binding.generationPath, 'manifest.json')
     || binding.generationPath !== join(cacheRoot, binding.generationSha256.slice('sha256:'.length))
+    || !isCurrentPnpmExecutionIdentity(official.pnpm)
     || official.pnpm.packageVersion !== binding.pnpmVersion) {
     fail('Plugin metadata cache provenance does not bind the official Profile and pnpm runtime')
   }
@@ -602,14 +645,14 @@ export async function verifyProfileMetadataCache(
       || current.expectedStoreDir !== binding.expectedStoreDir) {
       fail('official DSH Profile changed after its metadata cache generation was prepared')
     }
-    const expectedFiles = Object.entries(current.metadata).map(([name, body]) => {
+    const expectedFiles = Object.entries(current.metadata).flatMap(([name, body]) => PNPM_METADATA_DIRECTORIES.map(metadataDirectory => {
       const bytes = Buffer.from(`${canonicalJson({})}\n${canonicalJson(body)}\n`)
       return Object.freeze({
-        path: `pnpm/v11/metadata/registry.npmjs.org/${name}.jsonl`,
+        path: `pnpm/v11/${metadataDirectory}/registry.npmjs.org/${name}.jsonl`,
         sizeBytes: bytes.length,
         sha256: digest(bytes),
       })
-    }).sort((left, right) => compareText(left.path, right.path))
+    })).sort((left, right) => compareText(left.path, right.path))
     if (canonicalJson(expectedFiles) !== canonicalJson(decodedFiles)) {
       fail('official DSH Profile registry metadata changed after cache preparation')
     }

@@ -34,6 +34,8 @@ export declare class PluginLifecycleProvider implements LifecycleProvider {
     /** Project the exact Center-owned profile state used by planning fences. */
     snapshot(profileId: string): Promise<ManagedPluginSnapshot>;
     observe(targetKey: string): Promise<ManagedTargetRecord | null>;
+    /** Check durable Center and owner projections without reconciling Loader or Profile state. */
+    referencesDurableOperation(operationId: string, targetKey: string, profileId: string): Promise<boolean>;
     prepare(request: ProviderOperationRequest): Promise<PreparedProviderOperation>;
     recoveryPoint(prepared: PreparedProviderOperation): RpcJson;
     apply(prepared: PreparedProviderOperation): Promise<AppliedProviderOperation>;

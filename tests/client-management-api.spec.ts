@@ -15,7 +15,9 @@ import {
   consumeApprovedPlan,
   createImmutablePlan,
   createPlanAuthorizationState,
+  CURRENT_PNPM_EXECUTION_IDENTITY,
   decidePlan,
+  RETIRED_PNPM_EXECUTION_IDENTITY,
   type ImmutablePlan,
   type PlanUseContext,
 } from '../src/plans/index.ts'
@@ -362,6 +364,20 @@ describe('management Client wire validation', () => {
     tamperedReceipt.receipts[0]!.receipt.body.outcome = 'failed'
     await expect(parseOperationReceiptsResponse(tamperedReceipt)).rejects.toThrow(/digest mismatch|body\.evidence/)
 
+    const retiredReceipt = structuredClone(receipts)
+    Object.assign(
+      retiredReceipt.receipts[0]!.receipt.body.planEvidence.recoveryExecutable.officialDsh.pnpm,
+      RETIRED_PNPM_EXECUTION_IDENTITY,
+    )
+    retiredReceipt.receipts[0]!.receipt.digest = canonicalSha256(retiredReceipt.receipts[0]!.receipt.body)
+    await expect(parseOperationReceiptsResponse(retiredReceipt)).resolves.toEqual(retiredReceipt)
+
+    const mixedReceipt = structuredClone(retiredReceipt)
+    mixedReceipt.receipts[0]!.receipt.body.planEvidence.recoveryExecutable.officialDsh.pnpm.registryIntegrity
+      = CURRENT_PNPM_EXECUTION_IDENTITY.registryIntegrity
+    mixedReceipt.receipts[0]!.receipt.digest = canonicalSha256(mixedReceipt.receipts[0]!.receipt.body)
+    await expect(parseOperationReceiptsResponse(mixedReceipt)).rejects.toThrow('pnpm identity')
+
     const rawConfiguration = structuredClone(receipts) as unknown as { receipts: Array<{ receipt: { body: { planEvidence: Record<string, unknown> }; digest: string } }> }
     rawConfiguration.receipts[0]!.receipt.body.planEvidence.configuration = { secret: 'must-not-cross-wire' }
     await expect(parseOperationReceiptsResponse(rawConfiguration)).rejects.toThrow('unexpected fields')
@@ -598,6 +614,30 @@ describe('management Client wire validation', () => {
         lastAtMs: CREATED,
         recoveryCommand: null,
         recoveryNotice: null,
+      }],
+    }).operations).toHaveLength(1)
+    expect(parseOperationListResponse({
+      protocolVersion: 1,
+      operations: [{
+        operationId: 'operation:retired',
+        targetKey: 'skill:user/example',
+        phase: 'authorized',
+        operationKind: 'install',
+        lastAtMs: CREATED,
+        recoveryCommand: null,
+        recoveryNotice: 'retired-runtime-quarantined',
+      }],
+    }).operations).toHaveLength(1)
+    expect(parseOperationListResponse({
+      protocolVersion: 1,
+      operations: [{
+        operationId: 'operation:retired-failed',
+        targetKey: 'plugin:web:profile:web/example',
+        phase: 'failed',
+        operationKind: 'install',
+        lastAtMs: CREATED,
+        recoveryCommand: null,
+        recoveryNotice: 'retired-runtime-quarantined',
       }],
     }).operations).toHaveLength(1)
     expect(() => parseOperationListResponse({

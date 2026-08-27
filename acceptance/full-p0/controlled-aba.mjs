@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, realpathSync, watch } from 'node:fs'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { AcceptanceFailure } from './support.mjs'
+import { canonicalSha256 } from './receipt-binding.mjs'
 
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
@@ -68,7 +69,7 @@ function psPath() {
  * @param {unknown} ownerValue Parsed owner.json.
  * @param {unknown} executionValue Parsed execution.json.
  * @param {{profileId: string, hostPid: number}} expected Expected live Host identity.
- * @returns {{ownerId: string, leaseId: string, hostPid: number, hostProcessIdentityDigest: string, processGroupPid: number, supervisorSha256: string, startedAtMs: number}} Bound execution identity.
+ * @returns {{ownerId: string, leaseId: string, hostPid: number, hostProcessIdentityDigest: string, processGroupPid: number, supervisorSha256: string, startedAtMs: number, executionDigest: string}} Bound execution identity.
  */
 export function decodeControlledAbaLease(ownerValue, executionValue, expected) {
   const owner = record(ownerValue, 'Center Profile lease owner')
@@ -118,7 +119,29 @@ export function decodeControlledAbaLease(ownerValue, executionValue, expected) {
     processGroupPid: execution.processGroupPid,
     supervisorSha256: execution.supervisorSha256,
     startedAtMs: execution.startedAtMs,
+    executionDigest: canonicalSha256(execution),
   })
+}
+
+/**
+ * Bind the durable supervisor dispatch marker to its exact execution lease.
+ * @param {unknown} value Parsed execution-dispatch.json.
+ * @param {{profileId: string, ownerId: string, leaseId: string, processGroupPid: number, executionDigest: string}} expected Bound execution identity.
+ * @returns {number} Time at which the Host observed the completed START pipe write.
+ */
+export function decodeControlledAbaDispatch(value, expected) {
+  const dispatch = record(value, 'Center Profile execution dispatch')
+  const keys = [
+    'dispatchedAtMs', 'executionDigest', 'leaseId', 'ownerId', 'processGroupPid', 'profileId', 'schemaVersion',
+  ]
+  if (Object.keys(dispatch).sort().join(',') !== keys.sort().join(',')
+    || dispatch.schemaVersion !== 1 || dispatch.profileId !== expected.profileId
+    || dispatch.ownerId !== expected.ownerId || dispatch.leaseId !== expected.leaseId
+    || dispatch.processGroupPid !== expected.processGroupPid || dispatch.executionDigest !== expected.executionDigest
+    || !Number.isSafeInteger(dispatch.dispatchedAtMs)) {
+    fail('P0-CONTROLLED-ABA-DISPATCH', 'Center execution dispatch does not bind the stopped official CLI group')
+  }
+  return dispatch.dispatchedAtMs
 }
 
 /**
@@ -321,13 +344,16 @@ async function readExecutionLease(dshHome, profileId, hostPid) {
     'leases',
     storageKey(profileId),
   )
-  const [owner, execution] = await Promise.all([
+  const [owner, execution, dispatch] = await Promise.all([
     readJson(join(leaseRoot, 'owner.json'), 'Center Profile lease owner'),
     readJson(join(leaseRoot, 'execution.json'), 'Center Profile execution lease'),
+    readJson(join(leaseRoot, 'execution-dispatch.json'), 'Center Profile execution dispatch'),
   ])
+  const lease = decodeControlledAbaLease(owner, execution, { profileId, hostPid })
   return Object.freeze({
     path: leaseRoot,
-    ...decodeControlledAbaLease(owner, execution, { profileId, hostPid }),
+    ...lease,
+    dispatchedAtMs: decodeControlledAbaDispatch(dispatch, { profileId, ...lease }),
   })
 }
 
@@ -362,6 +388,20 @@ function readExecutionLeaseSync(dshHome, profileId, hostPid) {
   return Object.freeze({
     path: leaseRoot,
     ...decodeControlledAbaLease(owner, execution, { profileId, hostPid }),
+  })
+}
+
+function readExecutionDispatchSync(lease) {
+  const dispatch = readJsonSync(
+    join(lease.path, 'execution-dispatch.json'),
+    'Center Profile execution dispatch',
+  )
+  return decodeControlledAbaDispatch(dispatch, {
+    profileId: lease.profileId,
+    ownerId: lease.ownerId,
+    leaseId: lease.leaseId,
+    processGroupPid: lease.processGroupPid,
+    executionDigest: lease.executionDigest,
   })
 }
 
@@ -413,7 +453,8 @@ function armExecutionLeaseCapture(dshHome, profileId, options) {
         const value = readExecutionLeaseSync(dshHome, profileId, hostPid)
         process.kill(-value.processGroupPid, 'SIGSTOP')
         options.onStopped?.(value)
-        finish(() => resolveLease(value))
+        const dispatchedAtMs = readExecutionDispatchSync({ ...value, profileId })
+        finish(() => resolveLease(Object.freeze({ ...value, dispatchedAtMs })))
       } catch (error) {
         if (error?.code !== 'ENOENT') lastReadError = error
       } finally {
@@ -430,7 +471,7 @@ function armExecutionLeaseCapture(dshHome, profileId, options) {
         return
       }
       leaseWatcher.on('change', (_event, filename) => {
-        if (filename === null || String(filename) === 'execution.json') probe()
+        if (filename === null || ['execution.json', 'execution-dispatch.json'].includes(String(filename))) probe()
       })
       leaseWatcher.once('error', error => finish(() => rejectLease(error)))
       probe()
@@ -732,7 +773,7 @@ export async function induceControlledPluginInstallAba(input) {
     fail('P0-CONTROLLED-ABA-INPUT', 'controlled ABA callbacks and bound DSH_HOME are required')
   }
   const leaseTimeoutMs = value.leaseTimeoutMs ?? 30_000
-  const cliTimeoutMs = value.cliTimeoutMs ?? 120_000
+  const cliTimeoutMs = value.cliTimeoutMs ?? 125_000
   const hostReadyTimeoutMs = value.hostReadyTimeoutMs ?? 120_000
   const operationTimeoutMs = value.operationTimeoutMs ?? 120_000
   const intervalMs = value.intervalMs ?? 5
@@ -843,7 +884,8 @@ export async function induceControlledPluginInstallAba(input) {
       if (held.ownerId !== lease.ownerId || held.leaseId !== lease.leaseId
         || held.hostProcessIdentityDigest !== lease.hostProcessIdentityDigest
         || held.processGroupPid !== lease.processGroupPid || held.supervisorSha256 !== lease.supervisorSha256
-        || held.startedAtMs !== lease.startedAtMs) {
+        || held.startedAtMs !== lease.startedAtMs || held.executionDigest !== lease.executionDigest
+        || held.dispatchedAtMs !== lease.dispatchedAtMs) {
         fail('P0-CONTROLLED-ABA-LEASE', 'Host pause did not retain the observed official CLI execution lease')
       }
       await resumeProcessGroup(lease.processGroupPid, {
@@ -967,6 +1009,8 @@ export async function induceControlledPluginInstallAba(input) {
       supervisorProcessGroupPid: lease.processGroupPid,
       supervisorSha256: lease.supervisorSha256,
       supervisorStartedAtMs: lease.startedAtMs,
+      supervisorExecutionDigest: lease.executionDigest,
+      supervisorDispatchedAtMs: lease.dispatchedAtMs,
       hostStoppedDuringIndependentRemove: true,
       officialCliPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
       setupTransition,

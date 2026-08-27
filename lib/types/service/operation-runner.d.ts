@@ -25,6 +25,12 @@ export declare class OperationRunner {
     list(): Promise<readonly OperationSummary[]>;
     /** List content-addressed terminal receipts. */
     listReceipts(): Promise<readonly StoredReceipt[]>;
+    /** Identify retired Plugin obligations before owner startup can reconcile official Profile state. */
+    retiredPluginObligations(signal: AbortSignal): Promise<readonly Readonly<{
+        operationId: string;
+        targetKey: string;
+        profileId: string;
+    }>[]>;
     /** Retry an exact fenced rollback while retaining the target lock until owner state is reconciled. */
     recoverOperation(operationId: string, signal: AbortSignal): Promise<LifecycleResponse>;
     /** Reconcile a managed Plugin only from this process's startup and Loader evidence. */
@@ -40,6 +46,11 @@ export declare class OperationRunner {
     /** Repair interrupted journals without replaying a consumed plan or a committed mutation. */
     recover(signal: AbortSignal): Promise<void>;
     private recoverLoaded;
+    private recoverRetiredLoaded;
+    private ensureRetiredTargetQuarantine;
+    private assertExactRetiredTargetQuarantine;
+    /** Identify a retired Plugin mutation hidden behind an invalid failed terminal journal. */
+    private retiredFailedPluginReferencesMutation;
     /** Retry task bookkeeping without making an already terminal target depend on its intent payload. */
     private recoverTaskReceipt;
     private recoverRollback;

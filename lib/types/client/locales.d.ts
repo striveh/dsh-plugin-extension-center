@@ -322,6 +322,7 @@ export declare const en: {
     readonly 'recovery.running': "Retrying exact recovery…";
     readonly 'recovery.command': "Standalone recovery argv";
     readonly 'recovery.reconciliationPending': "The Profile restore can finish before the Center journal is reconciled. Journal reconciliation is pending.";
+    readonly 'recovery.retiredRuntime': "This operation is quarantined because its pinned private pnpm runtime was retired for security. The old runtime will not execute; the target remains locked for a current-version recovery path.";
     readonly 'plan.loading': "Minting an immutable preview…";
     readonly 'plan.unavailable': "Plan preview unavailable";
     readonly 'plan.unavailable.body': "No decision can be made until the Host returns one valid, exact plan.";

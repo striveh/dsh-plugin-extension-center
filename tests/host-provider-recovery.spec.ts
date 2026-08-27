@@ -814,13 +814,23 @@ describe('provider crash-point reconciliation', () => {
       recoveryPoint: provider.recoveryPoint(prepared),
     })
     store.failManagedWrite = true
-    await expect(provider.apply(prepared)).rejects.toThrow('simulated kill')
+    await expect(provider.apply(prepared)).rejects.toMatchObject({
+      name: 'OfficialProfileAmbiguityError',
+      code: 'profile-state-ambiguous',
+      cause: { message: 'simulated kill after provider mutation' },
+    })
     expect((await store.getManaged(targetKey))?.current).not.toBeNull()
     await expect(lstat(installedPath)).rejects.toMatchObject({ code: 'ENOENT' })
     expect([...loader.rows.values()].map(row => row.options.name)).toEqual([entry.artifact.id])
 
     loader = new MemoryLoader()
     provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await expect(provider.referencesDurableOperation(
+      operation.authorization.operationId,
+      operation.plan.targetKey,
+      operation.plan.profileId,
+    )).resolves.toBe(true)
+    expect([...loader.rows.values()]).toEqual([])
     await provider.initialize()
     store.snapshotTransform = value => {
       const point = value.recoveryPoint as Record<string, any>

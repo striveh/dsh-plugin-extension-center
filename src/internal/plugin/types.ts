@@ -45,6 +45,10 @@ export interface ManagedPluginLoader {
 export interface ManagedPluginOwnerOptions {
   readonly hostHome: string
   readonly centerPackageName?: string
+  /** Startup quarantine decided from the exact durable operation authorization before owner reconciliation. */
+  readonly isOperationQuarantined?: (operationId: string, targetKey: string, profileId: string) => boolean
+  /** Target-wide startup quarantine for every retired unfinished Plugin operation. */
+  readonly isTargetQuarantined?: (targetKey: string, profileId: string) => boolean
   /** Durable official CLI, Node, DSH closure, supervisor, and private pnpm binding. */
   readonly officialDsh?: OfficialDshRecoveryBinding
   /** Deterministic official-CLI seam used only by focused owner tests. */
