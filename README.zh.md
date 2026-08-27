@@ -9,7 +9,7 @@
 
 本项目不是 DeepSeek Harness 官方 Release。产品代码、目录政策、测试、兼容性声明和 Release 都归本仓库所有；DSH monorepo 只作为宿主，不承载产品实现。
 
-状态（2026-08-27）：源码实现了签名商店、带未过期 last-good 缓存的签名目录刷新、只产生线索的发现与 threshold signing、归一化 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与 receipt、Plugin/MCP/Skill 类型化操作、任务优先的本地 Capability RAG、恢复编排以及持久化续行 claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，扩展中心都会暂存并锁定准确 archive，并把 package membership 变更委托给官方 `dsh plugin --profile` CLI；只有官方 Profile package manager 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row。纯配置通过官方 Loader 在同一个 Host 进程替换并验证准确受管 row。MCP stdio connection 挂载官方 MCP Client，Skill 通过官方 registry 投影，续行使用官方 Agent 与 Session 服务。设计中不存在 fork 专用 package 或 DSH Host PR。准确边界见[纯插件架构](docs/plugin-only-architecture.zh.md)。
+状态（2026-08-28）：源码实现了签名商店、带未过期 last-good 缓存的签名目录刷新、只产生线索的发现与 threshold signing、归一化 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与 receipt、Plugin/MCP/Skill 类型化操作、任务优先的本地 Capability RAG、恢复编排以及持久化续行 claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，扩展中心都会暂存并锁定准确 archive，并把 package membership 变更委托给官方 `dsh plugin --profile` CLI；只有官方 Profile package manager 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row。纯配置通过官方 Loader 在同一个 Host 进程替换并验证准确受管 row。MCP stdio connection 挂载官方 MCP Client，Skill 通过官方 registry 投影，续行使用官方 Agent 与 Session 服务。设计中不存在 fork 专用 package 或 DSH Host PR。准确边界见[纯插件架构](docs/plugin-only-architecture.zh.md)。
 
 证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。`0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`，不声明从更早 Center Release 更新。后续候选必须证明不同前一版本到当前版本的真实 artifact 更新，把前一次已部署签名目录提升为当前 package bootstrap，并部署其准确相邻签名后继。公开 Release 安装、Pages 刷新与跨边界完成状态只由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
 
@@ -35,10 +35,10 @@ Release provenance 以 byte 为准。只有准确 `main` push 的 Node 22 CI job
 只有匹配的 GitHub Release 已存在且公开 Release receipt 通过后，下列坐标才有效；否则 Release 安装主张不可用，开发版本 checkout 不能替代它。对于已发布候选，应从不可变 GitHub Release asset 安装扩展中心，不能依赖移动分支。官方 DSH Plugin CLI 会把 Profile package management 委托给 pnpm，因此 `PATH` 中必须存在 `pnpm`：
 
 ```sh
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.0/dsh-plugin-extension-center-0.1.0-rc.0.tgz
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.0/SHA256SUMS
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.1/dsh-plugin-extension-center-0.1.0-rc.1.tgz
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.1/SHA256SUMS
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.0.tgz --ignore-scripts --save-exact
+dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.1.tgz --ignore-scripts --save-exact
 dsh plugin --profile web list --depth 0
 dsh --profile web --dump-config
 dsh web

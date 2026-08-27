@@ -61,8 +61,8 @@ package 只包含公开运行期 trust root 与离线 bootstrap。真实远端 r
 
 此后的每个 Center Release 都必须先把上一份公开文档提升为当前 package 内置 bootstrap，再签署另一个后继。Post-publication workflow 随后用准确 Actions run id 绑定前一个成功的 schema-v2 release-ready receipt；如果前一次已部署目录与当前 package 内置 bootstrap 在 revision、entries、envelope 与 signature-set 坐标上不完全相同，更新会被拒绝。当前 deployment 必须是准确的相邻签名后继。由此形成 rc.0 `r8→r9`、rc.1 `r9→r10`、stable `r10→r11` 的 Release 序列；源码修改、本地测试或 Pages 配置都不能替代任一已部署 receipt。
 
-## 公开 revision 9
+## 公开 revision 10
 
-`catalog/public/plugins.json` 中已提交的 Pages 输入是 package 内置 bootstrap revision 8 的 entry-preserving 准确后继。Revision 9 使用 key id `bootstrap-2026-08-26-8`、前一 envelope digest `sha256:10e514360a51e55ca6b27822ebd4eead754ef5b53d70e2af4acffd91286aa4f5`、entries digest `sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86`、canonical document digest `sha256:efc965813858757a6a18d59a07c19db545053f00ed8aaf739122174c91e3c6ac`，签发时间为 `2026-08-26T19:10:08.000Z`，过期时间为 `2027-08-26T19:10:08.000Z`。包含结尾换行的 canonical 文件 SHA-256 为 `cf508545567cd69bf326878170aa48d521c2026c73e001cd8cbb33cb089a214e`。
+`catalog/public/plugins.json` 中已提交的 Pages 输入是 package 内置 bootstrap revision 9 的 entry-preserving 准确后继。Revision 10 使用 key id `bootstrap-2026-08-26-8`、前一 envelope digest `sha256:c559ca39429f6c72e82ddb08bc13636e226e39e0b27f04c8d30495ae57007e7e`、entries digest `sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86`、canonical document digest `sha256:3d55268c0e28069b6bae49b5a3b2aa66ef925e73ea1de70d65fd0930c73b8982`，签发时间为 `2026-08-27T17:40:32.000Z`，过期时间为 `2027-08-27T17:40:32.000Z`。包含结尾换行的 canonical 文件 SHA-256 为 `48e5fa0c9f9d51607d35d6a6899ef2d52e57ecf5c61a6e8572b1b8a1fc1f016b`。
 
-人工 Pages workflow 只从 `main` 运行，根据 package 内置 bootstrap 与准确已提交后继推导预期 revision，验证该相邻签名迁移后再复制准确 canonical byte。它没有签名 secret，也不能构造其他 revision。已提交 revision 是发布输入，不是部署证据。当前 rc.0 只有在 `https://striveh.github.io/dsh-plugin-extension-center/plugins.json` 以 HTTP 200 返回这些 revision-9 byte，且 runtime 记录成功的 revision 8 到 9 刷新后，才算发布完成。
+人工 Pages workflow 只从 `main` 运行，根据 package 内置 bootstrap 与准确已提交后继推导预期 revision，验证该相邻签名迁移后再复制准确 canonical byte。它没有签名 secret，也不能构造其他 revision。已提交 revision 是发布输入，不是部署证据。rc.1 只有在 `https://striveh.github.io/dsh-plugin-extension-center/plugins.json` 以 HTTP 200 返回这些 revision-10 byte，且 runtime 记录成功的 revision 9 到 10 刷新后，才算发布完成。

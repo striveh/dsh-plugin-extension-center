@@ -323,7 +323,7 @@ function fullReceipt(current = CURRENT) {
     },
     observations: {
       bundleLayerObserved: true,
-      catalogRevision: 8,
+      catalogRevision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
       catalogEntriesDigest: BOOTSTRAP_ENTRIES,
       browserLifecycleRpcMethods: ['catalog/list', 'plan/decide', 'lifecycle/request'],
       browserStoreLifecycleRpcMethods: ['catalog/list', 'intent/preview', 'plan/decide', 'lifecycle/request'],

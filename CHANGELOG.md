@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-08-28
+
+### Changed
+
+- Promote the exact deployed signed catalog revision 9 into the packaged offline bootstrap and commit its reviewed entry-preserving revision-10 successor without changing any admitted entry.
+
 ### Fixed
 
 - Upgrade the private bundled recovery runtime from pnpm 11.7.0 to 11.21.0 and rebind its registry integrity, closing the high-severity `GHSA-qrv3-253h-g69c` path-traversal advisory before another candidate is published. Exact rc.0 records remain readable history, while unfinished operations and failed Plugin journals still referenced by durable owner state retain their target quarantine and never expose or execute the retired runtime. Provider apply ambiguity now remains nonterminal instead of issuing an unsafe failed receipt.
@@ -53,5 +59,6 @@ All notable changes to this project will be documented in this file. The format 
 - Every release remains conditional on exact packed-artifact lifecycle, browser, recovery, continuation, deterministic-pack, and platform receipts against the unmodified official DSH rc.2 artifact.
 - `0.1.0-rc.0` is the bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it does not claim an update from an earlier Center Release and proves only catalog `r8→r9`. rc.1 must bind rc.0's successful composite receipt, promote deployed `r9` into its packaged bootstrap, and deploy signed `r10`; stable must bind rc.1, promote `r10`, and deploy `r11`. Public Release, Pages, catalog-source, runtime, and composite claims require their own passing receipts. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
 
-[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.0...HEAD
+[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.0...v0.1.0-rc.1
 [0.1.0-rc.0]: https://github.com/striveh/dsh-plugin-extension-center/releases/tag/v0.1.0-rc.0

@@ -572,12 +572,12 @@ const wikiPageWriterV2: CatalogEntry = {
   }, ...wikiPageWriterV1.verification.slice(1)],
 }
 
-/** Curated entries in bootstrap revision 8. Free-form upstream text is not included. */
+/** Curated entries in bootstrap revision 9. Free-form upstream text is not included. */
 export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [
-  capabilityResolverV010,
-  capabilityResolverV011,
   filesystemMcpV122,
   filesystemMcpV130,
+  capabilityResolverV010,
+  capabilityResolverV011,
   documentationWriter,
   wikiPageWriterV1,
   wikiPageWriterV2,
@@ -586,7 +586,7 @@ export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [
 /** Packaged trust root. The private signing key is not part of this repository. */
 export const BOOTSTRAP_CATALOG_ROOT: CatalogRoot = {
   catalogId: 'dsh-extension-center-public',
-  minimumRevision: 8,
+  minimumRevision: 9,
   maximumAgeMs: 366 * 24 * 60 * 60 * 1000,
   threshold: 1,
   keys: [{
@@ -599,11 +599,11 @@ export const BOOTSTRAP_CATALOG_ROOT: CatalogRoot = {
 /** Immutable bootstrap catalog shipped for fully offline Store discovery. */
 export const BOOTSTRAP_CATALOG_ENVELOPE: CatalogEnvelope = {
   catalogId: 'dsh-extension-center-public',
-  revision: 8,
-  issuedAt: '2026-08-26T18:00:00.000Z',
-  expiresAt: '2027-08-26T18:00:00.000Z',
-  previousRevisionDigest: 'sha256:e222344dc9c0c63cce0f3f9304841041a43d70a135abbbbaa323c29135c8096c',
-  entriesDigest: 'sha256:37a10ad2e71edf5574a16c63541a10e9fc492088133d92d9f5137ccb6f15a299',
+  revision: 9,
+  issuedAt: '2026-08-26T19:10:08.000Z',
+  expiresAt: '2027-08-26T19:10:08.000Z',
+  previousRevisionDigest: 'sha256:10e514360a51e55ca6b27822ebd4eead754ef5b53d70e2af4acffd91286aa4f5',
+  entriesDigest: 'sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86',
   entries: BOOTSTRAP_CATALOG_ENTRIES,
 }
 
@@ -611,5 +611,5 @@ export const BOOTSTRAP_CATALOG_ENVELOPE: CatalogEnvelope = {
 export const BOOTSTRAP_CATALOG_SIGNATURES: readonly CatalogSignature[] = [{
   keyId: 'bootstrap-2026-08-26-8',
   algorithm: 'ed25519',
-  value: 'rZysVT2B10GBcYHDjXDKoSnZ+hK755+J88iDQ0KQiGeD7m6Up05VUBrA/6jy9nAd7ro+AbIhpyh07OYcPILxAQ==',
+  value: 'eBiYy8/X9fkZ8KHEZ957bPXjzxze+VQyEhgB5nyZdLCiJpgT4xnsYwXeiOk16BWOc2kyeYhSe8MeV/chbqB0CA==',
 }]
