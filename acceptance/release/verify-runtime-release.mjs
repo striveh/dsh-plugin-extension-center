@@ -449,7 +449,7 @@ async function installedProfile(dshBin, profileRoot, artifact, forbidden, cwd, e
     || bundles.filter(value => value === CENTER_PACKAGE).length !== 1
     || installedManifest.name !== CENTER_PACKAGE || installedManifest.version !== artifact.version
     || !lockfile.includes(`specifier: file:${artifact.source}`)
-    || !dump.includes('# == dsh-plugin-extension-center') || !dump.includes('name: dsh-plugin-extension-center')
+    || !dump.stdout.includes('# == dsh-plugin-extension-center') || !dump.stdout.includes('name: dsh-plugin-extension-center')
     || installedPnpmTreeSha256 !== artifact.pnpmTreeSha256
     || forbidden !== null && (lockfile.includes(`file:${forbidden.source}`)
       || lockfile.includes(basename(forbidden.source)))) {
