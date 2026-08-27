@@ -187,7 +187,26 @@ function legacyR8Document(): SignedCatalogDocument {
   })
 }
 
-async function publicR10Document(): Promise<SignedCatalogDocument> {
+function legacyR9Document(): SignedCatalogDocument {
+  return Object.freeze({
+    envelope: Object.freeze({
+      catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
+      revision: 9,
+      issuedAt: '2026-08-26T19:10:08.000Z',
+      expiresAt: '2027-08-26T19:10:08.000Z',
+      previousRevisionDigest: 'sha256:10e514360a51e55ca6b27822ebd4eead754ef5b53d70e2af4acffd91286aa4f5',
+      entriesDigest: 'sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86',
+      entries: BOOTSTRAP_CATALOG_ENTRIES,
+    }),
+    signatures: Object.freeze([{
+      keyId: 'bootstrap-2026-08-26-8',
+      algorithm: 'ed25519' as const,
+      value: 'eBiYy8/X9fkZ8KHEZ957bPXjzxze+VQyEhgB5nyZdLCiJpgT4xnsYwXeiOk16BWOc2kyeYhSe8MeV/chbqB0CA==',
+    }]),
+  })
+}
+
+async function publicR11Document(): Promise<SignedCatalogDocument> {
   const bytes = await readFile(join(process.cwd(), 'catalog', 'public', 'plugins.json'), 'utf8')
   return JSON.parse(bytes) as SignedCatalogDocument
 }
@@ -380,11 +399,15 @@ describe('live admitted catalog snapshot', () => {
     expect(manager.current().catalog.envelope.entriesDigest).toBe(BOOTSTRAP_CATALOG_ENVELOPE.entriesDigest)
   })
 
-  it('atomically rebases a verified older cache and refreshes the same Profile to the adjacent public catalog', async () => {
+  it('trims the retained rc.2 cache and refreshes the same Profile to the adjacent public catalog', async () => {
     const root = await scratch()
-    const legacy = legacyR8Document()
-    const remote = await publicR10Document()
-    const cachePath = await writeCatalogCache(root, [legacy])
+    const legacy = legacyR9Document()
+    const current = Object.freeze({
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    })
+    const remote = await publicR11Document()
+    const cachePath = await writeCatalogCache(root, [legacy, current])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
     let calls = 0
     expect(canonicalSha256(legacy.envelope)).toBe(BOOTSTRAP_CATALOG_ENVELOPE.previousRevisionDigest)
@@ -395,6 +418,8 @@ describe('live admitted catalog snapshot', () => {
       now: () => now,
       fetch: (async () => {
         calls += 1
+        expect((await readCatalogCache(cachePath)).chain
+          .map(document => document.envelope.revision)).toEqual([10])
         return responseAt(CATALOG_URL, canonicalJson(remote), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -403,16 +428,35 @@ describe('live admitted catalog snapshot', () => {
     })
 
     await expect(manager.initialize()).resolves.toMatchObject({
-      catalog: { envelope: { revision: 10 } },
+      catalog: { envelope: { revision: 11 } },
       status: { source: 'remote', freshness: 'fresh', degraded: false },
     })
     expect(calls).toBe(1)
     const persisted = await readCatalogCache(cachePath)
-    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([9, 10])
+    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([10, 11])
     expect(persisted.chain[0]).toEqual({
       envelope: BOOTSTRAP_CATALOG_ENVELOPE,
       signatures: BOOTSTRAP_CATALOG_SIGNATURES,
     })
+  })
+
+  it('rebases a verified rc.0-only cache directly to the stable bootstrap without network access', async () => {
+    const root = await scratch()
+    const cachePath = await writeCatalogCache(root, [legacyR8Document()])
+    const manager = new CatalogSnapshotManager(root, { trustedUrl: null, fetchTimeoutMs: 5_000 }, {
+      now: () => NOW,
+      fetch: globalThis.fetch,
+    })
+
+    await expect(manager.initialize()).resolves.toMatchObject({
+      catalog: { envelope: { revision: 10 } },
+      status: { source: 'bootstrap', freshness: 'bootstrap', degraded: false },
+    })
+    const persisted = await readCatalogCache(cachePath)
+    expect(persisted.chain).toEqual([{
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }])
   })
 
   it('queues same-process cache writers before a second callback can enter', async () => {
@@ -439,8 +483,11 @@ describe('live admitted catalog snapshot', () => {
 
   it('keeps the newest durable chain when two processes finish stale refreshes out of order', async () => {
     const root = await scratch()
-    const remote = await publicR10Document()
-    const cachePath = await writeCatalogCache(root, [legacyR8Document()])
+    const remote = await publicR11Document()
+    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
 
     const stale = startCatalogWorker('stale', root, now)
@@ -448,7 +495,7 @@ describe('live admitted catalog snapshot', () => {
 
     const winner = startCatalogWorker('winner', root, now)
     await expect(winner.message('done')).resolves.toMatchObject({
-      revision: 10,
+      revision: 11,
       source: 'remote',
       freshness: 'fresh',
       degraded: false,
@@ -457,11 +504,11 @@ describe('live admitted catalog snapshot', () => {
     await waitForCatalogWorker(winner)
     const winnerBytes = await readFile(cachePath, 'utf8')
     expect((JSON.parse(winnerBytes) as { chain: SignedCatalogDocument[] }).chain
-      .map(document => document.envelope.revision)).toEqual([9, 10])
+      .map(document => document.envelope.revision)).toEqual([10, 11])
 
     stale.child.send({ command: 'release' })
     await expect(stale.message('done')).resolves.toMatchObject({
-      revision: 10,
+      revision: 11,
       source: 'last-good',
       freshness: 'cached',
       degraded: true,
@@ -475,7 +522,7 @@ describe('live admitted catalog snapshot', () => {
       fetch: globalThis.fetch,
     })
     await expect(reopened.initialize()).resolves.toMatchObject({
-      catalog: { envelope: { revision: 10 } },
+      catalog: { envelope: { revision: 11 } },
       status: { source: 'last-good', freshness: 'cached', degraded: false },
     })
     expect((await readdir(join(root, 'catalog'))).filter(name => (
@@ -485,20 +532,23 @@ describe('live admitted catalog snapshot', () => {
 
   it('adopts a newer durable chain after another process wins and this process fetch fails', async () => {
     const root = await scratch()
-    const remote = await publicR10Document()
-    const cachePath = await writeCatalogCache(root, [legacyR8Document()])
+    const remote = await publicR11Document()
+    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
 
     const offline = startCatalogWorker('stale-offline', root, now)
     await expect(offline.message('fetch-entered')).resolves.toEqual({ event: 'fetch-entered' })
     const winner = startCatalogWorker('winner', root, now)
-    await expect(winner.message('done')).resolves.toMatchObject({ revision: 10, degraded: false })
+    await expect(winner.message('done')).resolves.toMatchObject({ revision: 11, degraded: false })
     await waitForCatalogWorker(winner)
     const winnerBytes = await readFile(cachePath, 'utf8')
 
     offline.child.send({ command: 'release' })
     await expect(offline.message('done')).resolves.toMatchObject({
-      revision: 10,
+      revision: 11,
       source: 'last-good',
       freshness: 'cached',
       degraded: true,
@@ -510,9 +560,13 @@ describe('live admitted catalog snapshot', () => {
 
   it('releases the cross-process writer reservation when its owner crashes', async () => {
     const root = await scratch()
-    const remote = await publicR10Document()
-    const cachePath = await writeCatalogCache(root, [legacyR8Document()])
+    const remote = await publicR11Document()
+    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
+    const beforeCrash = await readFile(cachePath, 'utf8')
 
     const crashed = startCatalogWorker('lock-crash', root, now)
     await expect(crashed.message('locked')).resolves.toEqual({ event: 'locked' })
@@ -536,27 +590,28 @@ describe('live admitted catalog snapshot', () => {
     } finally {
       recovered.close()
     }
+    expect(await readFile(cachePath, 'utf8')).toBe(beforeCrash)
 
     const successor = startCatalogWorker('winner', root, now)
     await expect(successor.message('done')).resolves.toMatchObject({
-      revision: 10,
+      revision: 11,
       source: 'remote',
       freshness: 'fresh',
       degraded: false,
     })
     await waitForCatalogWorker(successor)
     const persisted = await readCatalogCache(cachePath)
-    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([9, 10])
+    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([10, 11])
     expect((await readdir(join(root, 'catalog'))).filter(name => name.endsWith('-journal'))).toEqual([])
   })
 
   it('trims a verified legacy prefix while retaining the current bootstrap suffix', async () => {
-    const legacy = legacyR8Document()
+    const legacy = legacyR9Document()
     const current = Object.freeze({
       envelope: BOOTSTRAP_CATALOG_ENVELOPE,
       signatures: BOOTSTRAP_CATALOG_SIGNATURES,
     })
-    const remote = await publicR10Document()
+    const remote = await publicR11Document()
     for (const chain of [[legacy, current], [legacy, current, remote]]) {
       const root = await scratch()
       const cachePath = await writeCatalogCache(root, chain)
@@ -567,19 +622,19 @@ describe('live admitted catalog snapshot', () => {
       await manager.initialize()
       const persisted = await readCatalogCache(cachePath)
       expect(persisted.chain.map(document => document.envelope.revision)).toEqual(
-        chain.length === 2 ? [9] : [9, 10],
+        chain.length === 2 ? [10] : [10, 11],
       )
       expect(manager.current().catalog.envelope.revision).toBe(chain.at(-1)!.envelope.revision)
     }
   })
 
   it('rejects equivocated, future, gapped, and signature-drifted rollover caches without fetching or rewriting', async () => {
-    const legacy = legacyR8Document()
+    const legacy = legacyR9Document()
     const current = Object.freeze({
       envelope: BOOTSTRAP_CATALOG_ENVELOPE,
       signatures: BOOTSTRAP_CATALOG_SIGNATURES,
     })
-    const remote = await publicR10Document()
+    const remote = await publicR11Document()
     const cases: readonly (readonly SignedCatalogDocument[])[] = [
       [{
         envelope: { ...legacy.envelope, entriesDigest: canonicalSha256([]), entries: [] },
@@ -617,9 +672,12 @@ describe('live admitted catalog snapshot', () => {
     }
   })
 
-  it('leaves the legacy bytes intact when the durable rollover replacement cannot start', async () => {
+  it('leaves the rc.2 cache bytes intact when the durable stable rollover replacement cannot start', async () => {
     const root = await scratch()
-    const cachePath = await writeCatalogCache(root, [legacyR8Document()])
+    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }])
     const directory = join(root, 'catalog')
     const before = await readFile(cachePath, 'utf8')
     await chmod(directory, 0o500)

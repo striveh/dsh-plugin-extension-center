@@ -26,12 +26,12 @@ import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 const VALID_NOW = Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1
 
 describe('signed bootstrap catalog', () => {
-  it('verifies revision 9 and projects exact update candidates across all three extension kinds', () => {
+  it('verifies revision 10 and projects exact update candidates across all three extension kinds', () => {
     const catalog = verifyBootstrapCatalog(VALID_NOW)
     const response = catalogListResponse(catalog)
     expect(catalog.keyIds).toEqual(['bootstrap-2026-08-26-8'])
-    expect(BOOTSTRAP_CATALOG_ROOT.minimumRevision).toBe(9)
-    expect(response.catalog).toMatchObject({ revision: 9, signatureStatus: 'verified' })
+    expect(BOOTSTRAP_CATALOG_ROOT.minimumRevision).toBe(10)
+    expect(response.catalog).toMatchObject({ revision: 10, signatureStatus: 'verified' })
     expect(response.entries.map(entry => entry.kind)).toEqual([
       'mcp', 'mcp', 'plugin', 'plugin', 'skill', 'skill', 'skill',
     ])

@@ -572,7 +572,7 @@ const wikiPageWriterV2: CatalogEntry = {
   }, ...wikiPageWriterV1.verification.slice(1)],
 }
 
-/** Curated entries in bootstrap revision 9. Free-form upstream text is not included. */
+/** Curated entries in bootstrap revision 10. Free-form upstream text is not included. */
 export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [
   filesystemMcpV122,
   filesystemMcpV130,
@@ -586,7 +586,7 @@ export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [
 /** Packaged trust root. The private signing key is not part of this repository. */
 export const BOOTSTRAP_CATALOG_ROOT: CatalogRoot = {
   catalogId: 'dsh-extension-center-public',
-  minimumRevision: 9,
+  minimumRevision: 10,
   maximumAgeMs: 366 * 24 * 60 * 60 * 1000,
   threshold: 1,
   keys: [{
@@ -599,10 +599,10 @@ export const BOOTSTRAP_CATALOG_ROOT: CatalogRoot = {
 /** Immutable bootstrap catalog shipped for fully offline Store discovery. */
 export const BOOTSTRAP_CATALOG_ENVELOPE: CatalogEnvelope = {
   catalogId: 'dsh-extension-center-public',
-  revision: 9,
-  issuedAt: '2026-08-26T19:10:08.000Z',
-  expiresAt: '2027-08-26T19:10:08.000Z',
-  previousRevisionDigest: 'sha256:10e514360a51e55ca6b27822ebd4eead754ef5b53d70e2af4acffd91286aa4f5',
+  revision: 10,
+  issuedAt: '2026-08-27T17:40:32.000Z',
+  expiresAt: '2027-08-27T17:40:32.000Z',
+  previousRevisionDigest: 'sha256:c559ca39429f6c72e82ddb08bc13636e226e39e0b27f04c8d30495ae57007e7e',
   entriesDigest: 'sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86',
   entries: BOOTSTRAP_CATALOG_ENTRIES,
 }
@@ -611,5 +611,5 @@ export const BOOTSTRAP_CATALOG_ENVELOPE: CatalogEnvelope = {
 export const BOOTSTRAP_CATALOG_SIGNATURES: readonly CatalogSignature[] = [{
   keyId: 'bootstrap-2026-08-26-8',
   algorithm: 'ed25519',
-  value: 'eBiYy8/X9fkZ8KHEZ957bPXjzxze+VQyEhgB5nyZdLCiJpgT4xnsYwXeiOk16BWOc2kyeYhSe8MeV/chbqB0CA==',
+  value: '1/b2bZKc3l4k7HoSmRN2YvgJPp64blLhYuyeCC/6zh39HOwT3cKe4SqbHiL+JANIDEbQNcAZwg4NoGY4dHHMCA==',
 }]
