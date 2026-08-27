@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { AcceptanceFailure } from '../full-p0/support.mjs'
+import { gzipSync } from 'node:zlib'
+import { AcceptanceFailure, immutablePackageTreeDigest } from '../full-p0/support.mjs'
 import { canonicalSha256 } from '../full-p0/receipt-binding.mjs'
 import {
   REQUIRED_CI_JOBS,
+  boundedPackedPnpmTreeDigest,
+  inspectPackedPnpmTreeSha256,
   parseGitHubCiArguments,
   runBuffered,
   runGitHubCiAcceptance,
@@ -179,6 +182,7 @@ function packArtifactFixture() {
     sumsText,
     sumsBytes: Buffer.from(sumsText),
     tgzBytes,
+    packedPnpmTreeSha256: artifact.pnpmTreeSha256,
   }
 }
 
@@ -212,6 +216,10 @@ test('binds the exact successful main push and every current required job', () =
   assert.equal(receipt.target.commit, COMMIT)
   assert.equal(receipt.run.attempt, ATTEMPT)
   assert.equal(receipt.packAttestation.sha256, evidence().packArtifact.attestation.artifact.sha256)
+  assert.equal(
+    receipt.packAttestation.pnpmTreeSha256,
+    evidence().packArtifact.attestation.artifact.pnpmTreeSha256,
+  )
   assert.equal(receipt.packAttestation.actionsArtifactId, 777)
   assert.deepEqual(receipt.packAttestation.releaseAssets.map(asset => asset.name), [
     'dsh-plugin-extension-center-0.1.0-rc.0.tgz',
@@ -303,6 +311,63 @@ test('rejects a tampered tgz, attestation, Actions digest, or cross-run artifact
   }
 })
 
+test('rejects an attested pnpm tree that differs from the recomputed packed tree', () => {
+  const input = evidence()
+  input.packArtifact.packedPnpmTreeSha256 = `sha256:${'0'.repeat(64)}`
+  assert.throws(
+    () => validateExactCommitCiEvidence(input),
+    acceptanceCode('P0-GITHUB-CI-PACK-ATTESTATION'),
+  )
+})
+
+test('recomputes the bundled pnpm tree from release tarball bytes', async () => {
+  await withTemporaryDirectory(async root => {
+    const packageRoot = join(root, 'package', 'node_modules', 'pnpm')
+    await mkdir(join(packageRoot, 'bin'), { recursive: true })
+    await writeFile(join(packageRoot, 'package.json'), '{"name":"pnpm","version":"11.21.0"}\n')
+    await writeFile(join(packageRoot, 'bin', 'pnpm.mjs'), 'export {}\n')
+    const expected = await immutablePackageTreeDigest(packageRoot)
+    const archivePath = join(root, 'release.tgz')
+    await runBuffered(
+      'tar',
+      ['-czf', archivePath, '-C', root, 'package'],
+      1024,
+      'P0-GITHUB-CI-PACK-ARCHIVE',
+    )
+    assert.equal(
+      await inspectPackedPnpmTreeSha256(await readFile(archivePath)),
+      expected,
+    )
+  })
+})
+
+test('rejects a compressed tarball whose uncompressed bytes exceed the pack bound', async () => {
+  const oneMegabyteMember = gzipSync(Buffer.alloc(1024 * 1024))
+  const oversized = Buffer.concat(Array.from({ length: 65 }, () => oneMegabyteMember))
+  await assert.rejects(
+    inspectPackedPnpmTreeSha256(oversized),
+    acceptanceCode('P0-GITHUB-CI-PACK-ARCHIVE'),
+  )
+})
+
+test('rejects an extracted sparse pnpm file whose logical size exceeds the file bound', async () => {
+  await withTemporaryDirectory(async root => {
+    const packageRoot = join(root, 'pnpm')
+    await mkdir(packageRoot)
+    const sparsePath = join(packageRoot, 'sparse.bin')
+    const sparse = await open(sparsePath, 'wx')
+    try {
+      await sparse.truncate(65 * 1024 * 1024)
+    } finally {
+      await sparse.close()
+    }
+    await assert.rejects(
+      boundedPackedPnpmTreeDigest(packageRoot, 'P0-GITHUB-CI-PACK-ARCHIVE'),
+      acceptanceCode('P0-GITHUB-CI-PACK-ARCHIVE'),
+    )
+  })
+})
+
 test('fetches only the exact workflow and attempt endpoints and writes an immutable receipt', async () => {
   await withTemporaryDirectory(async root => {
     const input = evidence()
@@ -384,6 +449,7 @@ test('downloads one real GitHub-style 302 ZIP without forwarding the API token t
       observedAt: input.observedAt,
       receiptPath: join(root, 'receipt.json'),
       token: 'test-token',
+      packedPnpmTreeInspector: async () => input.packArtifact.packedPnpmTreeSha256,
       fetchImpl: async (url, init) => {
         calls.push({ url: String(url), init })
         if (responses.length > 0) return responses.shift()

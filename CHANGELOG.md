@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Fixed
 
+- Upgrade the private bundled recovery runtime from pnpm 11.7.0 to 11.21.0 and rebind its registry integrity, closing the high-severity `GHSA-qrv3-253h-g69c` path-traversal advisory before another candidate is published. Exact rc.0 records remain readable history, while unfinished operations and failed Plugin journals still referenced by durable owner state retain their target quarantine and never expose or execute the retired runtime. Provider apply ambiguity now remains nonterminal instead of issuing an unsafe failed receipt.
 - Pass verifier flags directly through pnpm 11 in post-publication and catalog-discovery workflows so the strict CLI decoders receive no synthetic `--` argument.
 - Keep the Profile lease durable through official CLI dispatch, a monotonic private child outcome, detached-process-group shutdown, and exact marker cleanup in both normal and standalone break-glass execution; the supervisor owns group termination through its hard-kill deadline, so resistant descendants cannot outlive it and the caller never signals a reaped group leader.
 - Enforce the fixed rc.0 to rc.1 to stable promotion sequence and revalidate the embedded stage and artifact history of every previous release-ready receipt.

@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OfficialDshPluginCli } from '../src/internal/plugin/index.ts'
 import { captureCurrentProcessIdentity } from '../src/host/process-identity.ts'
-import type { OfficialDshRecoveryBinding } from '../src/plans/index.ts'
+import { RETIRED_PNPM_EXECUTION_IDENTITY, type OfficialDshRecoveryBinding } from '../src/plans/index.ts'
 import { installRecoveryExecutable } from '../src/recovery/install.ts'
 import { prepareProfileMetadataCache } from '../src/recovery/profile-metadata-cache.ts'
 
@@ -355,6 +355,8 @@ describe('official DSH Plugin CLI adapter', () => {
       'dsh-llm-replay.jsonl',
     )
     const records = (await readFile(metadataPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    const fullMetadataPath = metadataPath.replace('/metadata/', '/metadata-full/')
+    expect(await readFile(fullMetadataPath)).toEqual(await readFile(metadataPath))
     expect(records).toHaveLength(2)
     expect(records[1]).toMatchObject({
       name: packageName,
@@ -536,6 +538,21 @@ describe('official DSH Plugin CLI adapter', () => {
 
     await writeFile(cache.manifestPath, Buffer.concat([await readFile(cache.manifestPath), Buffer.from(' ')]))
     await expect(cli.audit('web', cache, false)).rejects.toThrow('manifest digest changed')
+    await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  it('rejects a retired private pnpm identity before probing or spawning official DSH', async () => {
+    const fixture = await officialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const current = await bindFixture(fixture)
+    const cache = await prepareProfileMetadataCache(current, 'web')
+    const retired = structuredClone(current)
+    Object.assign(retired.pnpm, RETIRED_PNPM_EXECUTION_IDENTITY)
+
+    await expect(prepareProfileMetadataCache(retired, 'web'))
+      .rejects.toThrow('retired private pnpm identity cannot prepare official DSH execution metadata')
+    await expect(new OfficialDshPluginCli(retired).remove('web', 'fixture-plugin', cache))
+      .rejects.toThrow('retired private pnpm identity cannot execute official DSH')
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 

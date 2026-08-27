@@ -422,10 +422,22 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         hostHome: resolved.hostHome,
         timeoutMs: resolved.dshCliTimeoutMs,
       })
+      const retiredPluginObligations = new Set<string>()
+      const retiredPluginTargets = new Set<string>()
+      const obligationKey = (operationId: string, targetKey: string, profileId: string): string => (
+        `${operationId}\0${targetKey}\0${profileId}`
+      )
+      const targetObligationKey = (targetKey: string, profileId: string): string => `${targetKey}\0${profileId}`
       const plugin = new PluginLifecycleProvider(state, loader, {
         hostHome: resolved.hostHome,
         centerPackageName: 'dsh-plugin-extension-center',
         officialDsh: recoveryExecutable.officialDsh,
+        isOperationQuarantined: (operationId, targetKey, profileId) => (
+          retiredPluginObligations.has(obligationKey(operationId, targetKey, profileId))
+        ),
+        isTargetQuarantined: (targetKey, profileId) => (
+          retiredPluginTargets.has(targetObligationKey(targetKey, profileId))
+        ),
       })
       const owners = bindHostOwners(ownerHost, {
         managedPlugins: plugin,
@@ -446,11 +458,6 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       )
       ownerContext.effect(() => () => generation.retire(), 'extension-center: runtime generation')
       generation.start(async (signal) => {
-        try {
-          await plugin.initialize()
-        } catch (error: unknown) {
-          if (!isOfficialProfileAmbiguityError(error)) throw error
-        }
         const runtime = createRuntime(
           resolved,
           state,
@@ -461,6 +468,19 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           plugin,
           recoveryExecutable,
         )
+        for (const obligation of await runtime.runner.retiredPluginObligations(signal)) {
+          retiredPluginObligations.add(obligationKey(
+            obligation.operationId,
+            obligation.targetKey,
+            obligation.profileId,
+          ))
+          retiredPluginTargets.add(targetObligationKey(obligation.targetKey, obligation.profileId))
+        }
+        try {
+          await plugin.initialize()
+        } catch (error: unknown) {
+          if (!isOfficialProfileAmbiguityError(error)) throw error
+        }
         generation.addResource(runtime.skill.register())
         await runtime.runner.recover(signal)
         const acquisition = new CapabilityAcquisitionService(

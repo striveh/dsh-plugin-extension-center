@@ -36,7 +36,7 @@ interface OfficialDshRecoveryBinding {
     readonly pnpm: Readonly<{
         schemaVersion: 1;
         packageName: 'pnpm';
-        packageVersion: '11.7.0';
+        packageVersion: '11.21.0';
         registryIntegrity: string;
         packageRoot: string;
         packageTreeSha256: string;

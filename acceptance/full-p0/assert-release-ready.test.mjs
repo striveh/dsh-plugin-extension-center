@@ -18,6 +18,7 @@ const CURRENT = Object.freeze({
   sha256: `sha256:${'c'.repeat(64)}`,
   sizeBytes: 1234,
   manifestSha256: `sha256:${'d'.repeat(64)}`,
+  pnpmTreeSha256: `sha256:${'5'.repeat(64)}`,
   sourceCommit: 'e'.repeat(40),
 })
 const PREVIOUS = Object.freeze({
@@ -25,8 +26,29 @@ const PREVIOUS = Object.freeze({
   sha256: `sha256:${'f'.repeat(64)}`,
   sizeBytes: 1200,
   manifestSha256: `sha256:${'1'.repeat(64)}`,
+  pnpmTreeSha256: `sha256:${'6'.repeat(64)}`,
   sourceCommit: '2'.repeat(40),
 })
+const VERIFIER = Object.freeze({
+  ...CURRENT,
+  sha256: `sha256:${'7'.repeat(64)}`,
+  manifestSha256: `sha256:${'8'.repeat(64)}`,
+  pnpmTreeSha256: `sha256:${'9'.repeat(64)}`,
+  sourceCommit: 'a'.repeat(40),
+})
+
+function verifierIdentity(target, verifier, runId) {
+  return {
+    repository: 'striveh/dsh-plugin-extension-center',
+    workflowPath: '.github/workflows/post-publication-evidence.yml',
+    ref: 'refs/heads/main',
+    refProtected: true,
+    commit: verifier.sourceCommit,
+    runId,
+    runAttempt: 1,
+    mode: verifier.sourceCommit === target.sourceCommit ? 'same-commit' : 'rc0-backfill',
+  }
+}
 
 function releasePayload(artifact) {
   return [
@@ -101,7 +123,7 @@ function releaseArtifact(artifact) {
       entryCount: 100,
       payloadTreeSha256: `sha256:${'3'.repeat(64)}`,
       patchSha256: `sha256:${'4'.repeat(64)}`,
-      bundledPnpmTreeSha256: `sha256:${'5'.repeat(64)}`,
+      bundledPnpmTreeSha256: artifact.pnpmTreeSha256,
     },
   }
 }
@@ -113,6 +135,7 @@ function releaseReadyArtifact(artifact) {
     sha256: artifact.sha256,
     sizeBytes: artifact.sizeBytes,
     manifestSha256: artifact.manifestSha256,
+    pnpmTreeSha256: artifact.pnpmTreeSha256,
     sourceCommit: artifact.sourceCommit,
     releaseId: released.release.releaseId,
     releasePayload: released.releasePayload.map(({ name, sizeBytes, sha256 }) => ({ name, sizeBytes, sha256 })),
@@ -124,8 +147,9 @@ function releaseReadyArtifact(artifact) {
   }
 }
 
-function previousReleaseReadyReceipt(artifact = PREVIOUS) {
+function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact) {
   const ci = githubCiReceipt(artifact)
+  const verifierCi = githubCiReceipt(verifier)
   const body = {
     schemaVersion: 2,
     acceptanceId: 'P0-EXTENSION-CENTER-RELEASE-READY',
@@ -133,6 +157,7 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS) {
     p0Status: 'rc0-bootstrap-release-ready',
     releaseStage: 'bootstrap-rc0',
     generatedAt: '2026-08-27T00:05:00.000Z',
+    verifier: verifierIdentity(artifact, verifier, 99),
     target: {
       repository: 'striveh/dsh-plugin-extension-center',
       sourceCommit: artifact.sourceCommit,
@@ -192,6 +217,14 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS) {
         sha256: `sha256:${'6'.repeat(64)}`,
         receiptDigest: ci.receiptDigest,
         runId: ci.run.id,
+      },
+      verifierGithubCi: {
+        acceptanceId: 'P0-GITHUB-CI-EXACT-COMMIT',
+        sha256: `sha256:${'5'.repeat(64)}`,
+        receiptDigest: verifierCi.receiptDigest,
+        commit: verifierCi.target.commit,
+        runId: verifierCi.run.id,
+        runAttempt: verifierCi.run.attempt,
       },
       previousGithubCi: null,
       previousReleaseReady: null,
@@ -255,6 +288,7 @@ function boundArtifact(artifact) {
     version: artifact.version,
     sha256: artifact.sha256,
     manifestSha256: artifact.manifestSha256,
+    pnpmTreeSha256: artifact.pnpmTreeSha256,
     sourceCommit: artifact.sourceCommit,
   }
 }
@@ -366,6 +400,7 @@ function runtimeReceipt(previous = PREVIOUS, current = CURRENT) {
         removalExactBaselineRestored: true,
       },
       previous: previous === null ? null : {
+        installedPnpmTreeSha256: previous.pnpmTreeSha256,
         catalogRevision: EXPECTED_PUBLIC_CATALOG.previousRevision - 1,
         catalogEntriesDigest: PREVIOUS_BOOTSTRAP_ENTRIES,
         browserExternalRequests: [],
@@ -373,6 +408,7 @@ function runtimeReceipt(previous = PREVIOUS, current = CURRENT) {
         browserConsoleFailures: [],
       },
       current: {
+        installedPnpmTreeSha256: current.pnpmTreeSha256,
         catalogRevision: EXPECTED_PUBLIC_CATALOG.revision,
         catalogEntriesDigest: EXPECTED_PUBLIC_CATALOG.entriesDigest,
         browserExternalRequests: [],
@@ -434,6 +470,12 @@ function publicReceipt(previous = PREVIOUS, current = CURRENT) {
     },
     observations: {
       ascendingDistinctReleaseUpdate: update,
+      previousInstall: previous === null ? null : {
+        bundledPnpmTreeSha256: previous.pnpmTreeSha256,
+      },
+      currentInstall: {
+        bundledPnpmTreeSha256: current.pnpmTreeSha256,
+      },
       removal: { exactBaselineRestored: true },
       officialDshPackageTreeUnchanged: true,
       runtimeAcceptanceRequiredAndBound: true,
@@ -575,7 +617,7 @@ function githubCiReceipt(current = CURRENT) {
       ...current,
       filename: `dsh-plugin-extension-center-${current.version}.tgz`,
       sourceManifestSha256: `sha256:${'f'.repeat(64)}`,
-      pnpmTreeSha256: `sha256:${'1'.repeat(64)}`,
+      pnpmTreeSha256: current.pnpmTreeSha256,
       releaseAssets: releasePayload(current),
     },
     notProven: [],
@@ -583,12 +625,14 @@ function githubCiReceipt(current = CURRENT) {
   return { ...body, receiptDigest: canonicalSha256(body) }
 }
 
-function evidence(previous = PREVIOUS, current = CURRENT) {
+function evidence(previous = PREVIOUS, current = CURRENT, verifier = current, previousVerifier = previous) {
   const runtimeRelease = runtimeReceipt(previous, current)
   const publicRelease = publicReceipt(previous, current)
   const githubCi = githubCiReceipt(current)
+  const verifierGithubCi = githubCiReceipt(verifier)
   const previousGithubCi = previous === null ? null : githubCiReceipt(previous)
-  const previousReleaseReady = previous === null ? null : previousReleaseReadyReceipt(previous)
+  const previousVerifierGithubCi = previous === null ? null : githubCiReceipt(previousVerifier)
+  const previousReleaseReady = previous === null ? null : previousReleaseReadyReceipt(previous, previousVerifier)
   runtimeRelease.ciPackAttestation.receiptDigest = githubCi.receiptDigest
   publicRelease.inputs.ciPackAttestation.receiptDigest = githubCi.receiptDigest
   if (previousGithubCi !== null) {
@@ -601,7 +645,10 @@ function evidence(previous = PREVIOUS, current = CURRENT) {
     publicCatalog: publicCatalogReceipt(),
     catalogSources: catalogSourceReceipt(),
     githubCi,
+    verifierGithubCi,
+    verifier: verifierIdentity(current, verifier, 314),
     previousGithubCi,
+    previousVerifierGithubCi,
     previousReleaseReady,
     previousEvidenceRunId: previous === null ? null : 99,
     receiptDigests: {
@@ -611,7 +658,9 @@ function evidence(previous = PREVIOUS, current = CURRENT) {
       publicCatalog: `sha256:${'b'.repeat(64)}`,
       catalogSources: `sha256:${'d'.repeat(64)}`,
       githubCi: `sha256:${'c'.repeat(64)}`,
+      verifierGithubCi: `sha256:${'5'.repeat(64)}`,
       previousGithubCi: previousGithubCi === null ? null : `sha256:${'6'.repeat(64)}`,
+      previousVerifierGithubCi: previousVerifierGithubCi === null ? null : `sha256:${'5'.repeat(64)}`,
       previousReleaseReady: previousReleaseReady === null ? null : `sha256:${'7'.repeat(64)}`,
     },
     generatedAt: '2026-08-27T00:10:00.000Z',
@@ -623,7 +672,10 @@ test('aggregates rc.1 update evidence into one exact-commit P0 release receipt',
   assert.equal(receipt.p0Status, 'p0-release-ready')
   assert.equal(receipt.releaseStage, 'update-rc')
   assert.equal(receipt.target.sourceCommit, CURRENT.sourceCommit)
+  assert.deepEqual(receipt.verifier, verifierIdentity(CURRENT, CURRENT, 314))
+  assert.equal(receipt.evidence.verifierGithubCi.commit, CURRENT.sourceCommit)
   assert.equal(receipt.artifacts.previous.version, PREVIOUS.version)
+  assert.equal(receipt.artifacts.current.pnpmTreeSha256, CURRENT.pnpmTreeSha256)
   assert.equal(receipt.claims.publicPreviousToCurrentUpdate, true)
   assert.equal(receipt.claims.signedCatalogPreviousToCurrentUpdate, true)
   assert.equal(receipt.evidence.previousReleaseReady.runId, 99)
@@ -638,8 +690,10 @@ test('aggregates rc.1 update evidence into one exact-commit P0 release receipt',
 
 test('accepts rc.0 only as an explicit bootstrap with update still unproven', () => {
   const rc0 = { ...CURRENT, version: '0.1.0-rc.0' }
-  const receipt = assertReleaseReady(evidence(null, rc0))
+  const receipt = assertReleaseReady(evidence(null, rc0, VERIFIER))
   assert.equal(receipt.p0Status, 'rc0-bootstrap-release-ready')
+  assert.equal(receipt.verifier.mode, 'rc0-backfill')
+  assert.equal(receipt.verifier.commit, VERIFIER.sourceCommit)
   assert.equal(receipt.claims.publicPreviousToCurrentUpdate, false)
   assert.equal(receipt.claims.signedCatalogPreviousToCurrentUpdate, false)
   assert.deepEqual(receipt.notProven, [
@@ -649,6 +703,57 @@ test('accepts rc.0 only as an explicit bootstrap with update still unproven', ()
     'catalog-human-authority-review-independent-reexecution',
     'catalog-future-source-availability-or-status',
   ])
+})
+
+test('permits a distinct verifier only for the immutable rc.0 bootstrap', () => {
+  assert.throws(
+    () => assertReleaseReady(evidence(PREVIOUS, CURRENT, VERIFIER)),
+    /only immutable rc\.0 may use a distinct verifier commit/u,
+  )
+
+  const input = structuredClone(evidence())
+  input.verifier.commit = VERIFIER.sourceCommit
+  assert.throws(() => assertReleaseReady(input), /verifier GitHub CI commit/u)
+})
+
+test('accepts rc.1 consuming an rc.0 receipt backfilled by a distinct protected-main verifier', () => {
+  const receipt = assertReleaseReady(evidence(PREVIOUS, CURRENT, CURRENT, VERIFIER))
+  assert.equal(receipt.releaseStage, 'update-rc')
+  assert.equal(receipt.verifier.mode, 'same-commit')
+  assert.equal(receipt.evidence.previousReleaseReady.runId, 99)
+})
+
+test('rejects drift in the verifier CI consumed from an rc.0 backfill receipt', () => {
+  const input = structuredClone(evidence(PREVIOUS, CURRENT, CURRENT, VERIFIER))
+  input.previousVerifierGithubCi.target.commit = 'b'.repeat(40)
+  input.previousVerifierGithubCi.run.headSha = 'b'.repeat(40)
+  input.previousVerifierGithubCi.packAttestation.sourceCommit = 'b'.repeat(40)
+  const { receiptDigest: _oldDigest, ...body } = input.previousVerifierGithubCi
+  input.previousVerifierGithubCi.receiptDigest = canonicalSha256(body)
+  assert.throws(
+    () => assertReleaseReady(input),
+    /previous release-ready receipt does not bind its exact verifier GitHub CI receipt/u,
+  )
+})
+
+test('rejects verifier workflow identity or CI binding drift', () => {
+  for (const mutate of [
+    input => { input.verifier.repository = 'other/repository' },
+    input => { input.verifier.workflowPath = '.github/workflows/other.yml' },
+    input => { input.verifier.ref = 'refs/heads/feature' },
+    input => { input.verifier.refProtected = false },
+    input => {
+      input.verifierGithubCi.target.commit = VERIFIER.sourceCommit
+      input.verifierGithubCi.run.headSha = VERIFIER.sourceCommit
+      input.verifierGithubCi.packAttestation.sourceCommit = VERIFIER.sourceCommit
+      const { receiptDigest: _oldDigest, ...body } = input.verifierGithubCi
+      input.verifierGithubCi.receiptDigest = canonicalSha256(body)
+    },
+  ]) {
+    const input = structuredClone(evidence())
+    mutate(input)
+    assert.throws(() => assertReleaseReady(input), /verifier/u)
+  }
 })
 
 test('rejects rc.1 without previous-to-current evidence', () => {
@@ -685,6 +790,8 @@ test('rejects a re-digested previous release-ready receipt with missing or drift
     input => { input.previousReleaseReady.evidence = {} },
     input => { input.previousReleaseReady.evidence.githubCi.receiptDigest = `sha256:${'0'.repeat(64)}` },
     input => { input.previousReleaseReady.evidence.githubCi.runId += 1 },
+    input => { input.previousReleaseReady.verifier.runId += 1 },
+    input => { input.previousReleaseReady.evidence.verifierGithubCi.runAttempt += 1 },
   ]) {
     const input = structuredClone(evidence())
     mutate(input)
@@ -761,6 +868,9 @@ test('rejects any artifact digest, version, manifest, commit, or runtime receipt
     input => { input.runtimeRelease.artifacts.current.manifestSha256 = `sha256:${'0'.repeat(64)}` },
     input => { input.githubCi.target.commit = '0'.repeat(40); input.githubCi.run.headSha = '0'.repeat(40); const { receiptDigest, ...body } = input.githubCi; input.githubCi.receiptDigest = canonicalSha256(body) },
     input => { input.githubCi.packAttestation.sha256 = `sha256:${'0'.repeat(64)}`; const { receiptDigest, ...body } = input.githubCi; input.githubCi.receiptDigest = canonicalSha256(body) },
+    input => { input.githubCi.packAttestation.pnpmTreeSha256 = `sha256:${'0'.repeat(64)}`; const { receiptDigest, ...body } = input.githubCi; input.githubCi.receiptDigest = canonicalSha256(body) },
+    input => { input.publicRelease.inputs.current.packed.bundledPnpmTreeSha256 = `sha256:${'0'.repeat(64)}` },
+    input => { input.runtimeRelease.observations.current.installedPnpmTreeSha256 = `sha256:${'0'.repeat(64)}` },
     input => { input.publicRelease.inputs.runtimeAcceptance.sha256 = `sha256:${'0'.repeat(64)}` },
     input => { input.runtimeRelease.ciPackAttestation.fileSha256 = `sha256:${'0'.repeat(64)}` },
   ]) {
@@ -850,6 +960,10 @@ test('requires the previous release-ready path and canonical run id as one CLI p
     '--public-catalog', 'catalog.json',
     '--catalog-sources', 'sources.json',
     '--github-ci', 'ci.json',
+    '--verifier-github-ci', 'verifier-ci.json',
+    '--verifier-commit', CURRENT.sourceCommit,
+    '--verifier-run-id', '314',
+    '--verifier-run-attempt', '1',
   ]
   assert.throws(
     () => parseReleaseReadyArguments([...required, '--previous-release-ready', 'previous.json']),
@@ -858,6 +972,7 @@ test('requires the previous release-ready path and canonical run id as one CLI p
   assert.throws(
     () => parseReleaseReadyArguments([
       ...required,
+      '--previous-verifier-github-ci', 'previous-verifier-ci.json',
       '--previous-release-ready', 'previous.json',
       '--previous-evidence-run-id', '01',
     ]),
@@ -865,9 +980,40 @@ test('requires the previous release-ready path and canonical run id as one CLI p
   )
   const parsed = parseReleaseReadyArguments([
     ...required,
+    '--previous-verifier-github-ci', 'previous-verifier-ci.json',
     '--previous-release-ready', 'previous.json',
     '--previous-evidence-run-id', '99',
   ])
   assert.equal(parsed.previousEvidenceRunId, 99)
+  assert.equal(parsed.verifierCommit, CURRENT.sourceCommit)
+  assert.equal(parsed.verifierRunId, 314)
+  assert.equal(parsed.verifierRunAttempt, 1)
+  assert.match(parsed.verifierGithubCiPath, /verifier-ci\.json$/u)
+  assert.match(parsed.previousVerifierGithubCiPath, /previous-verifier-ci\.json$/u)
   assert.match(parsed.previousReleaseReadyPath, /previous\.json$/u)
+})
+
+test('requires canonical verifier commit and run identity CLI inputs', () => {
+  const required = [
+    '--full-p0', 'full.json',
+    '--runtime-release', 'runtime.json',
+    '--public-release', 'public.json',
+    '--public-catalog', 'catalog.json',
+    '--catalog-sources', 'sources.json',
+    '--github-ci', 'ci.json',
+    '--verifier-github-ci', 'verifier-ci.json',
+    '--verifier-commit', CURRENT.sourceCommit,
+    '--verifier-run-id', '314',
+    '--verifier-run-attempt', '1',
+  ]
+  assert.throws(
+    () => parseReleaseReadyArguments(required.filter((_, index) => index < required.length - 2)),
+    /--verifier-run-attempt is required/u,
+  )
+  const badCommit = [...required]
+  badCommit[badCommit.indexOf('--verifier-commit') + 1] = CURRENT.sourceCommit.toUpperCase()
+  assert.throws(() => parseReleaseReadyArguments(badCommit), /verifier commit/u)
+  const badRunId = [...required]
+  badRunId[badRunId.indexOf('--verifier-run-id') + 1] = '01'
+  assert.throws(() => parseReleaseReadyArguments(badRunId), /verifier run id/u)
 })

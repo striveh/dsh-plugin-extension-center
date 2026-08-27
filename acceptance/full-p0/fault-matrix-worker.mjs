@@ -105,8 +105,8 @@ function recoveryBinding() {
       pnpm: Object.freeze({
         schemaVersion: 1,
         packageName: 'pnpm',
-        packageVersion: '11.7.0',
-        registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+        packageVersion: '11.21.0',
+        registryIntegrity: 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ==',
         packageRoot: caseRoot,
         packageTreeSha256: digest,
         entrypointPath: absolute,

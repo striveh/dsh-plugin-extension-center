@@ -12,6 +12,7 @@ import {
   decidePlan,
   decodeImmutablePlan,
   decodePlanAuthorizationState,
+  decodeStoredPlanAuthorizationState,
   type ImmutablePlan,
   type OperationAuthorization,
   type PlanAuthorizationState,
@@ -262,7 +263,7 @@ export class FilePlanStore {
       if (await readOptional(join(directory, DECISION_FILENAME)) === undefined) {
         throw new ExtensionDomainError('plan-integrity', `plan ${hash} consumption has no decision`)
       }
-      const state = decodePlanAuthorizationState(parseCanonical(consumption, `plan ${hash} consumption`))
+      const state = decodeStoredPlanAuthorizationState(parseCanonical(consumption, `plan ${hash} consumption`))
       if (state.plan.hash !== hash || state.status !== 'consumed') {
         throw new ExtensionDomainError('plan-integrity', `plan ${hash} consumption is invalid`)
       }

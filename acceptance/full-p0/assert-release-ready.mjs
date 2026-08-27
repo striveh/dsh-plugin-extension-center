@@ -24,6 +24,8 @@ import {
 import { assertAscendingReleaseTransition, parseReleaseVersion } from '../release/verify-public-release.mjs'
 
 const CENTER_PACKAGE = 'dsh-plugin-extension-center'
+const POST_PUBLICATION_WORKFLOW_PATH = '.github/workflows/post-publication-evidence.yml'
+const GITHUB_MAIN_REF = `refs/heads/${GITHUB_BRANCH}`
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
 const SHA512 = /^sha512-[A-Za-z0-9+/]+={0,2}$/u
@@ -57,7 +59,12 @@ const INPUT_FLAGS = Object.freeze([
   '--public-catalog',
   '--catalog-sources',
   '--github-ci',
+  '--verifier-github-ci',
+  '--verifier-commit',
+  '--verifier-run-id',
+  '--verifier-run-attempt',
   '--previous-github-ci',
+  '--previous-verifier-github-ci',
   '--previous-release-ready',
   '--previous-evidence-run-id',
   '--receipt',
@@ -69,6 +76,10 @@ const REQUIRED_INPUT_FLAGS = Object.freeze([
   '--public-catalog',
   '--catalog-sources',
   '--github-ci',
+  '--verifier-github-ci',
+  '--verifier-commit',
+  '--verifier-run-id',
+  '--verifier-run-attempt',
 ])
 const DEFAULT_RECEIPT_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -78,8 +89,11 @@ const USAGE = `usage: node acceptance/full-p0/assert-release-ready.mjs \
   --full-p0 <receipt.json> --runtime-release <receipt.json> \
   --public-release <receipt.json> --public-catalog <receipt.json> \
   --catalog-sources <receipt.json> --github-ci <receipt.json> \
+  --verifier-github-ci <receipt.json> --verifier-commit <commit> \
+  --verifier-run-id <id> --verifier-run-attempt <attempt> \
   [--previous-github-ci <receipt.json>] \
-  [--previous-release-ready <receipt.json> --previous-evidence-run-id <id>] \
+  [--previous-verifier-github-ci <receipt.json> \
+    --previous-release-ready <receipt.json> --previous-evidence-run-id <id>] \
   [--receipt <path>]\n`
 
 function fail(code, message) {
@@ -301,6 +315,7 @@ function releaseArtifact(value, label) {
   const sha256 = digest(artifact.sha256, `${label} sha256`)
   const sizeBytes = positiveInteger(artifact.sizeBytes, `${label} size`)
   const manifestSha256 = digest(artifact.manifestSha256, `${label} manifest sha256`)
+  const pnpmTreeSha256 = digest(artifact.pnpmTreeSha256, `${label} pnpm tree sha256`)
   if (artifact.sourceKind !== 'github-release'
     || artifact.publicUrl !== `https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${CENTER_PACKAGE}-${version}.tgz`
     || !SHA512.test(artifact.sha512)) {
@@ -363,11 +378,15 @@ function releaseArtifact(value, label) {
   if (packed.manifestSha256 !== manifestSha256 || !Number.isSafeInteger(packed.entryCount) || packed.entryCount < 1) {
     fail('P0-RELEASE-READY-PUBLIC-RELEASE', `${label} packed manifest evidence is inconsistent`)
   }
+  if (packed.bundledPnpmTreeSha256 !== pnpmTreeSha256) {
+    fail('P0-RELEASE-READY-PUBLIC-RELEASE', `${label} packed pnpm tree differs from its attested identity`)
+  }
   return Object.freeze({
     version,
     sha256,
     sizeBytes,
     manifestSha256,
+    pnpmTreeSha256,
     sourceCommit,
     releaseId: release.releaseId,
     releasePayload: payload,
@@ -433,10 +452,21 @@ function publicReleaseEvidence(value) {
     ], 'updated public Release notProven')
   }
   const observations = record(receipt.observations, 'public Release observations')
+  const currentInstall = record(observations.currentInstall, 'current public installation')
+  const previousInstall = observations.previousInstall === null
+    ? null
+    : record(observations.previousInstall, 'previous public installation')
   if (observations.officialDshPackageTreeUnchanged !== true
     || observations.runtimeAcceptanceRequiredAndBound !== true
     || observations.ascendingDistinctReleaseUpdate !== (previous !== null)
-    || record(observations.removal, 'public Release removal').exactBaselineRestored !== true) {
+    || record(observations.removal, 'public Release removal').exactBaselineRestored !== true
+    || digest(currentInstall.bundledPnpmTreeSha256, 'current installed pnpm tree sha256')
+      !== current.pnpmTreeSha256
+    || (previous === null) !== (previousInstall === null)
+    || previous !== null && digest(
+      previousInstall.bundledPnpmTreeSha256,
+      'previous installed pnpm tree sha256',
+    ) !== previous.pnpmTreeSha256) {
     fail('P0-RELEASE-READY-PUBLIC-RELEASE', 'public Release receipt omits update, removal, runtime, or Host evidence')
   }
   return Object.freeze({
@@ -462,6 +492,7 @@ function runtimeArtifact(value, label) {
     sha256: digest(artifact.sha256, `${label} sha256`),
     sizeBytes: positiveInteger(artifact.sizeBytes, `${label} size`),
     manifestSha256: digest(artifact.manifestSha256, `${label} manifest sha256`),
+    pnpmTreeSha256: digest(artifact.pnpmTreeSha256, `${label} pnpm tree sha256`),
     sourceCommit: commit(artifact.sourceCommit, `${label} source commit`),
   })
 }
@@ -482,6 +513,14 @@ function runtimeReleaseEvidence(value) {
     : record(observations.previous, 'previous runtime observation')
   if ((previous === null) !== (previousObservation === null)) {
     fail('P0-RELEASE-READY-RUNTIME', 'runtime Release artifact and observation history disagree')
+  }
+  if (digest(currentObservation.installedPnpmTreeSha256, 'current runtime installed pnpm tree sha256')
+      !== current.pnpmTreeSha256
+    || previous !== null && digest(
+      previousObservation.installedPnpmTreeSha256,
+      'previous runtime installed pnpm tree sha256',
+    ) !== previous.pnpmTreeSha256) {
+    fail('P0-RELEASE-READY-RUNTIME', 'runtime installed pnpm tree differs from its packed artifact')
   }
   const observedArtifacts = previousObservation === null
     ? [currentObservation]
@@ -590,6 +629,7 @@ function releaseReadyArtifact(value, label) {
   const sha256 = digest(artifact.sha256, `${label} SHA-256`)
   const sizeBytes = positiveInteger(artifact.sizeBytes, `${label} size`)
   const manifestSha256 = digest(artifact.manifestSha256, `${label} manifest SHA-256`)
+  const pnpmTreeSha256 = digest(artifact.pnpmTreeSha256, `${label} pnpm tree SHA-256`)
   const sourceCommit = commit(artifact.sourceCommit, `${label} source commit`)
   const expectedNames = [`${CENTER_PACKAGE}-${version}.tgz`, 'SHA256SUMS', 'pack-attestation.json']
   if (!Array.isArray(artifact.releasePayload) || artifact.releasePayload.length !== expectedNames.length) {
@@ -615,6 +655,7 @@ function releaseReadyArtifact(value, label) {
     sha256,
     sizeBytes,
     manifestSha256,
+    pnpmTreeSha256,
     sourceCommit,
     releaseId: positiveInteger(artifact.releaseId, `${label} Release id`),
     releasePayload,
@@ -685,6 +726,7 @@ function previousReleaseReadyBindings(value, bootstrap) {
     'publicCatalog',
     'catalogSources',
     'githubCi',
+    'verifierGithubCi',
     'previousGithubCi',
     'previousReleaseReady',
   ], 'previous release-ready evidence')
@@ -731,12 +773,19 @@ function previousReleaseReadyBindings(value, bootstrap) {
     'P0-GITHUB-CI-EXACT-COMMIT',
     ['receiptDigest', 'runId'],
   )
+  const verifierGithubCi = releaseReadyEvidenceFile(
+    evidence.verifierGithubCi,
+    'previous release-ready verifier GitHub CI evidence',
+    'P0-GITHUB-CI-EXACT-COMMIT',
+    ['receiptDigest', 'commit', 'runId', 'runAttempt'],
+  )
   for (const [binding, label] of [
     [runtimeRelease, 'runtime'],
     [publicRelease, 'public Release'],
     [publicCatalog, 'public catalog'],
     [catalogSources, 'catalog source'],
     [githubCi, 'GitHub CI'],
+    [verifierGithubCi, 'verifier GitHub CI'],
   ]) {
     digest(binding.sha256, `previous release-ready ${label} evidence SHA-256`)
   }
@@ -746,6 +795,10 @@ function previousReleaseReadyBindings(value, bootstrap) {
   positiveInteger(catalogSources.entryCount, 'previous release-ready catalog source entry count')
   digest(githubCi.receiptDigest, 'previous release-ready GitHub CI receipt digest')
   positiveInteger(githubCi.runId, 'previous release-ready GitHub CI run id')
+  digest(verifierGithubCi.receiptDigest, 'previous release-ready verifier GitHub CI receipt digest')
+  commit(verifierGithubCi.commit, 'previous release-ready verifier GitHub CI commit')
+  positiveInteger(verifierGithubCi.runId, 'previous release-ready verifier GitHub CI run id')
+  positiveInteger(verifierGithubCi.runAttempt, 'previous release-ready verifier GitHub CI run attempt')
 
   const previousGithubCi = evidence.previousGithubCi === null
     ? null
@@ -780,6 +833,13 @@ function previousReleaseReadyBindings(value, bootstrap) {
       sha256: githubCi.sha256,
       receiptDigest: githubCi.receiptDigest,
       runId: githubCi.runId,
+    }),
+    verifierGithubCi: Object.freeze({
+      sha256: verifierGithubCi.sha256,
+      receiptDigest: verifierGithubCi.receiptDigest,
+      sourceCommit: verifierGithubCi.commit,
+      runId: verifierGithubCi.runId,
+      runAttempt: verifierGithubCi.runAttempt,
     }),
   })
 }
@@ -827,6 +887,13 @@ function previousReleaseReadyEvidence(value) {
   if (receipt.releaseStage !== expectedStage) {
     fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready stage and artifact history disagree')
   }
+  const evidence = previousReleaseReadyBindings(receipt.evidence, bootstrap)
+  const verifier = verifierIdentity(
+    receipt.verifier,
+    current.sourceCommit,
+    receipt.releaseStage,
+    evidence.verifierGithubCi,
+  )
   const claims = record(receipt.claims, 'previous release-ready claims')
   for (const field of [
     'independentPluginOnly',
@@ -852,7 +919,6 @@ function previousReleaseReadyEvidence(value) {
     ...(bootstrap ? ['public-previous-to-current-update', 'signed-catalog-previous-to-current-update'] : []),
     ...RELEASE_CATALOG_NOT_PROVEN,
   ], 'previous release-ready notProven')
-  const evidence = previousReleaseReadyBindings(receipt.evidence, bootstrap)
   return Object.freeze({
     receiptDigest,
     stage: receipt.releaseStage,
@@ -860,6 +926,7 @@ function previousReleaseReadyEvidence(value) {
     current,
     catalog: releaseReadyCatalog(receipt.catalog, 'previous release-ready catalog'),
     evidence,
+    verifier,
   })
 }
 
@@ -1012,7 +1079,8 @@ function githubCiEvidence(value) {
   }
   const pack = record(receipt.packAttestation, 'GitHub CI pack attestation')
   if (pack.sourceCommit !== sourceCommit || !SHA256.test(pack.sha256)
-    || !SHA256.test(pack.manifestSha256) || !SHA256.test(pack.attestationDigest)) {
+    || !SHA256.test(pack.manifestSha256) || !SHA256.test(pack.pnpmTreeSha256)
+    || !SHA256.test(pack.attestationDigest)) {
     fail('P0-RELEASE-READY-CI', 'GitHub CI receipt omits its exact deterministic pack attestation')
   }
   const expectedNames = [pack.filename, 'SHA256SUMS', 'pack-attestation.json']
@@ -1040,15 +1108,58 @@ function githubCiEvidence(value) {
   })
 }
 
+function verifierIdentity(value, targetCommit, releaseStage, verifierCi) {
+  const verifier = record(value, 'release-ready verifier')
+  exactKeys(verifier, [
+    'repository',
+    'workflowPath',
+    'ref',
+    'refProtected',
+    'commit',
+    'runId',
+    'runAttempt',
+    'mode',
+  ], 'release-ready verifier')
+  const verifierCommit = commit(verifier.commit, 'verifier commit')
+  const runId = positiveInteger(verifier.runId, 'verifier run id')
+  const runAttempt = positiveInteger(verifier.runAttempt, 'verifier run attempt')
+  if (verifier.repository !== GITHUB_REPOSITORY
+    || verifier.workflowPath !== POST_PUBLICATION_WORKFLOW_PATH
+    || verifier.ref !== GITHUB_MAIN_REF
+    || verifier.refProtected !== true) {
+    fail('P0-RELEASE-READY-VERIFIER', 'verifier is not the protected main post-publication workflow')
+  }
+  if (verifierCi.sourceCommit !== verifierCommit) {
+    fail('P0-RELEASE-READY-VERIFIER', 'verifier GitHub CI commit does not match the verifier commit')
+  }
+  const mode = verifierCommit === targetCommit ? 'same-commit' : 'rc0-backfill'
+  if (verifier.mode !== mode) {
+    fail('P0-RELEASE-READY-VERIFIER', 'verifier mode does not match target and verifier commits')
+  }
+  if (mode === 'rc0-backfill' && releaseStage !== 'bootstrap-rc0') {
+    fail('P0-RELEASE-READY-VERIFIER', 'only immutable rc.0 may use a distinct verifier commit')
+  }
+  return Object.freeze({
+    repository: verifier.repository,
+    workflowPath: verifier.workflowPath,
+    ref: verifier.ref,
+    refProtected: true,
+    commit: verifierCommit,
+    runId,
+    runAttempt,
+    mode,
+  })
+}
+
 function sameArtifact(left, right, label) {
-  for (const field of ['version', 'sha256', 'sizeBytes', 'manifestSha256', 'sourceCommit']) {
+  for (const field of ['version', 'sha256', 'sizeBytes', 'manifestSha256', 'pnpmTreeSha256', 'sourceCommit']) {
     if (left[field] !== right[field]) fail('P0-RELEASE-READY-BINDING', `${label} differs at ${field}`)
   }
 }
 
 function sameBoundArtifact(left, right, label) {
   const bound = record(left, label)
-  for (const field of ['version', 'sha256', 'manifestSha256', 'sourceCommit']) {
+  for (const field of ['version', 'sha256', 'manifestSha256', 'pnpmTreeSha256', 'sourceCommit']) {
     if (bound[field] !== right[field]) fail('P0-RELEASE-READY-BINDING', `${label} differs at ${field}`)
   }
 }
@@ -1102,6 +1213,7 @@ export function assertReleaseReady(inputValue) {
     ['publicCatalog', 'public catalog'],
     ['catalogSources', 'catalog sources'],
     ['githubCi', 'GitHub CI'],
+    ['verifierGithubCi', 'verifier GitHub CI'],
   ].map(([key, label]) => [key, digest(suppliedDigests[key], `${label} receipt SHA-256`)])))
   const full = fullP0Evidence(input.fullP0)
   const runtime = runtimeReleaseEvidence(input.runtimeRelease)
@@ -1109,6 +1221,13 @@ export function assertReleaseReady(inputValue) {
   const catalog = publicCatalogEvidence(input.publicCatalog)
   const sources = catalogSourceEvidence(input.catalogSources, generatedAt.parsed)
   const ci = githubCiEvidence(input.githubCi)
+  const verifierCi = githubCiEvidence(input.verifierGithubCi)
+  const verifier = verifierIdentity(
+    input.verifier,
+    published.current.sourceCommit,
+    published.stage,
+    verifierCi,
+  )
   const previousCi = input.previousGithubCi === null ? null : githubCiEvidence(input.previousGithubCi)
   const previousCiDigest = previousCi === null
     ? suppliedDigests.previousGithubCi === null ? null
@@ -1121,6 +1240,13 @@ export function assertReleaseReady(inputValue) {
     ? suppliedDigests.previousReleaseReady === null ? null
       : fail('P0-RELEASE-READY-BINDING', 'rc.0 must explicitly bind previous release-ready evidence as null')
     : digest(suppliedDigests.previousReleaseReady, 'previous release-ready receipt SHA-256')
+  const previousVerifierCi = input.previousVerifierGithubCi === null
+    ? null
+    : githubCiEvidence(input.previousVerifierGithubCi)
+  const previousVerifierCiDigest = previousVerifierCi === null
+    ? suppliedDigests.previousVerifierGithubCi === null ? null
+      : fail('P0-RELEASE-READY-BINDING', 'rc.0 must explicitly bind previous verifier GitHub CI as null')
+    : digest(suppliedDigests.previousVerifierGithubCi, 'previous verifier GitHub CI receipt SHA-256')
   const previousEvidenceRunId = input.previousEvidenceRunId === null
     ? null
     : positiveInteger(input.previousEvidenceRunId, 'previous post-publication evidence run id')
@@ -1153,6 +1279,7 @@ export function assertReleaseReady(inputValue) {
       || binding.runId !== ci.runId || binding.runAttempt !== ci.runAttempt
       || artifact.version !== ci.pack.version || artifact.sha256 !== ci.pack.sha256
       || artifact.sizeBytes !== ci.pack.sizeBytes || artifact.manifestSha256 !== ci.pack.manifestSha256
+      || artifact.pnpmTreeSha256 !== ci.pack.pnpmTreeSha256
       || artifact.sourceCommit !== ci.pack.sourceCommit) {
       fail('P0-RELEASE-READY-BINDING', `${label} receipt does not bind the exact CI deterministic pack attestation`)
     }
@@ -1172,7 +1299,8 @@ export function assertReleaseReady(inputValue) {
   if (published.previous === null) {
     if (runtimeBinding.previous !== null || runtime.previousCatalog !== null
       || previousCi !== null || published.previousCiPackAttestation !== null
-      || previousReady !== null || previousReadyDigest !== null || previousEvidenceRunId !== null) {
+      || previousReady !== null || previousReadyDigest !== null || previousEvidenceRunId !== null
+      || previousVerifierCi !== null || previousVerifierCiDigest !== null) {
       fail('P0-RELEASE-READY-BINDING', 'rc.0 injected previous runtime, public, CI, or release-ready evidence')
     }
   } else {
@@ -1193,6 +1321,7 @@ export function assertReleaseReady(inputValue) {
     sameArtifact(artifact, previousCi.pack, 'bound previous CI artifact')
     sameReleasePayload(artifact.releaseAssets, previousCi.pack.releaseAssets, 'bound previous CI payload')
     if (previousReady === null || previousReadyDigest === null || previousEvidenceRunId === null
+      || previousVerifierCi === null || previousVerifierCiDigest === null
       || runtime.previousCatalog === null) {
       fail('P0-RELEASE-READY-BINDING', 'public update omitted the previous release-ready catalog transition')
     }
@@ -1200,6 +1329,17 @@ export function assertReleaseReady(inputValue) {
       || previousReady.evidence.githubCi.receiptDigest !== previousCi.receiptDigest
       || previousReady.evidence.githubCi.runId !== previousCi.runId) {
       fail('P0-RELEASE-READY-BINDING', 'previous release-ready receipt does not bind its exact GitHub CI evidence')
+    }
+    if (previousReady.verifier.runId !== previousEvidenceRunId) {
+      fail('P0-RELEASE-READY-BINDING', 'previous release-ready verifier run does not match the downloaded evidence run')
+    }
+    const previousVerifierBinding = previousReady.evidence.verifierGithubCi
+    if (previousVerifierBinding.sha256 !== previousVerifierCiDigest
+      || previousVerifierBinding.receiptDigest !== previousVerifierCi.receiptDigest
+      || previousVerifierBinding.sourceCommit !== previousVerifierCi.sourceCommit
+      || previousVerifierBinding.runId !== previousVerifierCi.runId
+      || previousVerifierBinding.runAttempt !== previousVerifierCi.runAttempt) {
+      fail('P0-RELEASE-READY-BINDING', 'previous release-ready receipt does not bind its exact verifier GitHub CI receipt')
     }
     sameArtifact(previousReady.current, published.previous, 'previous release-ready and public previous artifacts')
     sameReleasePayload(
@@ -1244,6 +1384,7 @@ export function assertReleaseReady(inputValue) {
     p0Status: bootstrap ? 'rc0-bootstrap-release-ready' : 'p0-release-ready',
     releaseStage: published.stage,
     generatedAt: generatedAt.timestamp,
+    verifier,
     target: Object.freeze({
       repository: GITHUB_REPOSITORY,
       sourceCommit: current.sourceCommit,
@@ -1263,6 +1404,14 @@ export function assertReleaseReady(inputValue) {
       publicCatalog: Object.freeze({ acceptanceId: input.publicCatalog.acceptanceId, sha256: receiptDigests.publicCatalog, receiptDigest: catalog.receiptDigest }),
       catalogSources: Object.freeze({ acceptanceId: input.catalogSources.acceptanceId, sha256: receiptDigests.catalogSources, receiptDigest: sources.receiptDigest, observedAt: sources.observedAt, entryCount: sources.entryCount }),
       githubCi: Object.freeze({ acceptanceId: input.githubCi.acceptanceId, sha256: receiptDigests.githubCi, receiptDigest: ci.receiptDigest, runId: ci.runId }),
+      verifierGithubCi: Object.freeze({
+        acceptanceId: input.verifierGithubCi.acceptanceId,
+        sha256: receiptDigests.verifierGithubCi,
+        receiptDigest: verifierCi.receiptDigest,
+        commit: verifierCi.sourceCommit,
+        runId: verifierCi.runId,
+        runAttempt: verifierCi.runAttempt,
+      }),
       previousGithubCi: previousCi === null ? null : Object.freeze({
         acceptanceId: input.previousGithubCi.acceptanceId,
         sha256: previousCiDigest,
@@ -1363,23 +1512,37 @@ export async function composeReleaseReadyReceipt(optionsValue) {
     readReceipt(resolve(options.publicCatalogPath), 'public catalog receipt'),
     readReceipt(resolve(options.catalogSourcesPath), 'catalog source receipt'),
     readReceipt(resolve(options.githubCiPath), 'GitHub CI receipt'),
+    readReceipt(resolve(options.verifierGithubCiPath), 'verifier GitHub CI receipt'),
   ])
   const previousGithubCi = options.previousGithubCiPath === null || options.previousGithubCiPath === undefined
     ? null
     : await readReceipt(resolve(options.previousGithubCiPath), 'previous GitHub CI receipt')
+  const previousVerifierGithubCi = options.previousVerifierGithubCiPath === null
+    || options.previousVerifierGithubCiPath === undefined
+    ? null
+    : await readReceipt(resolve(options.previousVerifierGithubCiPath), 'previous verifier GitHub CI receipt')
   const previousReleaseReady = options.previousReleaseReadyPath === null || options.previousReleaseReadyPath === undefined
     ? null
     : await readReceipt(resolve(options.previousReleaseReadyPath), 'previous release-ready receipt')
   const inputs = [
     ...requiredInputs,
     ...(previousGithubCi === null ? [] : [previousGithubCi]),
+    ...(previousVerifierGithubCi === null ? [] : [previousVerifierGithubCi]),
     ...(previousReleaseReady === null ? [] : [previousReleaseReady]),
   ]
   if (new Set(inputs.map(input => input.path)).size !== inputs.length) {
     fail('P0-RELEASE-READY-INPUT', 'release-ready inputs must be distinct receipt files')
   }
   const destination = await prepareReceiptDestination(options.receiptPath ?? DEFAULT_RECEIPT_PATH, inputs)
-  const [fullP0, runtimeRelease, publicRelease, publicCatalog, catalogSources, githubCi] = requiredInputs
+  const [
+    fullP0,
+    runtimeRelease,
+    publicRelease,
+    publicCatalog,
+    catalogSources,
+    githubCi,
+    verifierGithubCi,
+  ] = requiredInputs
   const receipt = assertReleaseReady({
     fullP0: fullP0.receipt,
     runtimeRelease: runtimeRelease.receipt,
@@ -1387,7 +1550,19 @@ export async function composeReleaseReadyReceipt(optionsValue) {
     publicCatalog: publicCatalog.receipt,
     catalogSources: catalogSources.receipt,
     githubCi: githubCi.receipt,
+    verifierGithubCi: verifierGithubCi.receipt,
+    verifier: {
+      repository: GITHUB_REPOSITORY,
+      workflowPath: POST_PUBLICATION_WORKFLOW_PATH,
+      ref: GITHUB_MAIN_REF,
+      refProtected: true,
+      commit: options.verifierCommit,
+      runId: options.verifierRunId,
+      runAttempt: options.verifierRunAttempt,
+      mode: options.verifierCommit === githubCi.receipt.target?.commit ? 'same-commit' : 'rc0-backfill',
+    },
     previousGithubCi: previousGithubCi?.receipt ?? null,
+    previousVerifierGithubCi: previousVerifierGithubCi?.receipt ?? null,
     previousReleaseReady: previousReleaseReady?.receipt ?? null,
     previousEvidenceRunId: options.previousEvidenceRunId ?? null,
     receiptDigests: {
@@ -1397,7 +1572,9 @@ export async function composeReleaseReadyReceipt(optionsValue) {
       publicCatalog: publicCatalog.sha256,
       catalogSources: catalogSources.sha256,
       githubCi: githubCi.sha256,
+      verifierGithubCi: verifierGithubCi.sha256,
       previousGithubCi: previousGithubCi?.sha256 ?? null,
+      previousVerifierGithubCi: previousVerifierGithubCi?.sha256 ?? null,
       previousReleaseReady: previousReleaseReady?.sha256 ?? null,
     },
     generatedAt: options.generatedAt,
@@ -1422,8 +1599,12 @@ export function parseReleaseReadyArguments(arguments_) {
   for (const key of REQUIRED_INPUT_FLAGS) {
     if (!values.has(key)) fail('P0-RELEASE-READY-INPUT', `${key} is required`)
   }
-  if (values.has('--previous-release-ready') !== values.has('--previous-evidence-run-id')) {
-    fail('P0-RELEASE-READY-INPUT', '--previous-release-ready and --previous-evidence-run-id must be supplied together')
+  if (new Set([
+    values.has('--previous-verifier-github-ci'),
+    values.has('--previous-release-ready'),
+    values.has('--previous-evidence-run-id'),
+  ]).size !== 1) {
+    fail('P0-RELEASE-READY-INPUT', 'previous verifier CI, release-ready receipt, and evidence run id must be supplied together')
   }
   let previousEvidenceRunId = null
   if (values.has('--previous-evidence-run-id')) {
@@ -1433,6 +1614,15 @@ export function parseReleaseReadyArguments(arguments_) {
     }
     previousEvidenceRunId = positiveInteger(Number(input), 'previous post-publication evidence run id')
   }
+  const verifierCommit = commit(values.get('--verifier-commit'), 'verifier commit')
+  const verifierRunIdInput = bounded(values.get('--verifier-run-id'), 'verifier run id', 32)
+  const verifierRunAttemptInput = bounded(values.get('--verifier-run-attempt'), 'verifier run attempt', 32)
+  if (!/^[1-9][0-9]*$/u.test(verifierRunIdInput)) {
+    fail('P0-RELEASE-READY-INPUT', 'verifier run id must be a positive integer')
+  }
+  if (!/^[1-9][0-9]*$/u.test(verifierRunAttemptInput)) {
+    fail('P0-RELEASE-READY-INPUT', 'verifier run attempt must be a positive integer')
+  }
   return Object.freeze({
     help: false,
     fullP0Path: resolve(bounded(values.get('--full-p0'), 'full P0 receipt path')),
@@ -1441,8 +1631,21 @@ export function parseReleaseReadyArguments(arguments_) {
     publicCatalogPath: resolve(bounded(values.get('--public-catalog'), 'public catalog receipt path')),
     catalogSourcesPath: resolve(bounded(values.get('--catalog-sources'), 'catalog source receipt path')),
     githubCiPath: resolve(bounded(values.get('--github-ci'), 'GitHub CI receipt path')),
+    verifierGithubCiPath: resolve(bounded(
+      values.get('--verifier-github-ci'),
+      'verifier GitHub CI receipt path',
+    )),
+    verifierCommit,
+    verifierRunId: positiveInteger(Number(verifierRunIdInput), 'verifier run id'),
+    verifierRunAttempt: positiveInteger(Number(verifierRunAttemptInput), 'verifier run attempt'),
     previousGithubCiPath: values.has('--previous-github-ci')
       ? resolve(bounded(values.get('--previous-github-ci'), 'previous GitHub CI receipt path'))
+      : null,
+    previousVerifierGithubCiPath: values.has('--previous-verifier-github-ci')
+      ? resolve(bounded(
+        values.get('--previous-verifier-github-ci'),
+        'previous verifier GitHub CI receipt path',
+      ))
       : null,
     previousReleaseReadyPath: values.has('--previous-release-ready')
       ? resolve(bounded(values.get('--previous-release-ready'), 'previous release-ready receipt path'))

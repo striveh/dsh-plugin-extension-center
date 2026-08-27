@@ -25,26 +25,35 @@ permissions:
 jobs:
   verify-publication:
     name: Exact-commit runtime, Release, catalog, and composite receipt
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check out exact published commit
+      - name: Check out protected main verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-          ref: ${{ inputs.commit }}
-      - name: Bind requested commits to main history
+          ref: ${{ github.sha }}
+      - name: Bind target and verifier commits to main history
         env:
           EXPECTED_COMMIT: ${{ inputs.commit }}
+          VERIFIER_COMMIT: ${{ github.sha }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
         run: |
           case "$EXPECTED_COMMIT" in *[!0-9a-f]*|'') exit 1 ;; esac
           test "${#EXPECTED_COMMIT}" -eq 40
-          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
-          git merge-base --is-ancestor "$EXPECTED_COMMIT" origin/main
+          case "$VERIFIER_COMMIT" in *[!0-9a-f]*|'') exit 1 ;; esac
+          test "${#VERIFIER_COMMIT}" -eq 40
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$GITHUB_REF_PROTECTED" = 'true'
+          test "$(git rev-parse HEAD)" = "$VERIFIER_COMMIT"
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" "$VERIFIER_COMMIT"
+          if test "$EXPECTED_COMMIT" != "$VERIFIER_COMMIT"; then
+            test -z "$PREVIOUS_COMMIT"
+            test -z "$PREVIOUS_EVIDENCE_RUN_ID"
+          fi
           if test -n "$PREVIOUS_COMMIT"; then
             case "$PREVIOUS_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
             test "${#PREVIOUS_COMMIT}" -eq 40
@@ -79,6 +88,7 @@ jobs:
       - name: Verify current and previous exact main CI
         env:
           EXPECTED_COMMIT: ${{ inputs.commit }}
+          VERIFIER_COMMIT: ${{ github.sha }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -86,6 +96,14 @@ jobs:
           pnpm run test:acceptance:github-ci \
             --commit "$EXPECTED_COMMIT" \
             --receipt .artifacts/acceptance/github-ci/current.json
+          if test "$EXPECTED_COMMIT" = "$VERIFIER_COMMIT"; then
+            cp .artifacts/acceptance/github-ci/current.json \
+              .artifacts/acceptance/github-ci/verifier.json
+          else
+            pnpm run test:acceptance:github-ci \
+              --commit "$VERIFIER_COMMIT" \
+              --receipt .artifacts/acceptance/github-ci/verifier.json
+          fi
           if test -n "$PREVIOUS_COMMIT"; then
             pnpm run test:acceptance:github-ci \
               --commit "$PREVIOUS_COMMIT" \
@@ -131,6 +149,7 @@ jobs:
         if: inputs.previous_commit != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMMIT: ${{ inputs.commit }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
         run: |
@@ -146,7 +165,11 @@ jobs:
               and .conclusion == "success"' \
             <<<"$run_json" >/dev/null
           previous_attempt=$(jq -er '.run_attempt' <<<"$run_json")
+          previous_head_sha=$(jq -er '.head_sha' <<<"$run_json")
           case "$previous_attempt" in *[!0-9]*|''|0*) exit 1 ;; esac
+          case "$previous_head_sha" in *[!0-9a-f]*|'') exit 1 ;; esac
+          test "${#previous_head_sha}" -eq 40
+          git merge-base --is-ancestor "$previous_head_sha" "$EXPECTED_COMMIT"
           artifact_name="post-publication-evidence-${PREVIOUS_COMMIT}-${previous_attempt}"
           gh run download "$PREVIOUS_EVIDENCE_RUN_ID" \
             --name "$artifact_name" \
@@ -154,22 +177,94 @@ jobs:
           mapfile -t previous_receipts < <(
             find .artifacts/previous-post-publication -type f -path '*/release-ready/receipt.json'
           )
+          mapfile -t previous_verifier_receipts < <(
+            find .artifacts/previous-post-publication -type f -path '*/github-ci/verifier.json'
+          )
+          mapfile -t previous_target_receipts < <(
+            find .artifacts/previous-post-publication -type f -path '*/github-ci/current.json'
+          )
           test "${#previous_receipts[@]}" -eq 1
+          test "${#previous_verifier_receipts[@]}" -eq 1
+          test "${#previous_target_receipts[@]}" -eq 1
           previous_ready=$(realpath "${previous_receipts[0]}")
+          previous_verifier=$(realpath "${previous_verifier_receipts[0]}")
+          previous_target=$(realpath "${previous_target_receipts[0]}")
+          previous_verifier_sha="sha256:$(sha256sum "$previous_verifier" | cut -d ' ' -f 1)"
+          previous_target_sha="sha256:$(sha256sum "$previous_target" | cut -d ' ' -f 1)"
           jq -e \
             --arg commit "$PREVIOUS_COMMIT" \
             --arg version "$PREVIOUS_VERSION" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow '.github/workflows/post-publication-evidence.yml' \
+            --arg ref 'refs/heads/main' \
+            --arg verifier_commit "$previous_head_sha" \
+            --arg verifier_sha "$previous_verifier_sha" \
+            --arg target_sha "$previous_target_sha" \
+            --argjson evidence_run_id "$PREVIOUS_EVIDENCE_RUN_ID" \
+            --argjson evidence_run_attempt "$previous_attempt" \
             '.schemaVersion == 2
               and .acceptanceId == "P0-EXTENSION-CENTER-RELEASE-READY"
               and .status == "passed"
               and .target.sourceCommit == $commit
               and .target.version == $version
+              and .verifier.repository == $repository
+              and .verifier.workflowPath == $workflow
+              and .verifier.ref == $ref
+              and .verifier.refProtected == true
+              and .verifier.commit == $verifier_commit
+              and .verifier.runId == $evidence_run_id
+              and .verifier.runAttempt == $evidence_run_attempt
               and .evidence.githubCi.acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
-              and (.evidence.githubCi.sha256 | test("^sha256:[0-9a-f]{64}$"))
+              and .evidence.githubCi.sha256 == $target_sha
               and (.evidence.githubCi.receiptDigest | test("^sha256:[0-9a-f]{64}$"))
-              and (.evidence.githubCi.runId | type == "number" and . >= 1)' \
+              and (.evidence.githubCi.runId | type == "number" and . >= 1)
+              and .evidence.verifierGithubCi.acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
+              and .evidence.verifierGithubCi.sha256 == $verifier_sha
+              and .evidence.verifierGithubCi.commit == $verifier_commit
+              and (.evidence.verifierGithubCi.receiptDigest | test("^sha256:[0-9a-f]{64}$"))
+              and (.evidence.verifierGithubCi.runId | type == "number" and . >= 1)
+              and (.evidence.verifierGithubCi.runAttempt | type == "number" and . >= 1)' \
             "$previous_ready" >/dev/null
+          jq -e \
+            --arg commit "$PREVIOUS_COMMIT" \
+            --argjson run_id "$(jq -er '.evidence.githubCi.runId' "$previous_ready")" \
+            --arg receipt_digest "$(jq -er '.evidence.githubCi.receiptDigest' "$previous_ready")" \
+            '.schemaVersion == 1
+              and .acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
+              and .status == "passed"
+              and .target.commit == $commit
+              and .run.id == $run_id
+              and .receiptDigest == $receipt_digest' \
+            "$previous_target" >/dev/null
+          jq -e \
+            --arg commit "$previous_head_sha" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg branch 'main' \
+            --arg workflow '.github/workflows/ci.yml' \
+            --argjson run_id "$(jq -er '.evidence.verifierGithubCi.runId' "$previous_ready")" \
+            --argjson run_attempt "$(jq -er '.evidence.verifierGithubCi.runAttempt' "$previous_ready")" \
+            --arg receipt_digest "$(jq -er '.evidence.verifierGithubCi.receiptDigest' "$previous_ready")" \
+            '.schemaVersion == 1
+              and .acceptanceId == "P0-GITHUB-CI-EXACT-COMMIT"
+              and .status == "passed"
+              and .p0Status == "exact-commit-ci-proven"
+              and .target.repository == $repository
+              and .target.branch == $branch
+              and .target.workflowPath == $workflow
+              and .target.commit == $commit
+              and .run.id == $run_id
+              and .run.attempt == $run_attempt
+              and .run.event == "push"
+              and .run.headBranch == $branch
+              and .run.headSha == $commit
+              and .run.status == "completed"
+              and .run.conclusion == "success"
+              and .receiptDigest == $receipt_digest' \
+            "$previous_verifier" >/dev/null
+          cp "$previous_target" .artifacts/acceptance/github-ci/previous.json
+          echo "PREVIOUS_CI_RECEIPT_SHA=$previous_target_sha" >> "$GITHUB_ENV"
           echo "PREVIOUS_RELEASE_READY=$previous_ready" >> "$GITHUB_ENV"
+          echo "PREVIOUS_VERIFIER_GITHUB_CI=$previous_verifier" >> "$GITHUB_ENV"
       - name: Download exact public Release assets
         env:
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
@@ -288,6 +383,9 @@ jobs:
           --receipt .artifacts/acceptance/catalog-sources/receipt.json
       - name: Compose one cross-bound release-ready receipt
         env:
+          VERIFIER_COMMIT: ${{ github.sha }}
+          VERIFIER_RUN_ID: ${{ github.run_id }}
+          VERIFIER_RUN_ATTEMPT: ${{ github.run_attempt }}
           PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
           PREVIOUS_EVIDENCE_RUN_ID: ${{ inputs.previous_evidence_run_id }}
         run: |
@@ -298,11 +396,16 @@ jobs:
             --public-catalog .artifacts/acceptance/public-catalog/receipt.json
             --catalog-sources .artifacts/acceptance/catalog-sources/receipt.json
             --github-ci .artifacts/acceptance/github-ci/current.json
+            --verifier-github-ci .artifacts/acceptance/github-ci/verifier.json
+            --verifier-commit "$VERIFIER_COMMIT"
+            --verifier-run-id "$VERIFIER_RUN_ID"
+            --verifier-run-attempt "$VERIFIER_RUN_ATTEMPT"
             --receipt .artifacts/acceptance/release-ready/receipt.json
           )
           if test -n "$PREVIOUS_COMMIT"; then
             args+=(
               --previous-github-ci .artifacts/acceptance/github-ci/previous.json
+              --previous-verifier-github-ci "$PREVIOUS_VERIFIER_GITHUB_CI"
               --previous-release-ready "$PREVIOUS_RELEASE_READY"
               --previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"
             )

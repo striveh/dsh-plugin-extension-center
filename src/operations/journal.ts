@@ -9,7 +9,7 @@ import {
 } from '../domain/codec.ts'
 import { failDomain } from '../domain/errors.ts'
 import { canonicalSha256, immutableJsonClone, type Sha256Digest } from '../domain/json.ts'
-import { decodeOperationAuthorization, decodeRecoveryExecutableBinding } from '../plans/codec.ts'
+import { decodeOperationAuthorization, decodeStoredRecoveryExecutableBinding } from '../plans/codec.ts'
 import { decodePlanReviewEvidence } from '../plans/review-codec.ts'
 import type { OperationAuthorization, OperationKind, RuntimeBinding } from '../plans/types.ts'
 import {
@@ -158,7 +158,7 @@ function decodePlanEvidence(value: unknown, path: string): OperationPlanEvidence
     reviewEvidence: decodePlanReviewEvidence(record.reviewEvidence, `${path}.reviewEvidence`),
     restartRequired: readBoolean(record.restartRequired, `${path}.restartRequired`),
     fences: decodeFences(record.fences, `${path}.fences`),
-    recoveryExecutable: decodeRecoveryExecutableBinding(record.recoveryExecutable, `${path}.recoveryExecutable`),
+    recoveryExecutable: decodeStoredRecoveryExecutableBinding(record.recoveryExecutable, `${path}.recoveryExecutable`),
   }) as OperationPlanEvidence
 }
 

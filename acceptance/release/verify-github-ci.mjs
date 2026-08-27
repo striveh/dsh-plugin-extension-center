@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { link, lstat, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { AcceptanceFailure, sanitizeDiagnostic } from '../full-p0/support.mjs'
+import { gunzipSync } from 'node:zlib'
+import {
+  AcceptanceFailure,
+  sanitizeDiagnostic,
+} from '../full-p0/support.mjs'
 import { canonicalSha256 } from '../full-p0/receipt-binding.mjs'
 
 export const GITHUB_REPOSITORY = 'striveh/dsh-plugin-extension-center'
@@ -24,6 +28,11 @@ const API_ROOT = `https://api.github.com/repos/${GITHUB_REPOSITORY}`
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const MAX_ARTIFACT_ARCHIVE_BYTES = 256 * 1024 * 1024
 const MAX_ATTESTATION_BYTES = 1024 * 1024
+const MAX_PACK_ENTRY_LIST_BYTES = 32 * 1024 * 1024
+const MAX_PACK_TAR_BYTES = 64 * 1024 * 1024
+const MAX_PACKED_PNPM_ENTRIES = 10_000
+const MAX_PACKED_PNPM_FILE_BYTES = 64 * 1024 * 1024
+const MAX_PACKED_PNPM_TREE_BYTES = 128 * 1024 * 1024
 const COMMIT = /^[0-9a-f]{40}$/u
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
 const DEFAULT_RECEIPT_PATH = resolve(
@@ -170,13 +179,20 @@ function validatePackArtifact(inputValue, run, commit) {
   const artifact = record(attestation.artifact, 'attested pack artifact')
   const version = bounded(artifact.version, 'attested pack version', 128)
   const filename = bounded(artifact.filename, 'attested pack filename', 256)
+  const packedPnpmTreeSha256 = bounded(
+    input.packedPnpmTreeSha256,
+    'recomputed packed pnpm tree SHA-256',
+    80,
+  )
   const tgzBytes = input.tgzBytes
   if (!(tgzBytes instanceof Uint8Array) || artifact.packageName !== 'dsh-plugin-extension-center'
     || !/^0\.1\.0(?:-rc\.(?:0|[1-9][0-9]*))?$/u.test(version)
     || filename !== `dsh-plugin-extension-center-${version}.tgz`
     || artifact.sizeBytes !== tgzBytes.byteLength || artifact.sha256 !== sha256(tgzBytes)
     || !SHA256.test(artifact.manifestSha256) || !SHA256.test(artifact.sourceManifestSha256)
-    || !SHA256.test(artifact.pnpmTreeSha256)) {
+    || !SHA256.test(artifact.pnpmTreeSha256)
+    || !SHA256.test(packedPnpmTreeSha256)
+    || artifact.pnpmTreeSha256 !== packedPnpmTreeSha256) {
     fail('P0-GITHUB-CI-PACK-ATTESTATION', 'attested pack coordinates do not match the archive tgz bytes')
   }
   const entries = input.entries
@@ -345,6 +361,7 @@ export function validateGitHubCiArtifactReceipt(receiptValue, specificationValue
       sha256: pack.sha256,
       sizeBytes: pack.sizeBytes,
       manifestSha256: pack.manifestSha256,
+      pnpmTreeSha256: pack.pnpmTreeSha256,
       sourceCommit: pack.sourceCommit,
       attestationDigest: pack.attestationDigest,
       actionsArtifactId: positiveInteger(pack.actionsArtifactId, 'persisted Actions artifact id'),
@@ -580,7 +597,121 @@ export function runBuffered(command, arguments_, maximumBytes, code, timeoutMs =
   })
 }
 
-async function loadArtifactArchive(metadata, fetchImpl, token) {
+/**
+ * Hash an extracted bundled pnpm tree while bounding logical file and entry sizes.
+ * @param {string} root Extracted pnpm package root.
+ * @param {string} failureCode Acceptance failure code owned by the calling verifier.
+ * @returns {Promise<string>} Bounded no-follow content-tree SHA-256.
+ */
+export async function boundedPackedPnpmTreeDigest(root, failureCode) {
+  const canonicalRoot = await realpath(root)
+  const hash = createHash('sha256')
+  let entryCount = 0
+  let fileBytes = 0
+  const visit = async path => {
+    entryCount += 1
+    if (entryCount > MAX_PACKED_PNPM_ENTRIES) {
+      fail(failureCode, 'bundled pnpm tree exceeds its entry bound')
+    }
+    const name = relative(canonicalRoot, path).split(sep).join('/') || '.'
+    const info = await lstat(path)
+    if (info.isFile()) {
+      fileBytes += info.size
+      if (info.size > MAX_PACKED_PNPM_FILE_BYTES || fileBytes > MAX_PACKED_PNPM_TREE_BYTES) {
+        fail(failureCode, 'bundled pnpm tree exceeds its logical file-byte bound')
+      }
+      const bytes = await readFile(path)
+      if (bytes.byteLength !== info.size) fail(failureCode, 'bundled pnpm file changed while hashing')
+      hash.update(`file:${name}:${String(info.size)}\0`)
+      hash.update(bytes)
+      return
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      fail(failureCode, `bundled pnpm tree contains an unsupported entry: ${name}`)
+    }
+    hash.update(`dir:${name}\0`)
+    for (const entry of (await readdir(path, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      await visit(join(path, entry.name))
+    }
+  }
+  await visit(canonicalRoot)
+  return `sha256:${hash.digest('hex')}`
+}
+
+/**
+ * Recompute the bundled pnpm content-tree digest from one downloaded release tarball.
+ * @param {Uint8Array} tgzBytesValue Exact release tarball bytes.
+ * @param {string} failureCode Acceptance failure code owned by the calling verifier.
+ * @returns {Promise<string>} Recomputed bundled pnpm tree SHA-256.
+ */
+export async function inspectPackedPnpmTreeSha256(
+  tgzBytesValue,
+  failureCode = 'P0-GITHUB-CI-PACK-ARCHIVE',
+) {
+  const tgzBytes = exactPayloadBytes(tgzBytesValue, 'release tarball', MAX_ARTIFACT_ARCHIVE_BYTES)
+  try {
+    gunzipSync(tgzBytes, { maxOutputLength: MAX_PACK_TAR_BYTES })
+  } catch {
+    fail(failureCode, 'release tarball is invalid or exceeds its uncompressed byte bound')
+  }
+  const root = await mkdtemp(join(tmpdir(), 'dsh-ci-packed-pnpm-'))
+  try {
+    const archivePath = join(root, 'release.tgz')
+    const unpackRoot = join(root, 'unpacked')
+    await Promise.all([
+      writeFile(archivePath, tgzBytes, { flag: 'wx', mode: 0o600 }),
+      mkdir(unpackRoot, { mode: 0o700 }),
+    ])
+    const [entries, verboseEntries] = await Promise.all([
+      runBuffered(
+        'tar',
+        ['-tzf', archivePath],
+        MAX_PACK_ENTRY_LIST_BYTES,
+        failureCode,
+        60_000,
+      ),
+      runBuffered(
+        'tar',
+        ['-tvzf', archivePath],
+        MAX_PACK_ENTRY_LIST_BYTES,
+        failureCode,
+        60_000,
+      ),
+    ])
+    const names = entries.toString('utf8').split(/\r?\n/u).filter(Boolean)
+    const verbose = verboseEntries.toString('utf8').split(/\r?\n/u).filter(Boolean)
+    const pnpmEntries = names.map((name, index) => ({
+      name: name.endsWith('/') ? name.slice(0, -1) : name,
+      type: verbose[index]?.[0],
+    })).filter(({ name }) => name === 'package/node_modules/pnpm'
+      || name.startsWith('package/node_modules/pnpm/'))
+    if (names.length !== verbose.length || names.length > 20_000
+      || pnpmEntries.length === 0 || pnpmEntries.length > MAX_PACKED_PNPM_ENTRIES
+      || new Set(pnpmEntries.map(({ name }) => name)).size !== pnpmEntries.length
+      || pnpmEntries.some(({ name, type }) => !['-', 'd'].includes(type)
+        || name.length > 1_024 || !/^[ -~]+$/u.test(name)
+        || name.includes('\\') || name.includes('\0')
+        || name.split('/').some(segment => segment === '' || segment === '.' || segment === '..'))) {
+      fail(failureCode, 'release tarball has no unique path-safe bundled pnpm tree')
+    }
+    await runBuffered(
+      'tar',
+      ['-xzf', archivePath, '-C', unpackRoot, 'package/node_modules/pnpm'],
+      MAX_ATTESTATION_BYTES,
+      failureCode,
+      60_000,
+    )
+    return await boundedPackedPnpmTreeDigest(
+      join(unpackRoot, 'package', 'node_modules', 'pnpm'),
+      failureCode,
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+async function loadArtifactArchive(metadata, fetchImpl, token, packedPnpmTreeInspector) {
   const archiveBytes = await downloadArtifactArchive(metadata, fetchImpl, token)
   const root = await mkdtemp(join(tmpdir(), 'dsh-ci-pack-artifact-'))
   try {
@@ -614,6 +745,7 @@ async function loadArtifactArchive(metadata, fetchImpl, token) {
       sumsText: sumsBytes.toString('utf8'),
       sumsBytes,
       tgzBytes,
+      packedPnpmTreeSha256: await packedPnpmTreeInspector(tgzBytes),
     })
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -681,7 +813,12 @@ export async function runGitHubCiAcceptance(optionsValue) {
     fail('P0-GITHUB-CI-PACK-ARTIFACT', 'exact workflow attempt must contain one deterministic pack artifact')
   }
   const artifactArchiveLoader = options.artifactArchiveLoader ?? loadArtifactArchive
-  const packArtifact = await artifactArchiveLoader(matches[0], fetchImpl, token)
+  const packArtifact = await artifactArchiveLoader(
+    matches[0],
+    fetchImpl,
+    token,
+    options.packedPnpmTreeInspector ?? inspectPackedPnpmTreeSha256,
+  )
   const receipt = validateExactCommitCiEvidence({
     commit,
     runs,

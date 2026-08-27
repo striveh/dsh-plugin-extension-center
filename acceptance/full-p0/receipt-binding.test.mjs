@@ -199,8 +199,8 @@ function operationPlanEvidence() {
         pnpm: {
           schemaVersion: 1,
           packageName: 'pnpm',
-          packageVersion: '11.7.0',
-          registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+          packageVersion: '11.21.0',
+          registryIntegrity: 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ==',
           packageRoot: recoveryPath('center/recovery/toolchains/fixed/pnpm'),
           packageTreeSha256: canonicalSha256({ pnpmTree: true }),
           entrypointPath: recoveryPath('center/recovery/toolchains/fixed/pnpm/bin/pnpm.mjs'),
@@ -465,6 +465,23 @@ test('binds the returned receipt to its independently hashed journal and project
     targetKey: value.receipt.body.targetKey,
     receipt: value.receipt,
   }], [value.receipt]))
+})
+
+test('accepts the exact retired pnpm receipt identity as history and rejects mixed pairs', () => {
+  const value = fixture()
+  const retired = structuredClone(value.receipt)
+  Object.assign(retired.body.planEvidence.recoveryExecutable.officialDsh.pnpm, {
+    packageVersion: '11.7.0',
+    registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+  })
+  retired.digest = canonicalSha256(retired.body)
+  assert.equal(verifyTerminalReceipt(retired), retired)
+
+  const mixed = structuredClone(retired)
+  mixed.body.planEvidence.recoveryExecutable.officialDsh.pnpm.registryIntegrity
+    = 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ=='
+  mixed.digest = canonicalSha256(mixed.body)
+  assert.throws(() => verifyTerminalReceipt(mixed), /pnpm identity is invalid/)
 })
 
 test('rejects a self-reported fixed digest and a journal link mutation', () => {

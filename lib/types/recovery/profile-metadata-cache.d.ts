@@ -1,4 +1,5 @@
 /** Content-addressed pnpm 11 registry metadata synthesized from one installed official Profile generation. */
+import { CURRENT_PNPM_EXECUTION_IDENTITY, RETIRED_PNPM_EXECUTION_IDENTITY } from '../plans/pnpm-runtime.ts';
 import type { OfficialDshRecoveryBinding } from '../plans/types.ts';
 /** One content-addressed metadata-cache generation verified by normal and break-glass official CLI paths. */
 export interface ProfileMetadataCacheBinding {
@@ -17,12 +18,20 @@ export interface ProfileMetadataCacheBinding {
     readonly storeDir: string;
     readonly expectedStoreDir: string;
     readonly pnpmMajor: 11;
-    readonly pnpmVersion: '11.7.0';
+    readonly pnpmVersion: typeof CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion | typeof RETIRED_PNPM_EXECUTION_IDENTITY.packageVersion;
 }
 /** Strictly decode one provider-snapshot cache binding. */
 export declare function decodeProfileMetadataCacheBinding(value: unknown, label?: string): ProfileMetadataCacheBinding;
+/** Strictly decode a current or retired metadata-cache binding for durable history. */
+export declare function decodeStoredProfileMetadataCacheBinding(value: unknown, label?: string): ProfileMetadataCacheBinding;
+/** Return whether a metadata-cache binding belongs to the current writable generation. */
+export declare function isCurrentProfileMetadataCacheBinding(value: ProfileMetadataCacheBinding): value is ProfileMetadataCacheBinding & Readonly<{
+    pnpmVersion: typeof CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion;
+}>;
 /** Extract one nullable cache binding from a durable Plugin provider recovery point. */
 export declare function profileMetadataCacheFromRecoveryPoint(value: unknown): ProfileMetadataCacheBinding | null;
+/** Extract one nullable current or retired cache binding from durable Plugin history. */
+export declare function storedProfileMetadataCacheFromRecoveryPoint(value: unknown): ProfileMetadataCacheBinding | null;
 /** Build or reuse the content-addressed cache generation for the Profile's exact pre-mutation state. */
 export declare function prepareProfileMetadataCache(official: OfficialDshRecoveryBinding, profileIdValue: string): Promise<ProfileMetadataCacheBinding>;
 /** Verify content-addressed cache provenance, contents, pnpm/store identity, and optionally current Profile generation. */

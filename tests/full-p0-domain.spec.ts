@@ -13,6 +13,9 @@ import {
   decidePlan,
   decodeImmutablePlan,
   decodeRecoveryExecutableBinding,
+  decodeStoredRecoveryExecutableBinding,
+  CURRENT_PNPM_EXECUTION_IDENTITY,
+  RETIRED_PNPM_EXECUTION_IDENTITY,
   type ImmutablePlan,
   type PlanAuthorizationState,
   type PlanContent,
@@ -169,6 +172,28 @@ describe('full P0 canonical plan kernel', () => {
       () => decodeRecoveryExecutableBinding({ ...TEST_RECOVERY_EXECUTABLE_BINDING, centerRoot: 'relative-root' }),
       'invalid-data',
     )
+  })
+
+  it('reads the exact retired pnpm pair only as durable history and rejects mixed identities', () => {
+    const retired = structuredClone(TEST_RECOVERY_EXECUTABLE_BINDING)
+    Object.assign(retired.officialDsh.pnpm, RETIRED_PNPM_EXECUTION_IDENTITY)
+    expect(decodeStoredRecoveryExecutableBinding(retired)).toEqual(retired)
+    expectDomainCode(() => decodeRecoveryExecutableBinding(retired), 'invalid-data')
+
+    for (const mixed of [
+      {
+        packageVersion: RETIRED_PNPM_EXECUTION_IDENTITY.packageVersion,
+        registryIntegrity: CURRENT_PNPM_EXECUTION_IDENTITY.registryIntegrity,
+      },
+      {
+        packageVersion: CURRENT_PNPM_EXECUTION_IDENTITY.packageVersion,
+        registryIntegrity: RETIRED_PNPM_EXECUTION_IDENTITY.registryIntegrity,
+      },
+    ]) {
+      const forged = structuredClone(TEST_RECOVERY_EXECUTABLE_BINDING)
+      Object.assign(forged.officialDsh.pnpm, mixed)
+      expectDomainCode(() => decodeStoredRecoveryExecutableBinding(forged), 'invalid-data')
+    }
   })
 
   it('hashes strict JSON deterministically without accepting non-JSON ambiguity', () => {

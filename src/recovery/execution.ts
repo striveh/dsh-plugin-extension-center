@@ -12,6 +12,7 @@ import {
   decodeProcessIdentity,
 } from '../host/process-identity.ts'
 import type { OfficialDshRecoveryBinding } from '../plans/types.ts'
+import { isCurrentPnpmExecutionIdentity } from '../plans/pnpm-runtime.ts'
 import {
   verifyProfileMetadataCache,
   type ProfileMetadataCacheBinding,
@@ -221,6 +222,9 @@ async function probeNodeVersion(binding: OfficialDshRecoveryBinding): Promise<vo
 /** Verify every executable and package identity in one official execution binding. */
 export async function verifyOfficialExecutionBinding(binding: OfficialDshRecoveryBinding): Promise<void> {
   if (process.platform === 'win32') fail('official DSH Plugin mutation and recovery are unsupported on Windows')
+  if (!isCurrentPnpmExecutionIdentity(binding.pnpm)) {
+    fail('retired private pnpm identity cannot execute official DSH')
+  }
   await verifyRegularPin(binding.node.executablePath, binding.node.executableSha256, 'bound Node executable')
   await probeNodeVersion(binding)
   await verifyRegularPin(binding.supervisorPath, binding.supervisorSha256, 'bound official DSH supervisor')
@@ -267,6 +271,9 @@ function profileSegment(profileId: string): string {
 
 /** Reject Profile-local package-manager execution controls before any mutation starts. */
 export async function auditOfficialProfileExecution(binding: OfficialDshRecoveryBinding, profileId: string): Promise<string> {
+  if (!isCurrentPnpmExecutionIdentity(binding.pnpm)) {
+    fail('retired private pnpm identity cannot execute official DSH')
+  }
   const profilePath = join(binding.hostHome, 'profiles', profileSegment(profileId))
   const canonical = await realpath(profilePath)
   const info = await lstat(profilePath)

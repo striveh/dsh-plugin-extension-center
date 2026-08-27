@@ -24,7 +24,8 @@ import { decodeManagedTarget } from '../../host/state-codec.ts'
 import { durableUnlink } from '../../host/durable-unlink.ts'
 import { inspectNpmArchive, materializeNpmArchive, type NpmPackageInspection } from '../../providers/npm-archive.ts'
 import {
-  profileMetadataCacheFromRecoveryPoint,
+  isCurrentProfileMetadataCacheBinding,
+  storedProfileMetadataCacheFromRecoveryPoint,
   type ProfileMetadataCacheBinding,
 } from '../../recovery/profile-metadata-cache.ts'
 import type { RpcJson } from '../../service/rpc-contract.ts'
@@ -573,6 +574,8 @@ export class ManagedPluginOwner {
   private readonly hostHome: string
   private readonly centerPackageName: string
   private readonly cli: ManagedPluginCli
+  private readonly isOperationQuarantined: (operationId: string, targetKey: string, profileId: string) => boolean
+  private readonly isTargetQuarantined: (targetKey: string, profileId: string) => boolean
   private readonly ownerId = randomUUID()
   private processIdentity: Promise<ProcessIdentity> | null = null
   private initialized: Promise<void> | null = null
@@ -585,6 +588,8 @@ export class ManagedPluginOwner {
     this.root = resolve(store.root)
     this.hostHome = resolve(options.hostHome)
     this.centerPackageName = options.centerPackageName ?? 'dsh-plugin-extension-center'
+    this.isOperationQuarantined = options.isOperationQuarantined ?? (() => false)
+    this.isTargetQuarantined = options.isTargetQuarantined ?? (() => false)
     if (options.pluginCli === undefined && options.officialDsh === undefined) {
       throw new Error('managed Plugin owner requires a trusted official DSH execution binding')
     }
@@ -789,9 +794,8 @@ export class ManagedPluginOwner {
     return Object.freeze({ entryId: row.id, moduleName: row.options.name, fiberPhase: 'active' })
   }
 
-  /** Read the durable owner projection, including a sidecar ahead of Center state after a crash. */
+  /** Read the durable owner projection without reconciling Loader or Profile state. */
   async sidecar(profileId: string, targetKey: string): Promise<ManagedPluginSidecar | null> {
-    await this.initialize()
     return await this.readSidecar(profileSegment(profileId), targetKey)
   }
 
@@ -942,6 +946,15 @@ export class ManagedPluginOwner {
     await this.recoverAbsentRollbacks()
     const records = (await this.store.listManaged()).filter(record => record.kind === 'plugin')
     for (const record of records.sort((left, right) => left.targetKey.localeCompare(right.targetKey))) {
+      if (this.isTargetQuarantined(record.targetKey, record.profileId)) continue
+      const recovery = this.recoveryMutation(record)
+      if (recovery !== null && (this.isOperationQuarantined(
+        recovery.operationId,
+        recovery.targetKey,
+        record.profileId,
+      ) || await this.operationUsesRetiredMetadataCache(recovery.operationId, record.profileId))) {
+        continue
+      }
       await this.withProfileLock(record.profileId, async () => {
         let sidecar = await this.readSidecar(record.profileId, record.targetKey)
         let effective = record
@@ -1027,6 +1040,9 @@ export class ManagedPluginOwner {
         throw new Error('managed Plugin absent rollback filename does not bind its operation')
       }
       if (receipt.status === 'pending') {
+        if (this.isTargetQuarantined(receipt.targetKey, receipt.profileId)
+          || this.isOperationQuarantined(receipt.operationId, receipt.targetKey, receipt.profileId)
+          || await this.operationUsesRetiredMetadataCache(receipt.operationId, receipt.profileId)) continue
         await this.withProfileLock(receipt.profileId, async () => {
           await this.completeAbsentRollback(receipt, await this.readSidecar(receipt.profileId, receipt.targetKey))
         })
@@ -1179,12 +1195,19 @@ export class ManagedPluginOwner {
       requireCurrentProfile: boolean
     }> | null = null,
   ): Promise<void> {
-    await this.assertProfileNoAmbiguity(profileId)
-    const before = await this.stableOfficialObservation(profileId, packageName, 'before', mutation)
-    if (this.observationHolds(before, packageName, activation)) return
+    if (mutation !== null && (this.isTargetQuarantined(mutation.targetKey, profileId)
+      || this.isOperationQuarantined(mutation.operationId, mutation.targetKey, profileId))) {
+      throw new Error('retired Plugin operation is quarantined from owner reconciliation')
+    }
     const metadataCache = mutation === null
       ? null
       : mutation.metadataCache ?? await this.operationMetadataCache(mutation.operationId, profileId)
+    if (metadataCache !== null && !isCurrentProfileMetadataCacheBinding(metadataCache)) {
+      throw new Error('retired Plugin metadata cache is read-only history')
+    }
+    await this.assertProfileNoAmbiguity(profileId)
+    const before = await this.stableOfficialObservation(profileId, packageName, 'before', mutation)
+    if (this.observationHolds(before, packageName, activation)) return
     await this.cli.audit(profileId, metadataCache, mutation?.requireCurrentProfile ?? false)
     let commandFailure: Readonly<{ error: unknown }> | null = null
     try {
@@ -1284,11 +1307,16 @@ export class ManagedPluginOwner {
   ): Promise<ProfileMetadataCacheBinding | null> {
     const snapshot = await this.store.getProviderSnapshot(operationId)
     if (snapshot === undefined) return null
-    const metadataCache = profileMetadataCacheFromRecoveryPoint(snapshot.recoveryPoint)
+    const metadataCache = storedProfileMetadataCacheFromRecoveryPoint(snapshot.recoveryPoint)
     if (metadataCache !== null && metadataCache.profileId !== profileId) {
       throw new Error('Plugin recovery metadata cache does not bind the Profile')
     }
     return metadataCache
+  }
+
+  private async operationUsesRetiredMetadataCache(operationId: string, profileId: string): Promise<boolean> {
+    const metadataCache = await this.operationMetadataCache(operationId, profileId)
+    return metadataCache !== null && !isCurrentProfileMetadataCacheBinding(metadataCache)
   }
 
   private async applyCanonicalLoader(

@@ -95,7 +95,7 @@ interface OfficialDshRecoveryBinding {
   readonly pnpm: Readonly<{
     schemaVersion: 1
     packageName: 'pnpm'
-    packageVersion: '11.7.0'
+    packageVersion: '11.21.0'
     registryIntegrity: string
     packageRoot: string
     packageTreeSha256: string
@@ -164,7 +164,7 @@ interface ProfileMetadataCacheBinding {
   readonly storeDir: string
   readonly expectedStoreDir: string
   readonly pnpmMajor: 11
-  readonly pnpmVersion: '11.7.0'
+  readonly pnpmVersion: '11.21.0'
 }
 
 /** Immutable executable and official DSH identities embedded in an operation opening event. */
@@ -815,8 +815,8 @@ function decodeRecoveryExecutable(value: unknown): RecoveryExecutableBinding {
   const pnpmShim = boundedString(pnpm.shimPath, 'journal recoveryExecutable.officialDsh.pnpm.shimPath', 4_096)
   const pnpmShell = boundedString(pnpm.shellPath, 'journal recoveryExecutable.officialDsh.pnpm.shellPath', 4_096)
   const runtimeRoot = boundedString(pnpm.runtimeRoot, 'journal recoveryExecutable.officialDsh.pnpm.runtimeRoot', 4_096)
-  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
-    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
+  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.21.0'
+    || pnpm.registryIntegrity !== 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ=='
     || ![pnpmPackageRoot, pnpmEntrypoint, pnpmShim, pnpmShell, runtimeRoot].every(isAbsolute)) {
     failure('journal recoveryExecutable.officialDsh.pnpm is invalid')
   }
@@ -862,7 +862,7 @@ function decodeRecoveryExecutable(value: unknown): RecoveryExecutableBinding {
       pnpm: Object.freeze({
         schemaVersion: 1,
         packageName: 'pnpm',
-        packageVersion: '11.7.0',
+        packageVersion: '11.21.0',
         registryIntegrity: pnpm.registryIntegrity as string,
         packageRoot: pnpmPackageRoot,
         packageTreeSha256: digest(
@@ -1363,7 +1363,7 @@ function decodeMetadataCache(value: unknown, binding: OfficialDshRecoveryBinding
     'storeDir', 'expectedStoreDir', 'pnpmMajor', 'pnpmVersion',
   ], 'Plugin recovery metadata cache')
   if (record.schemaVersion !== 1 || record.profileId !== profileId || record.pnpmMajor !== 11
-    || record.pnpmVersion !== '11.7.0') failure('Plugin recovery metadata cache identity is invalid')
+    || record.pnpmVersion !== '11.21.0') failure('Plugin recovery metadata cache identity is invalid')
   const profilePath = boundedString(record.profilePath, 'Plugin recovery metadata cache profilePath', 4_096)
   const generationPath = boundedString(record.generationPath, 'Plugin recovery metadata cache generationPath', 4_096)
   const cachePath = boundedString(record.cachePath, 'Plugin recovery metadata cache cachePath', 4_096)
@@ -1412,7 +1412,7 @@ function decodeMetadataCache(value: unknown, binding: OfficialDshRecoveryBinding
     storeDir,
     expectedStoreDir,
     pnpmMajor: 11,
-    pnpmVersion: '11.7.0',
+    pnpmVersion: '11.21.0',
   })
 }
 
@@ -1466,7 +1466,9 @@ async function verifyMetadataCache(
   const files = manifest.files.map((value, index) => {
     const item = strictRecord(value, ['path', 'sizeBytes', 'sha256'], `Plugin recovery metadata cache file ${String(index)}`)
     const path = boundedString(item.path, `Plugin recovery metadata cache file ${String(index)} path`, 4_096)
-    if (isAbsolute(path) || path.split('/').includes('..') || !path.startsWith('pnpm/v11/metadata/registry.npmjs.org/')) {
+    if (isAbsolute(path) || path.split('/').includes('..')
+      || !['pnpm/v11/metadata/registry.npmjs.org/', 'pnpm/v11/metadata-full/registry.npmjs.org/']
+        .some(prefix => path.startsWith(prefix))) {
       failure(`Plugin recovery metadata cache file ${String(index)} path is unsafe`)
     }
     return Object.freeze({

@@ -230,7 +230,7 @@ export function validatePackedBreakGlassPrecondition(input) {
     || binding.centerRoot !== centerRoot || official.schemaVersion !== 2
     || official.packageName !== '@deepseek-ai/dsh' || official.packageVersion !== '0.1.1-rc.2'
     || node.schemaVersion !== 1 || node.version !== process.version
-    || pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0') {
+    || pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.21.0') {
     fail('P0-BREAK-GLASS-BINDING', 'journal does not carry the exact schema 5 official rc.2 execution binding')
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(packageVersion)) {
@@ -380,7 +380,7 @@ async function verifyPackedBinding(archivePath, normalized) {
   const installedSupervisorBytes = await readFile(normalized.official.supervisorPath)
   if (manifest.name !== 'dsh-plugin-extension-center' || manifest.version !== normalized.binding.packageVersion
     || !Array.isArray(manifest.bundledDependencies) || !manifest.bundledDependencies.includes('pnpm')
-    || pnpmManifest.name !== 'pnpm' || pnpmManifest.version !== '11.7.0'
+    || pnpmManifest.name !== 'pnpm' || pnpmManifest.version !== '11.21.0'
     || fileSha256(recoveryBytes) !== normalized.binding.executableSha256
     || !recoveryBytes.equals(executableBytes)
     || fileSha256(supervisorBytes) !== normalized.official.supervisorSha256

@@ -52,7 +52,7 @@ function binding() {
       pnpm: {
         schemaVersion: 1,
         packageName: 'pnpm',
-        packageVersion: '11.7.0',
+        packageVersion: '11.21.0',
         registryIntegrity: 'sha512-fixture',
         packageRoot: resolve(toolchain, 'pnpm'),
         packageTreeSha256: digest,
@@ -146,7 +146,7 @@ test('accepts only a stopped Host and an exact schema 5 managed-Plugin recovery 
   assert.equal(value.packageName, packageName)
   assert.equal(value.binding.schemaVersion, 5)
   assert.equal(value.official.packageVersion, '0.1.1-rc.2')
-  assert.equal(value.pnpm.packageVersion, '11.7.0')
+  assert.equal(value.pnpm.packageVersion, '11.21.0')
   assert.deepEqual(value.command, [recoveryPath, centerRoot, operationId])
 })
 
