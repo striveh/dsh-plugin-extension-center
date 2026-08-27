@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file. The format 
 - Invoke official Plugin CLI removal with the exact rc.2 argument list, omitting the add-only pnpm `--ignore-scripts` option that `pnpm remove` rejects.
 - Reuse the P0 Profile-removal surface audit in release verification, preserving exact manifest, lock, and composed-config restoration while admitting only declared package-manager internals and rejecting residual Center resolution links.
 - Load each Release artifact's manifest authority from its own exact source commit, so rc.0 backfill and later update verification do not compare historical packages with the protected-main verifier manifest.
+- Give the four subprocess-heavy standalone recovery tests the same explicit 15-second test budget as adjacent recovery cases, preventing loaded Node 22 CI from applying Vitest's unrelated five-second default.
 
 ## [0.1.0-rc.0] - 2026-08-27
 
