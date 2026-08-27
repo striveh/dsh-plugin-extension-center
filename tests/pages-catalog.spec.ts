@@ -138,8 +138,12 @@ describe('GitHub Pages signed catalog projection', () => {
     expect(workflowText).toContain('post-publication-evidence-${PREVIOUS_COMMIT}-${previous_attempt}')
     expect(workflowText).toContain('--previous-release-ready "$PREVIOUS_RELEASE_READY"')
     expect(workflowText).toContain('--previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"')
+    expect(workflowText).not.toMatch(/pnpm run test:[^\n]* --(?:[ \t]|$)/mu)
     expect(workflowText).not.toContain('secrets.')
     const actions = [...workflowText.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map(match => match[1])
     expect(actions.every(action => /^[^@\s]+@[0-9a-f]{40}$/u.test(action!))).toBe(true)
+
+    const discoveryWorkflow = await readFile('.github/workflows/catalog-discovery.yml', 'utf8')
+    expect(discoveryWorkflow).not.toMatch(/pnpm run test:[^\n]* --(?:[ \t]|$)/mu)
   })
 })

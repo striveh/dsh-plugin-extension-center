@@ -83,11 +83,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p .artifacts/acceptance/github-ci
-          pnpm run test:acceptance:github-ci -- \
+          pnpm run test:acceptance:github-ci \
             --commit "$EXPECTED_COMMIT" \
             --receipt .artifacts/acceptance/github-ci/current.json
           if test -n "$PREVIOUS_COMMIT"; then
-            pnpm run test:acceptance:github-ci -- \
+            pnpm run test:acceptance:github-ci \
               --commit "$PREVIOUS_COMMIT" \
               --receipt .artifacts/acceptance/github-ci/previous.json
           fi
@@ -229,7 +229,7 @@ jobs:
               --previous-manifest-sha256 "$PREVIOUS_MANIFEST_SHA"
             )
           fi
-          pnpm run test:acceptance:runtime-release -- "${args[@]}"
+          pnpm run test:acceptance:runtime-release "${args[@]}"
           echo "RUNTIME_RECEIPT_SHA=sha256:$(sha256sum .artifacts/acceptance/runtime-release/receipt.json | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
       - name: Resolve immutable pnpm binding
         run: |
@@ -275,16 +275,16 @@ jobs:
               --previous-ci-receipt-sha256 "$PREVIOUS_CI_RECEIPT_SHA"
             )
           fi
-          pnpm run test:acceptance:public-release -- "${args[@]}"
+          pnpm run test:acceptance:public-release "${args[@]}"
       - name: Verify signed public catalog deployment
         run: >-
-          pnpm run test:acceptance:public-catalog --
+          pnpm run test:acceptance:public-catalog
           --receipt .artifacts/acceptance/public-catalog/receipt.json
       - name: Re-fetch every signed catalog source and artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          pnpm run test:acceptance:catalog-sources --
+          pnpm run test:acceptance:catalog-sources
           --receipt .artifacts/acceptance/catalog-sources/receipt.json
       - name: Compose one cross-bound release-ready receipt
         env:
@@ -307,7 +307,7 @@ jobs:
               --previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"
             )
           fi
-          pnpm run test:release-ready -- "${args[@]}"
+          pnpm run test:release-ready "${args[@]}"
       - name: Upload bounded post-publication receipts
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
