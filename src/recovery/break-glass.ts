@@ -15,6 +15,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 
 const CURRENT_FILENAME = 'CURRENT.json'
@@ -32,6 +33,9 @@ const PROCESS_PROBE_OUTPUT_LIMIT = 4 * 1024
 const PROCESS_PROBE_TIMEOUT_MS = 2_000
 const TERMINATION_GRACE_MS = 250
 const SUPERVISOR_FALLBACK_MS = 2_000
+const PROCESS_GROUP_QUIESCENCE_MS = 5_000
+const PROCESS_GROUP_POLL_MS = 10
+const SUPERVISOR_CHILD_OUTCOME_BYTES = 4_096
 const OFFICIAL_DSH_PACKAGE = '@deepseek-ai/dsh'
 const OFFICIAL_DSH_VERSION = '0.1.1-rc.2'
 const PNPM_11_PACKAGE_MANAGER = /^pnpm@11\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
@@ -290,6 +294,13 @@ interface RecoveryTransaction extends Record<string, unknown> {
   status: 'prepared' | 'committed'
 }
 
+interface SupervisorChildOutcome {
+  readonly schemaVersion: 1
+  readonly code: number | null
+  readonly signal: NodeJS.Signals | null
+  readonly launchError: boolean
+}
+
 function failure(message: string): never {
   throw new Error(message)
 }
@@ -306,6 +317,32 @@ function strictRecord(value: unknown, fields: readonly string[], label: string):
     failure(`${label} fields are invalid`)
   }
   return value
+}
+
+function isCompleteSupervisorChildOutcome(bytes: Buffer): boolean {
+  return bytes.length > 0 && bytes.length <= SUPERVISOR_CHILD_OUTCOME_BYTES
+    && bytes[bytes.length - 1] === 0x0a && bytes.subarray(0, -1).indexOf(0x0a) === -1
+    && bytes.indexOf(0x0d) === -1
+}
+
+function decodeSupervisorChildOutcome(bytes: Buffer, label: string): SupervisorChildOutcome {
+  if (!isCompleteSupervisorChildOutcome(bytes)) failure(`${label} is not one bounded JSON record`)
+  const value = bytes.toString('utf8')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value.slice(0, -1)) as unknown
+  } catch (cause) {
+    throw new Error(`${label} is not valid JSON`, { cause })
+  }
+  const record = strictRecord(parsed, ['schemaVersion', 'code', 'signal', 'launchError'], label)
+  if (record.schemaVersion !== 1 || typeof record.launchError !== 'boolean'
+    || !(record.code === null || Number.isSafeInteger(record.code) && (record.code as number) >= 0
+      && (record.code as number) <= 255)
+    || !(record.signal === null || typeof record.signal === 'string' && /^[A-Z0-9]+$/u.test(record.signal))
+    || (record.code === null) === (record.signal === null)) {
+    failure(`${label} fields are invalid`)
+  }
+  return Object.freeze(record as unknown as SupervisorChildOutcome)
 }
 
 function boundedString(value: unknown, label: string, maximum = 1_024): string {
@@ -1546,10 +1583,26 @@ function hardenPnpmArguments(
   ])
 }
 
-async function executionLease(binding: OfficialDshRecoveryBinding, profileId: string, processGroupPid: number): Promise<Readonly<{
-  path: string
-  value: unknown
-}>> {
+interface RecoveryExecutionRecord {
+  readonly path: string
+  readonly value: Readonly<Record<string, unknown>>
+  readonly owner: ProfileLockOwner
+}
+
+interface RecoveryExecutionDispatchRecord {
+  readonly path: string
+  readonly value: Readonly<{
+    readonly schemaVersion: 1
+    readonly profileId: string
+    readonly ownerId: string
+    readonly leaseId: string
+    readonly processGroupPid: number
+    readonly executionDigest: string
+    readonly dispatchedAtMs: number
+  }>
+}
+
+async function executionLease(binding: OfficialDshRecoveryBinding, profileId: string, processGroupPid: number): Promise<RecoveryExecutionRecord> {
   const lease = join(binding.hostHome, '.extension-center-plugin-coordination', 'leases', storageKey(profileId))
   const owner = decodeProfileLockOwner(
     await readOptionalRecord(join(lease, 'owner.json'), MAX_POINTER_BYTES, 'official DSH recovery lease owner'),
@@ -1571,13 +1624,34 @@ async function executionLease(binding: OfficialDshRecoveryBinding, profileId: st
   }
   const path = join(lease, 'execution.json')
   await writeExclusive(path, value)
-  return Object.freeze({ path, value })
+  return Object.freeze({ path, value: Object.freeze(value), owner })
 }
 
-async function clearExecutionLease(record: Readonly<{ path: string; value: unknown }>): Promise<void> {
-  const current = await readOptionalRecord(record.path, MAX_POINTER_BYTES, 'official DSH recovery execution lease')
-  if (canonicalJson(current) !== canonicalJson(record.value)) failure('official DSH recovery execution lease changed')
-  await removeRegular(record.path, 'official DSH recovery execution lease')
+function executionDispatch(record: RecoveryExecutionRecord): RecoveryExecutionDispatchRecord {
+  const value = Object.freeze({
+    schemaVersion: 1 as const,
+    profileId: record.owner.profileId,
+    ownerId: record.owner.ownerId,
+    leaseId: record.owner.leaseId,
+    processGroupPid: record.value.processGroupPid as number,
+    executionDigest: canonicalDigest(record.value),
+    dispatchedAtMs: Date.now(),
+  })
+  return Object.freeze({
+    path: join(dirname(record.path), 'execution-dispatch.json'),
+    value,
+  })
+}
+
+async function clearExecutionRecord(
+  record: Readonly<{ path: string; value: unknown }>,
+  label: string,
+  optional: boolean,
+): Promise<void> {
+  const current = await readOptionalRecord(record.path, MAX_POINTER_BYTES, label)
+  if (current === undefined && optional) return
+  if (current === undefined || canonicalJson(current) !== canonicalJson(record.value)) failure(`${label} changed`)
+  await removeRegular(record.path, label)
 }
 
 async function runOfficialDsh(
@@ -1606,64 +1680,202 @@ async function runOfficialDsh(
     arguments: hardenedArguments,
     environment: runtime.environment,
   }), 'utf8').toString('base64url')
-  let lease: Readonly<{ path: string; value: unknown }> | null = null
+  const durableRecords: {
+    lease: RecoveryExecutionRecord | null
+    dispatch: RecoveryExecutionDispatchRecord | null
+    dispatchDurable: boolean
+  } = { lease: null, dispatch: null, dispatchDurable: false }
+  let processGroupQuiescent = false
   try {
-    await new Promise<void>((accept, reject) => {
-      const child = spawn(binding.node.executablePath, [binding.supervisorPath, encoded], {
-        cwd: dirname(binding.supervisorPath),
-        detached: true,
-        env: {},
-        shell: false,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-      let stdout = ''
-      let stderr = ''
-      let launchError: unknown
-      let fallback: NodeJS.Timeout | null = null
-      let timeoutObservation: NodeJS.Timeout | null = null
-      let timedOut = false
-      let settled = false
-      child.stdout.on('data', (chunk: Buffer) => { stdout = appendOutput(stdout, chunk) })
-      child.stderr.on('data', (chunk: Buffer) => { stderr = appendOutput(stderr, chunk) })
-      child.once('error', cause => { launchError = cause })
-      const abort = (cause: unknown) => {
-        if (settled) return
-        settled = true
-        const pid = child.pid
-        if (pid !== undefined) {
-          try { process.kill(-pid, 'SIGKILL') } catch { /* process group did not start */ }
-        }
+    const child = spawn(binding.node.executablePath, [binding.supervisorPath, encoded], {
+      cwd: dirname(binding.supervisorPath),
+      detached: true,
+      env: {},
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    const childOutcomeChunks: Buffer[] = []
+    let childOutcomeBytes = 0
+    let childOutcomeOverflow = false
+    let childOutcomeReadError: unknown
+    let launchError: unknown
+    let fallback: NodeJS.Timeout | null = null
+    let timeoutObservation: NodeJS.Timeout | null = null
+    let deadlineAtMs: number | null = null
+    let outcomeObservedAtMs: number | null = null
+    let timedOut = false
+    let closeObserved = false
+    let exitObserved = false
+    let dispatchSettled = false
+    let executionWrite: Promise<void> = Promise.resolve()
+    let dispatchWrite: Promise<void> = Promise.resolve()
+    let resolveDispatch!: () => void
+    let rejectDispatch!: (cause: unknown) => void
+    const dispatchPromise = new Promise<void>((accept, reject) => {
+      resolveDispatch = () => {
+        if (dispatchSettled) return
+        dispatchSettled = true
+        accept()
+      }
+      rejectDispatch = cause => {
+        if (dispatchSettled) return
+        dispatchSettled = true
         reject(cause)
       }
-      child.once('spawn', () => {
-        const pid = child.pid
-        if (pid === undefined) return abort(new Error('official DSH recovery supervisor has no process id'))
-        void executionLease(binding, profileId, pid).then(record => {
-          lease = record
-          child.stdin.write('START\n')
-          timeoutObservation = setTimeout(() => { timedOut = true }, binding.timeoutMs)
-          timeoutObservation.unref()
-          fallback = setTimeout(() => {
-            try { process.kill(-pid, 'SIGKILL') } catch { /* supervisor already exited */ }
-          }, binding.timeoutMs + SUPERVISOR_FALLBACK_MS)
-          fallback.unref()
-        }, abort)
-      })
-      child.once('close', (code, signal) => {
-        if (fallback !== null) clearTimeout(fallback)
-        if (timeoutObservation !== null) clearTimeout(timeoutObservation)
-        if (settled) return
-        settled = true
-        if (launchError !== undefined) return reject(new Error(`official DSH recovery ${label} could not start`, { cause: launchError }))
-        if (code === 0) return accept()
-        if (code === 124 || timedOut) return reject(new Error(`official DSH recovery ${label} timed out`))
-        if (code === 125) return reject(new Error(`official DSH recovery ${label} lost its parent`))
-        const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n')
-          || `exit=${String(code)} signal=${String(signal)}`
-        reject(new Error(`official DSH recovery ${label} failed: ${detail}`))
+    })
+    let resolveClose!: (value: Readonly<{ code: number | null; signal: NodeJS.Signals | null }>) => void
+    const closePromise = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(accept => {
+      resolveClose = accept
+    })
+    child.stdout.on('data', (chunk: Buffer) => { stdout = appendOutput(stdout, chunk) })
+    child.stderr.on('data', (chunk: Buffer) => { stderr = appendOutput(stderr, chunk) })
+    child.stdio[3]!.on('data', (chunk: Buffer) => {
+      if (childOutcomeOverflow) return
+      childOutcomeBytes += chunk.length
+      if (childOutcomeBytes > SUPERVISOR_CHILD_OUTCOME_BYTES) {
+        childOutcomeOverflow = true
+        childOutcomeChunks.length = 0
+        return
+      }
+      childOutcomeChunks.push(Buffer.from(chunk))
+      if (outcomeObservedAtMs === null
+        && isCompleteSupervisorChildOutcome(Buffer.concat(childOutcomeChunks, childOutcomeBytes))) {
+        outcomeObservedAtMs = performance.now()
+        if (timeoutObservation !== null) {
+          clearTimeout(timeoutObservation)
+          timeoutObservation = null
+        }
+      }
+    })
+    child.stdio[3]!.once('error', cause => { childOutcomeReadError = cause })
+    child.stdin.once('error', cause => {
+      rejectDispatch(new Error('official DSH recovery supervisor start dispatch failed', { cause }))
+    })
+    child.once('error', cause => {
+      launchError = cause
+      rejectDispatch(new Error(`official DSH recovery ${label} could not start`, { cause }))
+    })
+    child.once('spawn', () => {
+      const pid = child.pid
+      if (pid === undefined) {
+        rejectDispatch(new Error('official DSH recovery supervisor has no process id'))
+        return
+      }
+      fallback = setTimeout(() => {
+        if (exitObserved) return
+        try { process.kill(-pid, 'SIGKILL') } catch { /* supervisor already exited */ }
+      }, binding.timeoutMs + SUPERVISOR_FALLBACK_MS)
+      fallback.unref()
+      executionWrite = executionLease(binding, profileId, pid).then(record => {
+        durableRecords.lease = record
+        if (dispatchSettled || closeObserved) return
+        const deadline = performance.now() + binding.timeoutMs
+        deadlineAtMs = deadline
+        timeoutObservation = setTimeout(() => { timedOut = true }, Math.max(0, deadline - performance.now()))
+        timeoutObservation.unref()
+        try {
+          child.stdin.write('START\n', error => {
+            if (dispatchSettled) return
+            if (closeObserved) {
+              rejectDispatch(new Error('official DSH recovery supervisor closed before its start dispatch became durable'))
+              return
+            }
+            if (error !== undefined && error !== null) {
+              rejectDispatch(new Error('official DSH recovery supervisor start dispatch failed', { cause: error }))
+              return
+            }
+            const candidate = executionDispatch(record)
+            durableRecords.dispatch = candidate
+            dispatchWrite = writeExclusive(candidate.path, candidate.value).then(() => {
+              durableRecords.dispatchDurable = true
+              if (!closeObserved) resolveDispatch()
+            }, cause => {
+              rejectDispatch(new Error('official DSH recovery supervisor start dispatch could not be recorded', { cause }))
+            })
+          })
+        } catch (cause: unknown) {
+          rejectDispatch(new Error('official DSH recovery supervisor start dispatch failed', { cause }))
+          return
+        }
+      }, cause => {
+        rejectDispatch(cause)
       })
     })
+    child.once('exit', () => {
+      exitObserved = true
+      if (fallback !== null) {
+        clearTimeout(fallback)
+        fallback = null
+      }
+    })
+    child.once('close', (code, signal) => {
+      if (fallback !== null) {
+        clearTimeout(fallback)
+        fallback = null
+      }
+      if (timeoutObservation !== null) {
+        clearTimeout(timeoutObservation)
+        timeoutObservation = null
+      }
+      closeObserved = true
+      rejectDispatch(new Error('official DSH recovery supervisor closed before its start dispatch became durable'))
+      resolveClose(Object.freeze({ code, signal }))
+    })
+    let dispatchError: unknown
+    try {
+      await dispatchPromise
+    } catch (cause: unknown) {
+      dispatchError = cause
+      if (!exitObserved) child.stdin.destroy()
+    }
+    const supervisorOutcome = await closePromise
+    await executionWrite
+    await dispatchWrite
+    const pid = child.pid
+    processGroupQuiescent = pid === undefined || await waitForProcessGroupQuiescence(pid)
+    if (!processGroupQuiescent) {
+      throw new Error('official DSH recovery supervisor process group did not reach quiescence; durable execution fence retained')
+    }
+    if (dispatchError !== undefined) throw dispatchError
+    if (launchError !== undefined) throw new Error(`official DSH recovery ${label} could not start`, { cause: launchError })
+    const deadlineExpired = deadlineAtMs !== null && (timedOut || (outcomeObservedAtMs === null
+      ? performance.now() >= deadlineAtMs
+      : outcomeObservedAtMs >= deadlineAtMs))
+    if (deadlineExpired) {
+      throw new Error(`official DSH recovery ${label} timed out`)
+    }
+    if (childOutcomeReadError !== undefined) {
+      throw new Error('official DSH recovery supervisor child outcome could not be read', { cause: childOutcomeReadError })
+    }
+    if (childOutcomeOverflow) failure('official DSH recovery supervisor child outcome is not one bounded JSON record')
+    const childOutcome = childOutcomeBytes === 0
+      ? null
+      : decodeSupervisorChildOutcome(
+          Buffer.concat(childOutcomeChunks, childOutcomeBytes),
+          'official DSH recovery supervisor child outcome',
+        )
+    if (childOutcome === null) {
+      if (supervisorOutcome.code === 125) throw new Error(`official DSH recovery ${label} lost its parent`)
+      throw new Error(`official DSH recovery ${label} supervisor closed without a child outcome`)
+    }
+    if (supervisorOutcome.code !== null || supervisorOutcome.signal !== 'SIGKILL') {
+      throw new Error(`official DSH recovery ${label} supervisor did not terminate its process group after publishing the child outcome`)
+    }
+    if (childOutcome.launchError) {
+      throw new Error(`official DSH recovery ${label} could not start`)
+    }
+    if (childOutcome.code === 124) {
+      throw new Error(`official DSH recovery ${label} timed out`)
+    } else if (childOutcome.code === 0) {
+      // Continue with post-mutation verification only after dispatch and group quiescence are both proven.
+    } else {
+      const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n')
+        || `exit=${String(childOutcome.code)} signal=${String(childOutcome.signal)}`
+      throw new Error(`official DSH recovery ${label} failed: ${detail}`)
+    }
     const auditedProfilePath = await auditProfileExecution(binding, profileId)
     const observedStore = await readInstalledProfileStore(auditedProfilePath)
     if (observedStore !== null && observedStore !== runtime.expectedStore
@@ -1673,9 +1885,29 @@ async function runOfficialDsh(
     await verifyMetadataCache(binding, metadataCache)
     await verifyOfficialDsh(binding)
   } finally {
-    if (lease !== null) await clearExecutionLease(lease)
-    const canonical = await realpath(runtime.directory).catch(() => null)
-    if (canonical === runtime.directory) await rm(runtime.directory, { recursive: true })
+    const lease = durableRecords.lease
+    const dispatch = durableRecords.dispatch
+    if (lease !== null && processGroupQuiescent) {
+      if (dispatch === null) {
+        const unexpected = await readOptionalRecord(
+          join(dirname(lease.path), 'execution-dispatch.json'),
+          MAX_POINTER_BYTES,
+          'official DSH recovery execution dispatch',
+        )
+        if (unexpected !== undefined) failure('official DSH recovery execution dispatch has no exact attempt')
+      } else {
+        await clearExecutionRecord(
+          dispatch,
+          'official DSH recovery execution dispatch',
+          !durableRecords.dispatchDurable,
+        )
+      }
+      await clearExecutionRecord(lease, 'official DSH recovery execution lease', false)
+    }
+    if (lease === null || processGroupQuiescent) {
+      const canonical = await realpath(runtime.directory).catch(() => null)
+      if (canonical === runtime.directory) await rm(runtime.directory, { recursive: true })
+    }
   }
 }
 
@@ -2315,17 +2547,48 @@ function processGroupStatus(processGroupPid: number): 'alive' | 'dead' | 'unknow
   }
 }
 
+async function waitForProcessGroupQuiescence(processGroupPid: number): Promise<boolean> {
+  const deadline = performance.now() + PROCESS_GROUP_QUIESCENCE_MS
+  for (;;) {
+    const status = processGroupStatus(processGroupPid)
+    if (status === 'dead') return true
+    if (status === 'unknown') return false
+    if (performance.now() >= deadline) return false
+    await new Promise(resolveDelay => setTimeout(resolveDelay, PROCESS_GROUP_POLL_MS))
+  }
+}
+
+async function assertProfileLeaseEntries(path: string): Promise<void> {
+  const allowed = new Set(['owner.json', 'execution.json', 'execution-dispatch.json'])
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    if (!allowed.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) {
+      failure('managed Plugin profile lock contains foreign state')
+    }
+  }
+}
+
 async function assertProfileExecutionDead(
   destination: string,
   owner: ProfileLockOwner,
   profileId: string,
 ): Promise<void> {
-  const executionValue = await readOptionalRecord(
-    join(destination, 'execution.json'),
-    MAX_POINTER_BYTES,
-    'Plugin recovery held execution',
-  )
-  if (executionValue === undefined) return
+  await assertProfileLeaseEntries(destination)
+  const [executionValue, dispatchValue] = await Promise.all([
+    readOptionalRecord(
+      join(destination, 'execution.json'),
+      MAX_POINTER_BYTES,
+      'Plugin recovery held execution',
+    ),
+    readOptionalRecord(
+      join(destination, 'execution-dispatch.json'),
+      MAX_POINTER_BYTES,
+      'Plugin recovery held execution dispatch',
+    ),
+  ])
+  if (executionValue === undefined) {
+    if (dispatchValue !== undefined) failure('managed Plugin profile execution dispatch has no execution lease')
+    return
+  }
   const execution = strictRecord(executionValue, [
     'schemaVersion', 'profileId', 'ownerId', 'parentPid', 'processGroupPid', 'supervisorSha256', 'startedAtMs',
   ], 'Plugin recovery held execution')
@@ -2335,6 +2598,16 @@ async function assertProfileExecutionDead(
     failure('managed Plugin profile execution lease is corrupt')
   }
   digest(execution.supervisorSha256, 'Plugin recovery held execution.supervisorSha256')
+  if (dispatchValue !== undefined) {
+    const dispatch = strictRecord(dispatchValue, [
+      'schemaVersion', 'profileId', 'ownerId', 'leaseId', 'processGroupPid', 'executionDigest', 'dispatchedAtMs',
+    ], 'Plugin recovery held execution dispatch')
+    if (dispatch.schemaVersion !== 1 || dispatch.profileId !== profileId || dispatch.ownerId !== owner.ownerId
+      || dispatch.leaseId !== owner.leaseId || dispatch.processGroupPid !== execution.processGroupPid
+      || dispatch.executionDigest !== canonicalDigest(executionValue) || !Number.isSafeInteger(dispatch.dispatchedAtMs)) {
+      failure('managed Plugin profile execution dispatch is corrupt')
+    }
+  }
   const status = processGroupStatus(execution.processGroupPid as number)
   if (status === 'alive') failure(`managed Plugin profile has a live official CLI subtree: ${profileId}`)
   if (status === 'unknown') failure(`managed Plugin profile CLI subtree cannot be verified: ${profileId}`)
@@ -2751,14 +3024,26 @@ async function acquireProfileLock(binding: OfficialDshRecoveryBinding, profileId
     throw error
   }
   return async () => {
+    await assertProfileLeaseEntries(paths.destination)
     const held = decodeProfileLockOwner(
       await readOptionalRecord(join(paths.destination, 'owner.json'), MAX_POINTER_BYTES, 'Plugin recovery lock owner'),
       profileId,
       'Plugin recovery lock owner',
     )
     if (!sameProfileLockOwner(held, owner)) failure('managed Plugin profile lock ownership changed')
-    if (await readOptionalRecord(join(paths.destination, 'execution.json'), MAX_POINTER_BYTES, 'Plugin recovery execution lease')
-      !== undefined) {
+    const [execution, dispatch] = await Promise.all([
+      readOptionalRecord(
+        join(paths.destination, 'execution.json'),
+        MAX_POINTER_BYTES,
+        'Plugin recovery execution lease',
+      ),
+      readOptionalRecord(
+        join(paths.destination, 'execution-dispatch.json'),
+        MAX_POINTER_BYTES,
+        'Plugin recovery execution dispatch',
+      ),
+    ])
+    if (execution !== undefined || dispatch !== undefined) {
       failure('managed Plugin profile execution subtree has not reached quiescence')
     }
     await assertNoProfileTakeover(paths, profileId)

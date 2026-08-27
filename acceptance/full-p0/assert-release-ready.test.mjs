@@ -222,6 +222,30 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS) {
   return { ...body, receiptDigest: canonicalSha256(body) }
 }
 
+function updateReleaseReadyReceipt(previous, current) {
+  const receipt = previousReleaseReadyReceipt(current)
+  receipt.p0Status = 'p0-release-ready'
+  receipt.releaseStage = current.version === '0.1.0' ? 'stable' : 'update-rc'
+  receipt.artifacts.previous = releaseReadyArtifact(previous)
+  receipt.evidence.previousGithubCi = {
+    acceptanceId: 'P0-GITHUB-CI-EXACT-COMMIT',
+    sha256: `sha256:${'1'.repeat(64)}`,
+    receiptDigest: `sha256:${'2'.repeat(64)}`,
+    runId: 41,
+  }
+  receipt.evidence.previousReleaseReady = {
+    acceptanceId: 'P0-EXTENSION-CENTER-RELEASE-READY',
+    sha256: `sha256:${'3'.repeat(64)}`,
+    receiptDigest: `sha256:${'4'.repeat(64)}`,
+    runId: 40,
+  }
+  receipt.claims.publicPreviousToCurrentUpdate = true
+  receipt.claims.signedCatalogPreviousToCurrentUpdate = true
+  receipt.notProven = receipt.notProven.slice(2)
+  const { receiptDigest: _oldDigest, ...body } = receipt
+  return { ...body, receiptDigest: canonicalSha256(body) }
+}
+
 function runtimeArtifact(artifact) {
   return { ...artifact, filename: `${artifact.version}.tgz`, hostBoot: true, clientBoot: true, rpcRegistration: true }
 }
@@ -674,6 +698,52 @@ test('rejects stable unless it advances directly from rc.1', () => {
   const previous = { ...PREVIOUS, version: '0.1.0-rc.2' }
   const current = { ...CURRENT, version: '0.1.0' }
   assert.throws(() => assertReleaseReady(evidence(previous, current)), /must update from 0\.1\.0-rc\.1/u)
+})
+
+test('rejects rc.1 to rc.2 even with an otherwise valid previous release-ready receipt', () => {
+  const rc0 = {
+    ...PREVIOUS,
+    sha256: `sha256:${'3'.repeat(64)}`,
+    manifestSha256: `sha256:${'4'.repeat(64)}`,
+    sourceCommit: '5'.repeat(40),
+  }
+  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const rc2 = { ...CURRENT, version: '0.1.0-rc.2' }
+  const input = evidence(rc1, rc2)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc1)
+  assert.throws(() => assertReleaseReady(input), /fixed rc\.0 to rc\.1 to stable sequence/u)
+})
+
+test('rejects stable when the previous release-ready receipt embeds an rc.9 to rc.1 transition', () => {
+  const rc9 = {
+    ...PREVIOUS,
+    version: '0.1.0-rc.9',
+    sha256: `sha256:${'3'.repeat(64)}`,
+    manifestSha256: `sha256:${'4'.repeat(64)}`,
+    sourceCommit: '5'.repeat(40),
+  }
+  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const stable = { ...CURRENT, version: '0.1.0' }
+  const input = evidence(rc1, stable)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc9, rc1)
+  assert.throws(() => assertReleaseReady(input), /previous release-ready.*fixed rc\.0 to rc\.1 to stable sequence/u)
+})
+
+test('rejects a previous release-ready receipt whose release stage disagrees with its transition', () => {
+  const rc0 = {
+    ...PREVIOUS,
+    sha256: `sha256:${'3'.repeat(64)}`,
+    manifestSha256: `sha256:${'4'.repeat(64)}`,
+    sourceCommit: '5'.repeat(40),
+  }
+  const rc1 = { ...PREVIOUS, version: '0.1.0-rc.1' }
+  const stable = { ...CURRENT, version: '0.1.0' }
+  const input = evidence(rc1, stable)
+  input.previousReleaseReady = updateReleaseReadyReceipt(rc0, rc1)
+  input.previousReleaseReady.releaseStage = 'stable'
+  const { receiptDigest: _oldDigest, ...body } = input.previousReleaseReady
+  input.previousReleaseReady.receiptDigest = canonicalSha256(body)
+  assert.throws(() => assertReleaseReady(input), /previous release-ready stage and artifact history disagree/u)
 })
 
 test('rejects previous runtime evidence that no longer identifies its prior packaged bootstrap', () => {

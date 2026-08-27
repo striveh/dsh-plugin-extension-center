@@ -20,6 +20,7 @@ import { FileOperationStore } from '../src/storage/operation-store.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
 const roots: string[] = []
+const spawnedPids: number[] = []
 const OPERATION_ID = 'operation:break-glass:plugin:1'
 const PROFILE_ID = 'web'
 const SCOPE_KEY = 'profile:web'
@@ -40,6 +41,7 @@ interface Fixture {
   readonly sidecarPath: string
   readonly transactionPath: string
   readonly before: ManagedTargetRecord | null
+  readonly orphanPids: string | null
 }
 
 interface RetainedVersion {
@@ -48,6 +50,13 @@ interface RetainedVersion {
 }
 
 afterEach(async () => {
+  for (const pid of spawnedPids.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+  }
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -355,6 +364,7 @@ function authorization(
 async function fixture(input: Readonly<{
   absentBefore?: boolean
   ownerKey?: string
+  orphaningCli?: boolean
 }> = {}): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'extension-break-glass-')))
   roots.push(root)
@@ -372,6 +382,22 @@ async function fixture(input: Readonly<{
     'plugin', `--profile=${PROFILE_ID}`, 'add', v2.artifactPath,
     '--offline', '--ignore-scripts', '--save-exact', '--store-dir', official.storeDir,
   ])
+  const orphanPids = input.orphaningCli === true ? join(root, 'orphan-pids.json') : null
+  if (orphanPids !== null) {
+    const grandchild = [
+      "process.on('SIGTERM', () => {})",
+      'setInterval(() => {}, 1000)',
+    ].join(';')
+    await chmod(official.entrypointPath, 0o700)
+    await writeFile(official.entrypointPath, [
+      "import { spawn } from 'node:child_process'",
+      "import { writeFileSync } from 'node:fs'",
+      `const child = spawn(process.execPath, ['--input-type=module', '--eval', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      'child.unref()',
+      `writeFileSync(${JSON.stringify(orphanPids)}, JSON.stringify([process.pid, child.pid]))`,
+    ].join('\n'))
+    await chmod(official.entrypointPath, 0o500)
+  }
   const compiled = await compileStandaloneCli(root)
   const supervisor = await compileStandaloneSupervisor(root)
   const recoveryExecutable = await installRecoveryExecutable({
@@ -444,6 +470,7 @@ async function fixture(input: Readonly<{
     sidecarPath,
     transactionPath,
     before,
+    orphanPids,
   }
 }
 
@@ -467,6 +494,19 @@ function runCli(
       resolvePromise({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), exitCode: code })
     })
   })
+}
+
+async function expectProcessAbsent(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      process.kill(pid, 0)
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return
+      throw error
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
+  }
+  throw new Error(`break-glass official CLI process remains alive: ${String(pid)}`)
 }
 
 async function profileState(value: Fixture): Promise<Readonly<{
@@ -496,6 +536,29 @@ async function profileState(value: Fixture): Promise<Readonly<{
 }
 
 describe('standalone Center break-glass recovery', () => {
+  it('classifies the observed child outcome deadline before accepting supervisor success', async () => {
+    for (const name of ['execution.ts', 'break-glass.ts']) {
+      const source = await readFile(join(process.cwd(), 'src', 'recovery', name), 'utf8')
+      const observation = source.indexOf('outcomeObservedAtMs = performance.now()')
+      const deadline = source.indexOf('if (deadlineExpired)', observation)
+      const success = source.indexOf('else if (childOutcome.code === 0)', deadline)
+      const stdinError = source.indexOf("child.stdin.once('error'")
+      const startDispatch = source.indexOf("child.stdin.write('START\\n'", stdinError)
+      const exitObserved = source.indexOf("child.once('exit'")
+      const closeObserved = source.indexOf("child.once('close'", exitObserved)
+      const passiveDispatchFailure = source.indexOf('if (!exitObserved) child.stdin.destroy()')
+      expect(observation).toBeGreaterThanOrEqual(0)
+      expect(deadline).toBeGreaterThan(observation)
+      expect(success).toBeGreaterThan(deadline)
+      expect(stdinError).toBeGreaterThanOrEqual(0)
+      expect(startDispatch).toBeGreaterThan(stdinError)
+      expect(exitObserved).toBeGreaterThanOrEqual(0)
+      expect(closeObserved).toBeGreaterThan(exitObserved)
+      expect(passiveDispatchFailure).toBeGreaterThan(closeObserved)
+      expect([...source.matchAll(/process\.kill\(-pid, 'SIGKILL'\)/gu)]).toHaveLength(1)
+    }
+  })
+
   it('uses the bound official CLI to restore Profile v1 before committing Center state', async () => {
     const value = await fixture()
 
@@ -735,7 +798,7 @@ describe('standalone Center break-glass recovery', () => {
       storageKey(PROFILE_ID),
     )
     const currentIdentity = await captureCurrentProcessIdentity()
-    await writeCanonical(join(lease, 'owner.json'), {
+    const owner = {
       schemaVersion: 2,
       profileId: PROFILE_ID,
       ownerId: 'break-glass:dead-owner',
@@ -746,10 +809,80 @@ describe('standalone Center break-glass recovery', () => {
         birthDigest: `sha256:${'0'.repeat(64)}`,
       },
       acquiredAtMs: 1,
+    }
+    const execution = {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      ownerId: owner.ownerId,
+      parentPid: owner.processIdentity.pid,
+      processGroupPid: 2_147_483_646,
+      supervisorSha256: `sha256:${'1'.repeat(64)}`,
+      startedAtMs: 2,
+    }
+    await writeCanonical(join(lease, 'owner.json'), owner)
+    await writeCanonical(join(lease, 'execution.json'), execution)
+    await writeCanonical(join(lease, 'execution-dispatch.json'), {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: execution.processGroupPid,
+      executionDigest: canonicalSha256(execution),
+      dispatchedAtMs: 3,
     })
 
     await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
     await expect(profileState(value)).resolves.toMatchObject({ installedVersion: '1.0.0' })
+  })
+
+  it('clears a same-group descendant after the standalone official CLI exits successfully', async () => {
+    const value = await fixture({ orphaningCli: true })
+    if (value.orphanPids === null) throw new Error('orphaning CLI fixture has no pid record')
+
+    const result = await runCli(value)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('exact recovery before-state')
+    const pids = JSON.parse(await readFile(value.orphanPids, 'utf8')) as number[]
+    spawnedPids.push(...pids)
+    await Promise.all(pids.map(expectProcessAbsent))
+  }, 30_000)
+
+  it('rejects an orphan execution dispatch without deleting the shared Profile lease', async () => {
+    const value = await fixture()
+    const lease = join(
+      value.hostHome,
+      '.extension-center-plugin-coordination',
+      'leases',
+      storageKey(PROFILE_ID),
+    )
+    const currentIdentity = await captureCurrentProcessIdentity()
+    const owner = {
+      schemaVersion: 2,
+      profileId: PROFILE_ID,
+      ownerId: 'break-glass:orphan-dispatch',
+      leaseId: `lease:${randomUUID()}`,
+      processIdentity: {
+        ...currentIdentity,
+        pid: 2_147_483_647,
+        birthDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      acquiredAtMs: 1,
+    }
+    await writeCanonical(join(lease, 'owner.json'), owner)
+    await writeCanonical(join(lease, 'execution-dispatch.json'), {
+      schemaVersion: 1,
+      profileId: PROFILE_ID,
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: 2_147_483_646,
+      executionDigest: `sha256:${'1'.repeat(64)}`,
+      dispatchedAtMs: 2,
+    })
+
+    const result = await runCli(value)
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('execution dispatch has no execution lease')
+    await expect(readFile(join(lease, 'owner.json'), 'utf8')).resolves.toContain(owner.ownerId)
   })
 
   it('continues a dead break-glass claimant from a retired takeover gate and exact quarantine', async () => {

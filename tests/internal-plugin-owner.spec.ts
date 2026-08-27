@@ -872,7 +872,7 @@ describe('Center-owned managed Plugin owner', () => {
     await mkdir(lease, { recursive: true })
     const ownerBody = `${canonicalJson(owner)}\n`
     await writeFile(join(lease, 'owner.json'), ownerBody)
-    await writeFile(join(lease, 'execution.json'), `${canonicalJson({
+    const execution = {
       schemaVersion: 1,
       profileId: 'web',
       ownerId: owner.ownerId,
@@ -880,6 +880,16 @@ describe('Center-owned managed Plugin owner', () => {
       processGroupPid: 424_242,
       supervisorSha256: `sha256:${'1'.repeat(64)}`,
       startedAtMs: 1,
+    }
+    await writeFile(join(lease, 'execution.json'), `${canonicalJson(execution)}\n`)
+    await writeFile(join(lease, 'execution-dispatch.json'), `${canonicalJson({
+      schemaVersion: 1,
+      profileId: 'web',
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: execution.processGroupPid,
+      executionDigest: canonicalSha256(execution),
+      dispatchedAtMs: 2,
     })}\n`)
     const processError = Object.assign(new Error(`simulated ${code}`), { code })
     const kill = vi.spyOn(process, 'kill').mockImplementation(() => { throw processError })
@@ -907,6 +917,49 @@ describe('Center-owned managed Plugin owner', () => {
       'lease-quarantine',
       storageKey('web'),
     ))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects an orphan execution dispatch without deleting the Profile lease', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-plugin-orphan-dispatch-'))
+    roots.push(root)
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), JSON.stringify({
+      name: 'official-profile', dependencies: {}, dsh: { profile: { bundles: [] } },
+    }))
+    const lease = join(hostHome, '.extension-center-plugin-coordination', 'leases', storageKey('web'))
+    const currentIdentity = await captureCurrentProcessIdentity()
+    const owner = {
+      schemaVersion: 2,
+      profileId: 'web',
+      ownerId: 'dead-owner-with-orphan-dispatch',
+      leaseId: `lease:${randomUUID()}`,
+      processIdentity: {
+        ...currentIdentity,
+        pid: 2_147_483_647,
+        birthDigest: `sha256:${'0'.repeat(64)}`,
+      },
+      acquiredAtMs: 1,
+    }
+    await mkdir(lease, { recursive: true })
+    await writeFile(join(lease, 'owner.json'), `${canonicalJson(owner)}\n`)
+    await writeFile(join(lease, 'execution-dispatch.json'), `${canonicalJson({
+      schemaVersion: 1,
+      profileId: 'web',
+      ownerId: owner.ownerId,
+      leaseId: owner.leaseId,
+      processGroupPid: 424_242,
+      executionDigest: `sha256:${'1'.repeat(64)}`,
+      dispatchedAtMs: 2,
+    })}\n`)
+    const provider = new PluginLifecycleProvider(
+      new CenterStateStore(join(root, 'center')),
+      new MemoryLoader(),
+      { hostHome, pluginCli: new ProfileCli(hostHome) },
+    )
+
+    await expect(provider.initialize()).rejects.toThrow('execution dispatch has no execution lease')
+    await expect(readFile(join(lease, 'owner.json'), 'utf8')).resolves.toContain(owner.ownerId)
   })
 
   it.each(['canonical', 'retired'] as const)(

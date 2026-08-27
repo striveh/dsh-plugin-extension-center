@@ -379,6 +379,22 @@ function releaseArtifact(value, label) {
   })
 }
 
+function fixedUpdateReleaseStage(previousVersion, currentVersion, code, label) {
+  if (currentVersion === '0.1.0-rc.1') {
+    if (previousVersion !== '0.1.0-rc.0') {
+      fail(code, `${label} must follow the fixed rc.0 to rc.1 to stable sequence`)
+    }
+    return 'update-rc'
+  }
+  if (currentVersion === '0.1.0') {
+    if (previousVersion !== '0.1.0-rc.1') {
+      fail(code, `${label} stable 0.1.0 must update from 0.1.0-rc.1`)
+    }
+    return 'stable'
+  }
+  fail(code, `${label} must follow the fixed rc.0 to rc.1 to stable sequence`)
+}
+
 function publicReleaseEvidence(value) {
   const receipt = record(value, 'public Release receipt')
   passedReceipt(receipt, 4, 'P0-CENTER-PUBLIC-RELEASE-OFFICIAL-CLI-LIFECYCLE', 'public Release receipt')
@@ -405,26 +421,16 @@ function publicReleaseEvidence(value) {
       || previous === null || receipt.p0Status !== 'public-update-install-remove-proven') {
       fail('P0-RELEASE-READY-TRANSITION', 'rc.1 and stable require a public previous-to-current update')
     }
+    stage = fixedUpdateReleaseStage(
+      previous.version,
+      current.version,
+      'P0-RELEASE-READY-TRANSITION',
+      'public Release',
+    )
     assertAscendingReleaseTransition(previous.version, current.version)
-    const previousVersion = parseReleaseVersion(previous.version)
-    if (parsedCurrent.prerelease.length > 0) {
-      const currentRc = parsedCurrent.prerelease
-      const previousRc = previousVersion.prerelease
-      if (currentRc.length !== 2 || currentRc[0] !== 'rc' || !/^[1-9][0-9]*$/u.test(currentRc[1])
-        || previousRc.length !== 2 || previousRc[0] !== 'rc'
-        || Number(previousRc[1]) !== Number(currentRc[1]) - 1) {
-        fail('P0-RELEASE-READY-TRANSITION', 'a release-candidate update must use its immediate preceding rc')
-      }
-    } else if (current.version !== '0.1.0' || previousVersion.major !== 0
-      || previousVersion.minor !== 1 || previousVersion.patch !== 0
-      || previousVersion.prerelease.length !== 2 || previousVersion.prerelease[0] !== 'rc'
-      || previousVersion.prerelease[1] !== '1') {
-      fail('P0-RELEASE-READY-TRANSITION', 'stable 0.1.0 must update from 0.1.0-rc.1')
-    }
     exactArray(receipt.notProven, [
       'host-client-runtime-directly-observed-by-this-release-runner',
     ], 'updated public Release notProven')
-    stage = current.version === '0.1.0' ? 'stable' : 'update-rc'
   }
   const observations = record(receipt.observations, 'public Release observations')
   if (observations.officialDshPackageTreeUnchanged !== true
@@ -800,10 +806,25 @@ function previousReleaseReadyEvidence(value) {
   }
   officialTarget(target.officialDsh, 'previous release-ready official DSH')
   const bootstrap = receipt.p0Status === 'rc0-bootstrap-release-ready'
-  if (bootstrap !== (current.version === '0.1.0-rc.0')
-    || bootstrap !== (receipt.releaseStage === 'bootstrap-rc0')
-    || (bootstrap && previous !== null)
-    || (!bootstrap && previous === null)) {
+  let expectedStage
+  if (bootstrap) {
+    if (current.version !== '0.1.0-rc.0' || previous !== null) {
+      fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready stage and artifact history disagree')
+    }
+    expectedStage = 'bootstrap-rc0'
+  } else {
+    if (previous === null) {
+      fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready stage and artifact history disagree')
+    }
+    expectedStage = fixedUpdateReleaseStage(
+      previous.version,
+      current.version,
+      'P0-RELEASE-READY-PREVIOUS',
+      'previous release-ready receipt',
+    )
+    assertAscendingReleaseTransition(previous.version, current.version)
+  }
+  if (receipt.releaseStage !== expectedStage) {
     fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready stage and artifact history disagree')
   }
   const claims = record(receipt.claims, 'previous release-ready claims')

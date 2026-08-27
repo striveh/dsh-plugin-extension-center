@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file. The format 
 ### Fixed
 
 - Pass verifier flags directly through pnpm 11 in post-publication and catalog-discovery workflows so the strict CLI decoders receive no synthetic `--` argument.
+- Keep the Profile lease durable through official CLI dispatch, a monotonic private child outcome, detached-process-group shutdown, and exact marker cleanup in both normal and standalone break-glass execution; the supervisor owns group termination through its hard-kill deadline, so resistant descendants cannot outlive it and the caller never signals a reaped group leader.
+- Enforce the fixed rc.0 to rc.1 to stable promotion sequence and revalidate the embedded stage and artifact history of every previous release-ready receipt.
 
 ## [0.1.0-rc.0] - 2026-08-27
 
