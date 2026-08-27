@@ -705,6 +705,56 @@ test('accepts rc.0 only as an explicit bootstrap with update still unproven', ()
   ])
 })
 
+test('accepts independent official DSH tree fingerprints after every lane proves its tree unchanged', () => {
+  const input = evidence()
+  const fullTree = `sha256:${'0'.repeat(64)}`
+  const runtimeTree = `sha256:${'1'.repeat(64)}`
+  const publicTree = `sha256:${'2'.repeat(64)}`
+  input.fullP0.target.packageTreeDigest = fullTree
+  input.runtimeRelease.target.packageTreeDigest = runtimeTree
+  input.publicRelease.target.packageTreeDigestBefore = publicTree
+  input.publicRelease.target.packageTreeDigestAfter = publicTree
+
+  const receipt = assertReleaseReady(input)
+  assert.equal(receipt.target.officialDsh.registryIntegrity, TARGET_DSH_REGISTRY_INTEGRITY)
+  assert.equal(receipt.target.officialDsh.packageTreeDigest, fullTree)
+})
+
+test('rejects publication identity drift and a changed official DSH tree within one lifecycle', () => {
+  for (const [field, value] of [
+    ['dshPackage', '@deepseek-ai/dsh@0.0.0'],
+    ['auditedSourceCommit', '0'.repeat(40)],
+    ['registry', 'https://registry.example.invalid/'],
+    ['registryIntegrity', 'sha512-invalid'],
+  ]) {
+    const changedIdentity = evidence()
+    changedIdentity.runtimeRelease.target[field] = value
+    assert.throws(
+      () => assertReleaseReady(changedIdentity),
+      /does not bind the exact official DSH rc\.2 artifact/u,
+      field,
+    )
+  }
+
+  const changedTree = evidence()
+  changedTree.publicRelease.target.packageTreeDigestAfter = `sha256:${'0'.repeat(64)}`
+  assert.throws(
+    () => assertReleaseReady(changedTree),
+    /changed the official DSH package tree/u,
+  )
+
+  const changedRuntimeTree = evidence()
+  changedRuntimeTree.runtimeRelease.officialDshPackageTreeUnchanged = false
+  assert.throws(
+    () => assertReleaseReady(changedRuntimeTree),
+    /runtime Release did not use one unchanged official Web Profile/u,
+  )
+
+  const changedFullTree = evidence()
+  changedFullTree.fullP0.observations.officialDshPackageTreeUnchanged = false
+  assert.throws(() => assertReleaseReady(changedFullTree), /immutable Host/u)
+})
+
 test('permits a distinct verifier only for the immutable rc.0 bootstrap', () => {
   assert.throws(
     () => assertReleaseReady(evidence(PREVIOUS, CURRENT, VERIFIER)),

@@ -58,6 +58,8 @@ Any legacy fixture that expects `profileTransactions`, a local DSH HEAD, six ups
 
 The final release decision composes independent receipts rather than widening any one runner:
 
+Across those receipts, the official Host identity is the exact DSH package name and version, audited source commit, registry, and registry integrity. Every lane fingerprints the complete installed package tree before its lifecycle, recomputes it afterward, and requires exact equality. Those lane-local fingerprints remain bound through the input-receipt digests; they are not compared across fresh installations because pnpm-generated `.bin` shims embed each isolated installation path.
+
 1. The complete official-rc.2 lifecycle receipt binds the packed artifact, browser journey, child lifecycles, recovery, controlled ABA ordering, and keyless Agent continuation.
 2. The runtime-release receipt proves Host boot, Client boot, RPC registration, exact official DSH tree preservation, and, when a previous artifact is supplied, a distinct previous-to-current Center update in one Profile.
 3. The public-release receipt requires exactly the CI tarball, `SHA256SUMS`, and pack attestation as Release assets, downloads and byte-binds all three, verifies the explicit immutable Release and every asset with GitHub CLI, and then proves official-CLI install, optional update, and removal against the runtime receipt.

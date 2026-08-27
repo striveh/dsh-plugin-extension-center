@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file. The format 
 - Bind public-release package-manager execution to the lock-installed `pnpm` dependency instead of the self-updated GitHub Action launcher, whose executable intentionally lives outside a package root.
 - Resolve each Release tag through the bounded Git refs endpoint instead of the commit endpoint, whose rc.0 response includes a 300-file patch projection larger than the metadata limit.
 - Validate GitHub's current signed Release v0.2 predicate, verified release-service identity, database id, tag-ref commit, statement, and exact asset subjects instead of the superseded v0.1 projection.
+- Bind independent official DSH installs across receipts by exact package version, audited source, registry, and registry integrity while retaining each install tree digest as its own before/after mutation guard; pnpm-generated `.bin` shims embed the isolated install root and are not cross-install byte identities.
 
 ## [0.1.0-rc.0] - 2026-08-27
 

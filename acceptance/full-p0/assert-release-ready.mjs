@@ -1250,11 +1250,10 @@ export function assertReleaseReady(inputValue) {
     ? null
     : positiveInteger(input.previousEvidenceRunId, 'previous post-publication evidence run id')
 
-  if (full.target.registryIntegrity !== runtime.target.registryIntegrity
-    || full.target.registryIntegrity !== published.target.registryIntegrity
-    || full.target.packageTreeDigest !== runtime.target.packageTreeDigest
-    || full.target.packageTreeDigest !== published.target.packageTreeDigest) {
-    fail('P0-RELEASE-READY-BINDING', 'receipts do not share one exact immutable official DSH rc.2 artifact')
+  for (const field of ['dshPackage', 'auditedSourceCommit', 'registry', 'registryIntegrity']) {
+    if (full.target[field] !== runtime.target[field] || full.target[field] !== published.target[field]) {
+      fail('P0-RELEASE-READY-BINDING', 'receipts do not share one exact published official DSH rc.2 identity')
+    }
   }
   sameArtifact(runtime.current, published.current, 'current runtime and public artifacts')
   if (full.artifact.version !== published.current.version
