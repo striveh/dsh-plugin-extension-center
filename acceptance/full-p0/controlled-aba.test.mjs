@@ -316,6 +316,8 @@ test('the official runner obtains restart-required, stops the old Host, then lau
   const replacement = source.indexOf('startReplacementHost: () => {', controlled)
   assert.ok(lifecycle >= 0 && lifecycle < restartRequired)
   assert.ok(restartRequired < stopped && stopped < controlled && controlled < replacement)
+  assert.match(source, /leaseTimeoutMs: 120_000,/u)
+  assert.match(source, /cliTimeoutMs: 300_000,/u)
   assert.match(source, /const launchOutput = \{ value: '' \}/u)
   assert.doesNotMatch(source, /waitForReadyUrl\(child, output,/u)
   const launchHelper = source.indexOf('function launchOfficialWeb')
