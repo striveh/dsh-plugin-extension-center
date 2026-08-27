@@ -60,6 +60,84 @@ function skillReviewEvidence() {
   }
 }
 
+function pluginConfigureReviewEvidence() {
+  const manifestBody = '{}'
+  const files = ['package.json']
+  return {
+    schemaVersion: 1,
+    kind: 'plugin',
+    operationKind: 'configure',
+    checks: [
+      { code: 'catalog-admission', phase: 'planning' },
+      { code: 'loader-consumer', phase: 'verify' },
+    ],
+    removed: [],
+    retained: [],
+    credentialChoice: 'not-applicable',
+    rollbackPoint: { kind: 'managed-version', id: 'plugin:fixture@1.0.0', digest: canonicalSha256({ current: true }) },
+    rollbackLimits: ['dsh-managed-state-only'],
+    notProven: ['user-task-outcome'],
+    manifest: {
+      packageName: 'fixture',
+      beforeVersion: '1.0.0',
+      afterVersion: '1.0.0',
+      body: manifestBody,
+      manifestDigest: canonicalSha256({}),
+      files,
+      fileManifestDigest: canonicalSha256(files),
+    },
+    dependencies: [],
+    managedMaterial: {
+      owner: 'extension-center',
+      packageName: 'fixture',
+      beforeVersion: '1.0.0',
+      afterVersion: '1.0.0',
+      targetIntegrity: canonicalSha256({ artifact: 'fixture' }),
+    },
+    packageMetadata: { bundlePatch: null },
+    activation: {
+      mutationOwner: 'official-loader',
+      profileDependency: 'retain',
+      loaderEntry: 'replace',
+      restartRequired: false,
+      packageName: 'fixture',
+    },
+    scripts: { before: [], after: [], forbiddenLifecycle: [] },
+    settings: {
+      adapterVersion: 'fixture/config@1.0.0',
+      adapterDigest: canonicalSha256({ adapter: true }),
+      schemaDigest: canonicalSha256({ schema: true }),
+      ownerRevision: 'managed-plugin:1',
+      migration: 'not-required',
+      schema: [],
+      migrationChanges: [],
+      diffDigest: canonicalSha256({ configuration: true }),
+    },
+  }
+}
+
+function pluginConfigurePlan() {
+  const content = {
+    ...immutablePlanContent(),
+    planId: 'plan:plugin-configure:1',
+    intentId: 'intent:plugin-configure:1',
+    candidateRef: 'plugin:fixture@1.0.0',
+    extensionKind: 'plugin',
+    extensionId: 'fixture',
+    externalRuntimeAction: 'none',
+    artifactRevision: '1.0.0',
+    artifactIntegrity: canonicalSha256({ artifact: 'fixture' }),
+    artifactUrl: 'https://example.invalid/fixture.tgz',
+    operationKind: 'configure',
+    targetKey: 'plugin:web:profile:web:fixture',
+    ownerKey: 'managedPlugins',
+    scopeKey: 'profile:web',
+    reviewEvidence: pluginConfigureReviewEvidence(),
+    restartRequired: false,
+  }
+  return { content, hash: canonicalSha256(content) }
+}
+
 function operationPlanEvidence() {
   const evidence = skillReviewEvidence()
   return {
@@ -92,18 +170,73 @@ function operationPlanEvidence() {
       profileRevision: 'profile:1',
     },
     recoveryExecutable: {
-      schemaVersion: 2,
+      schemaVersion: 5,
       executablePath: recoveryPath('break-glass.mjs'),
       executableSha256: canonicalSha256({ executable: true }),
-      hostCliPath: recoveryPath('dsh'),
-      hostCliSha256: canonicalSha256({ cli: true }),
-      hostHome: recoveryPath('home'),
+      centerRoot: recoveryPath('center'),
       packageVersion: '0.1.0',
       platform: ['darwin', 'linux', 'win32'].includes(process.platform) ? process.platform : 'linux',
       arch: process.arch,
+      officialDsh: {
+        schemaVersion: 2,
+        packageName: '@deepseek-ai/dsh',
+        packageVersion: '0.1.1-rc.2',
+        packageRoot: recoveryPath('official-dsh'),
+        packageTreeSha256: canonicalSha256({ officialDshTree: true }),
+        productionDependencies: [],
+        entrypointPath: recoveryPath('official-dsh/lib/bin.js'),
+        entrypointSha256: canonicalSha256({ officialDshEntrypoint: true }),
+        hostHome: recoveryPath('dsh-home'),
+        timeoutMs: 120_000,
+        node: {
+          schemaVersion: 1,
+          executablePath: recoveryPath('node'),
+          executableSha256: canonicalSha256({ node: true }),
+          version: process.version,
+        },
+        supervisorPath: recoveryPath('center/recovery/toolchains/fixed/supervisor.mjs'),
+        supervisorSha256: canonicalSha256({ supervisor: true }),
+        pnpm: {
+          schemaVersion: 1,
+          packageName: 'pnpm',
+          packageVersion: '11.7.0',
+          registryIntegrity: 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==',
+          packageRoot: recoveryPath('center/recovery/toolchains/fixed/pnpm'),
+          packageTreeSha256: canonicalSha256({ pnpmTree: true }),
+          entrypointPath: recoveryPath('center/recovery/toolchains/fixed/pnpm/bin/pnpm.mjs'),
+          entrypointSha256: canonicalSha256({ pnpmEntrypoint: true }),
+          shimPath: recoveryPath('center/recovery/toolchains/fixed/bin/pnpm'),
+          shimSha256: canonicalSha256({ pnpmShim: true }),
+          shellPath: recoveryPath('bin/sh'),
+          shellSha256: canonicalSha256({ shell: true }),
+          runtimeRoot: recoveryPath('center/recovery/toolchains/fixed/runtime'),
+        },
+      },
     },
   }
 }
+
+test('binds Plugin configure to official Loader activation without a restart', () => {
+  const plan = pluginConfigurePlan()
+  assert.deepEqual(verifyImmutablePlanDigest(plan), plan)
+
+  for (const [field, value] of [
+    ['mutationOwner', 'official-dsh-cli'],
+    ['profileDependency', 'replace'],
+    ['loaderEntry', 'retain'],
+    ['restartRequired', true],
+  ]) {
+    const forged = structuredClone(plan)
+    forged.content.reviewEvidence.activation[field] = value
+    forged.hash = canonicalSha256(forged.content)
+    assert.throws(() => verifyImmutablePlanDigest(forged), /activation does not match operationKind/u)
+  }
+
+  const forgedPlanRestart = structuredClone(plan)
+  forgedPlanRestart.content.restartRequired = true
+  forgedPlanRestart.hash = canonicalSha256(forgedPlanRestart.content)
+  assert.throws(() => verifyImmutablePlanDigest(forgedPlanRestart), /restart requirement/u)
+})
 
 function immutablePlanContent() {
   const { recoveryExecutable: _recoveryExecutable, ...evidence } = operationPlanEvidence()
@@ -303,6 +436,23 @@ test('strictly decodes an immutable plan before binding its complete canonical c
     () => verifyImmutablePlanDigest(tampered),
     /does not match its canonical content/,
   )
+})
+
+test('rejects legacy Profile review evidence names after fully rehashing the plan', () => {
+  const mutations = [
+    evidence => { evidence.checks[0].code = 'profile-lockfile' },
+    evidence => { evidence.removed = [{ kind: 'client-resolution-link', id: 'legacy', digest: null }] },
+    evidence => { evidence.rollbackPoint.kind = 'profile-generation' },
+    evidence => { evidence.notProven = ['target-lockfile-bytes-before-staging'] },
+  ]
+  for (const mutate of mutations) {
+    const content = structuredClone(immutablePlanContent())
+    mutate(content.reviewEvidence)
+    assert.throws(
+      () => verifyImmutablePlanDigest({ content, hash: canonicalSha256(content) }),
+      /not an accepted value/,
+    )
+  }
 })
 
 test('binds the returned receipt to its independently hashed journal and projection', () => {

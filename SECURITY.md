@@ -2,7 +2,12 @@
 
 ## Supported versions
 
-There is no stable release yet. Security fixes target the public development branch, while compatibility remains limited to the exact lanes documented in the README: published DSH `0.1.1-rc.2` for read-only Store and expected-negative Host behavior, and an explicitly labelled local DSH checkout for non-release writable integration evidence.
+Security fixes target the current prerelease and `main`. The only claimed compatibility target is the packed Extension Center running on the unmodified official DSH `0.1.1-rc.2` artifact documented in the README; a source checkout or modified Host is not release evidence.
+
+| Version | Security support | DSH compatibility |
+| --- | --- | --- |
+| `0.1.0-rc.0` | Prerelease security fixes | Only the official DSH `0.1.1-rc.2` artifact bound by that version's receipts |
+| `main` | Development fixes | No compatibility inherited from a published version without a new exact-commit receipt |
 
 ## Report a vulnerability privately
 
@@ -19,14 +24,19 @@ Do not open a public issue containing a working exploit, credentials, private ke
 A useful report may show:
 
 - arbitrary packages, Git references, paths, commands, URLs, credentials, redirects, environment variables, or lifecycle scripts admitted outside the signed catalog policy;
+- an artifact initial or redirect URL containing any IPv4 or IPv6 literal being accepted;
 - a model, remote catalog, or non-loopback caller approving or directly executing a mutation;
 - a plan-hash, expiry, single-use, inventory-revision, target-lock, owner-verification, journal-chain, receipt, or recovery integrity bypass;
 - task text, search text, secrets, cookies, authorization headers, private extension data, or provider content leaving the documented local scope or entering evidence;
-- Plugin, MCP, or Skill state being reported as installed, configured, active, connected, verified, restored, or task-successful without the owning Host evidence;
+- Plugin, MCP, or Skill state being reported as installed, configured, active, connected, verified, restored, or task-successful without matching evidence from the official Profile package manager and Loader contribution for a child Plugin, the official MCP Client or Skill registry for MCP and Skill, and the Agent or Session service for continuation;
 - MCP stdio or HTTPS escaping the documented executable, environment, origin, header, redirect, size, timeout, teardown, or tool-generation restrictions;
 - Skill traversal, symlink, script execution, external revision conflict, or deletion outside the owned root;
 - unsafe rendering, unbounded catalog/RPC/journal data, stale or unsigned catalog fallback, or one malformed candidate compromising the full catalog;
-- break-glass execution accepting changed executable bytes, a changed Host CLI, a mismatched Profile generation, a tampered journal, or duplicate restore; or
-- a published archive differing from the reviewed source, containing an install-time lifecycle script, or embedding a checkout path or credential.
+- normal or break-glass Plugin mutation accepting a changed bound Node executable/version, supervisor, private `pnpm@11.7.0` package/shim/shell, official rc.2 package/entrypoint/production dependency closure, wrong Center root or `hostHome`, Profile-local package-manager execution control, mismatched retained archive, tampered journal, drifted official Profile state, a missing or changed provider-bound metadata-cache generation, a live orphan mutation subtree, committing Center state before the official CLI restores and verifies the Profile before-state, a direct Profile write, or duplicate restore; or
+- a published archive differing from the exact `main`-push Node 22 CI tarball, `SHA256SUMS`, self-digested attestation, or reviewed source identity; containing an install-time lifecycle script; or embedding a checkout path or credential.
 
-Documented unavailable states, the rc.2 expected-negative Host lane, local lexical ranking limitations, rejected community leads, and unproven external release gates are not vulnerabilities by themselves when represented accurately.
+Also report a GitHub Release asset whose digest differs from `SHA256SUMS`; a CI artifact whose Actions digest, run id or attempt, exact three-entry ZIP payload, source commit, packed manifest, bundled pnpm tree, or tarball bytes fail their attestation; a public catalog whose signature, predecessor, revision, or canonical bytes differ from the committed deployment input; a compromised catalog signing key; a Pages deployment that serves different bytes; or a forged lifecycle or deployment receipt. Repository Release immutability and protected `v*` tags prevent later mutation, while the Release, Pages, CI, runtime, and composite status of each version is established only by its own external receipts.
+
+Artifact URL validation rejects all IP literals but does not resolve hostnames. A hostname resolving to a private address or changing through DNS rebinding is outside this guarantee; hostnames and DNS remain untrusted.
+
+Documented unavailable states, Windows mutation/recovery refusal, restart requirements, local lexical-ranking limitations, rejected community leads, the rc.2 external CLI's lack of a lock or compare-and-swap token, unproven ABA behavior, same-user mutation between a completed verification and the following process use, and other unproven release gates are not vulnerabilities by themselves when represented accurately.

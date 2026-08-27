@@ -46,13 +46,24 @@ export type UpdateObservation =
       readonly integrity: `sha256:${string}` | `sha512:${string}`
     }
 
+/** Exact retained version selected by the next restore, when the catalog still proves it. */
+export type RestoreObservation =
+  | { readonly status: 'unknown' }
+  | { readonly status: 'none' }
+  | {
+      readonly status: 'available'
+      readonly candidateRef: string
+      readonly revision: string
+      readonly integrity: `sha256:${string}` | `sha512:${string}`
+    }
+
 /** Plugin-specific owner evidence. */
 export interface PluginInventoryEvidence {
   readonly kind: 'plugin'
-  readonly profileGeneration: string | null
+  readonly restartToken: string | null
   readonly loaderPhase: string | null
   readonly consumerObserved: boolean
-  readonly externalRestartObserved: boolean
+  readonly restartObserved: boolean
 }
 
 /** MCP-specific owner evidence without inventing unexposed reconnect phases. */
@@ -108,6 +119,7 @@ export interface InventoryRow {
   readonly observedAtMs: number
   readonly actions: LifecycleActions
   readonly updateObservation: UpdateObservation
+  readonly restoreObservation: RestoreObservation
   readonly evidence: InventoryEvidence
 }
 
@@ -124,11 +136,11 @@ export interface InventorySnapshot {
 
 /** Published general Host owner availability. */
 export interface InventoryHostCapabilities {
-  readonly profileTransaction: boolean
+  readonly managedPluginLifecycle: boolean
   readonly dynamicMcpConnection: boolean
   readonly durableContinuation: boolean
   readonly skillRegistry: boolean
   readonly toolRegistry: boolean
-  readonly loaderObservation: boolean
+  readonly loaderMutation: boolean
   readonly acquisition: boolean
 }

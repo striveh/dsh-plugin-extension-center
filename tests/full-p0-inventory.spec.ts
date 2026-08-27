@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { createInventorySnapshot, type InventoryRow } from '../src/inventory/index.ts'
 
 const host = {
-  profileTransaction: true,
+  managedPluginLifecycle: true,
   dynamicMcpConnection: true,
   durableContinuation: true,
   skillRegistry: true,
   toolRegistry: true,
-  loaderObservation: true,
+  loaderMutation: true,
   acquisition: true,
 }
 
@@ -32,6 +32,12 @@ function base(kind: 'plugin' | 'mcp' | 'skill', extensionId: string): Omit<Inven
     configurationRevision: 'config:1',
     observedAtMs: 10,
     updateObservation: { status: 'none' },
+    restoreObservation: {
+      status: 'available',
+      candidateRef: `${kind}:${extensionId}@1`,
+      revision: '1',
+      integrity: `sha256:${'1'.repeat(64)}`,
+    },
   }
 }
 
@@ -74,10 +80,10 @@ describe('full P0 normalized inventory', () => {
           ...base('plugin', 'charlie'),
           evidence: {
             kind: 'plugin',
-            profileGeneration: 'generation:4',
+            restartToken: 'generation:4',
             loaderPhase: 'active',
             consumerObserved: true,
-            externalRestartObserved: true,
+            restartObserved: true,
           },
         },
       ],
@@ -116,10 +122,10 @@ describe('full P0 normalized inventory', () => {
       ...base('plugin', 'charlie'),
       evidence: {
         kind: 'plugin' as const,
-        profileGeneration: 'generation:4',
+        restartToken: 'generation:4',
         loaderPhase: 'active',
         consumerObserved: true,
-        externalRestartObserved: true,
+        restartObserved: true,
       },
     }
     const left = createInventorySnapshot({
@@ -132,9 +138,28 @@ describe('full P0 normalized inventory', () => {
 
     const gated = createInventorySnapshot({
       scopeKey: 'agent:1:/workspace', profileId: 'profile:web', complete: true, observedAtMs: 10, rows: [plugin],
-    }, { ...host, profileTransaction: false })
+    }, { ...host, managedPluginLifecycle: false })
     expect(Object.values(gated.rows[0]!.actions).every(action =>
       action.status === 'unavailable' && action.reason === 'host-capability')).toBe(true)
+  })
+
+  it('keeps restore unavailable unless the retained target has exact catalog evidence', () => {
+    const plugin = {
+      ...base('plugin', 'charlie'),
+      restoreObservation: { status: 'unknown' as const },
+      evidence: {
+        kind: 'plugin' as const,
+        restartToken: 'generation:4',
+        loaderPhase: 'active',
+        consumerObserved: true,
+        restartObserved: true,
+      },
+    }
+    const snapshot = createInventorySnapshot({
+      scopeKey: 'agent:1:/workspace', profileId: 'profile:web', complete: true, observedAtMs: 10, rows: [plugin],
+    }, host)
+
+    expect(snapshot.rows[0]!.actions.restore).toEqual({ status: 'unavailable', reason: 'no-exact-restore' })
   })
 
   it('rejects visible or active claims without the required owner evidence', () => {

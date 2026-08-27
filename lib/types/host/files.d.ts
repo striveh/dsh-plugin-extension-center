@@ -4,6 +4,8 @@ export declare function storageKey(value: string): string;
 export declare function ensurePrivateDirectory(path: string): Promise<void>;
 /** Ensure a derived child stays below an exact center-owned root. */
 export declare function safeChild(root: string, ...segments: readonly string[]): string;
+/** Flush one directory entry update where the platform exposes directory fsync. */
+export declare function syncDirectory(path: string): Promise<void>;
 /** Durably replace one canonical JSON record through a private temporary file. */
 export declare function writeCanonicalAtomic(path: string, value: unknown): Promise<void>;
 /** Install one canonical JSON record exactly once. */

@@ -1,5 +1,5 @@
 import { type ImmutablePlan, type OperationAuthorization, type PlanAuthorizationState, type PlanContent, type PlanDecisionInput, type RecoveryExecutableBinding, type PlanUseContext } from './types.ts';
-/** Strictly decode the absolute hash-pinned break-glass executable, Host CLI, and Host home. */
+/** Strictly decode the absolute hash-pinned break-glass executable and Center state root. */
 export declare function decodeRecoveryExecutableBinding(value: unknown, path?: string): RecoveryExecutableBinding;
 /**
  * Strictly decode canonical immutable plan content.

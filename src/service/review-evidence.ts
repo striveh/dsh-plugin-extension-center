@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
-import { join } from 'node:path'
 import type { CatalogEntry } from '../catalog-contract.ts'
 import { catalogReviewEvidenceSupport } from '../catalog.ts'
-import { canonicalSha256, immutableJsonClone, type Sha256Digest } from '../domain/index.ts'
+import { canonicalJson, canonicalSha256, immutableJsonClone, type Sha256Digest } from '../domain/index.ts'
 import type { ManagedTargetRecord, ManagedVersion } from '../host/index.ts'
 import { openRegularNoFollow } from '../host/index.ts'
+import { skillCandidate } from '../kind-candidates.ts'
 import type {
   McpReviewEvidence,
   OperationKind,
@@ -15,20 +15,27 @@ import type {
   ReviewRollbackPoint,
   SkillReviewEvidence,
 } from '../plans/index.ts'
+import { operationRestartRequired } from '../policy/index.ts'
 import { pluginConfigurationReview, type McpRuntimePreflight } from '../providers/index.ts'
+import { capabilityResolverCandidate } from '../resolver-candidates.ts'
 import type { RpcJson } from './rpc-contract.ts'
 
-/** Profile facts read before approval and rebound immediately before consumption. */
-export interface ReviewProfileObservation {
+/** Center-owned Plugin state read before approval and rebound before plan consumption. */
+export interface ManagedPluginSnapshot {
+  readonly profileId: string
   readonly revision: number
-  readonly treeDigest: string
-  readonly effectivePath: string
-  readonly activeGeneration: string | null
-  readonly lastGoodGeneration: string | null
-  readonly rollbackGeneration: string | null
+  readonly digest: Sha256Digest
+  readonly materialRoot: string
+  readonly bootStatus: 'live' | 'pending-restart' | 'verified'
+  readonly ownerRevision: string
 }
 
-const PLUGIN_MANIFEST_BODY = '{"name":"dsh-capability-resolver","version":"0.1.0","description":"Read-only local capability and community plugin discovery for DeepSeek Harness Web","license":"MIT","type":"module","sideEffects":["./lib/client.js"],"main":"lib/index.js","types":"lib/types/index.d.ts","exports":{".":{"types":"./lib/types/index.d.ts","default":"./lib/index.js"},"./client":{"types":"./lib/types/client/index.d.ts","default":"./lib/client.js"},"./types":{"types":"./lib/types/types.d.ts","default":"./lib/types.js"},"./cordis.patch.yml":"./cordis.patch.yml","./package.json":"./package.json"},"files":["lib","docs","compatibility","cordis.patch.yml","README.md","README.zh.md","CHANGELOG.md","CONTRIBUTING.md","SECURITY.md","LICENSE"],"engines":{"node":"^22.19.0 || >=24","dsh":"0.1.1-rc.2"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web","inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-settings-plugins","@deepseek-ai/dsh-client-ui-primitives","@deepseek-ai/dsh-client-ui-slots"]}},"keywords":["dsh-plugin","deepseek-harness","plugin-discovery","capability-discovery","local-first","developer-tools"],"repository":{"type":"git","url":"git+https://github.com/striveh/dsh-capability-resolver.git"},"bugs":{"url":"https://github.com/striveh/dsh-capability-resolver/issues"},"homepage":"https://github.com/striveh/dsh-capability-resolver#readme","peerDependencies":{"@deepseek-ai/cordis":"4.0.1","@deepseek-ai/cordis-plugin-loader":"1.0.2","@deepseek-ai/dsh-client-connection":"0.1.1-rc.2","@deepseek-ai/dsh-client-locale":"0.1.1-rc.2","@deepseek-ai/dsh-client-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-primitives":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings-plugins":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-slots":"0.1.1-rc.2","@deepseek-ai/dsh-skill":"0.1.1-rc.2","@deepseek-ai/dsh-tools":"0.1.1-rc.2","@deepseek-ai/schemastery":"3.18.1","react":"^18.2.0"},"peerDependenciesMeta":{"@deepseek-ai/dsh-client-connection":{"optional":true},"@deepseek-ai/dsh-client-locale":{"optional":true},"@deepseek-ai/dsh-client-runtime":{"optional":true},"@deepseek-ai/dsh-client-ui-primitives":{"optional":true},"@deepseek-ai/dsh-client-ui-settings":{"optional":true},"@deepseek-ai/dsh-client-ui-settings-plugins":{"optional":true},"@deepseek-ai/dsh-client-ui-slots":{"optional":true},"react":{"optional":true}},"devDependencies":{"@deepseek-ai/cordis":"4.0.1","@deepseek-ai/cordis-plugin-loader":"1.0.2","@deepseek-ai/dsh-client-connection":"0.1.1-rc.2","@deepseek-ai/dsh-client-locale":"0.1.1-rc.2","@deepseek-ai/dsh-client-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-test-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-primitives":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings-plugins":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-slots":"0.1.1-rc.2","@deepseek-ai/dsh-skill":"0.1.1-rc.2","@deepseek-ai/dsh-tools":"0.1.1-rc.2","@deepseek-ai/schemastery":"3.18.1","@testing-library/react":"^16.3.0","@types/node":"^24.13.3","@types/react":"~18.3.1","@types/react-dom":"^18.3.7","@vitest/coverage-v8":"^4.1.8","jsdom":"^26.1.0","lightningcss":"^1.33.0","react":"^18.2.0","react-dom":"^18.2.0","tsdown":"0.22.2","typescript":"^6.0.3","vitest":"^4.1.8"},"scripts":{"clean":"node scripts/clean.mjs","clean:client-build":"node scripts/clean-client-build.mjs","typecheck":"tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit","build":"pnpm run clean && tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsdown && pnpm run clean:client-build","test":"vitest run","test:maintenance":"node --test scripts/*.test.mjs","test:coverage":"vitest run --coverage","verify:artifacts":"node scripts/verify-committed-artifacts.mjs","verify:package":"node scripts/verify-package.mjs","verify:compatibility":"node scripts/verify-compatibility.mjs","verify":"pnpm run typecheck && pnpm run test && pnpm run test:maintenance && pnpm run verify:artifacts && pnpm run verify:package && pnpm run verify:compatibility"}}'
+/** Narrow read-only port implemented by the Center-owned Plugin lifecycle provider. */
+export interface ManagedPluginSnapshotPort {
+  snapshot(profileId: string): Promise<ManagedPluginSnapshot>
+}
+
+const PLUGIN_MANIFEST_TEMPLATE_BODY = '{"name":"dsh-capability-resolver","version":"0.1.0","description":"Read-only local capability and community plugin discovery for DeepSeek Harness Web","license":"MIT","type":"module","sideEffects":["./lib/client.js"],"main":"lib/index.js","types":"lib/types/index.d.ts","exports":{".":{"types":"./lib/types/index.d.ts","default":"./lib/index.js"},"./client":{"types":"./lib/types/client/index.d.ts","default":"./lib/client.js"},"./types":{"types":"./lib/types/types.d.ts","default":"./lib/types.js"},"./cordis.patch.yml":"./cordis.patch.yml","./package.json":"./package.json"},"files":["lib","docs","compatibility","cordis.patch.yml","README.md","README.zh.md","CHANGELOG.md","CONTRIBUTING.md","SECURITY.md","LICENSE"],"engines":{"node":"^22.19.0 || >=24","dsh":"0.1.1-rc.2"},"dsh":{"bundle":{"patch":"./cordis.patch.yml"},"client":{"platform":"web","inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-settings","@deepseek-ai/dsh-client-ui-settings-plugins","@deepseek-ai/dsh-client-ui-primitives","@deepseek-ai/dsh-client-ui-slots"]}},"keywords":["dsh-plugin","deepseek-harness","plugin-discovery","capability-discovery","local-first","developer-tools"],"repository":{"type":"git","url":"git+https://github.com/striveh/dsh-capability-resolver.git"},"bugs":{"url":"https://github.com/striveh/dsh-capability-resolver/issues"},"homepage":"https://github.com/striveh/dsh-capability-resolver#readme","peerDependencies":{"@deepseek-ai/cordis":"4.0.1","@deepseek-ai/cordis-plugin-loader":"1.0.2","@deepseek-ai/dsh-client-connection":"0.1.1-rc.2","@deepseek-ai/dsh-client-locale":"0.1.1-rc.2","@deepseek-ai/dsh-client-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-primitives":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings-plugins":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-slots":"0.1.1-rc.2","@deepseek-ai/dsh-skill":"0.1.1-rc.2","@deepseek-ai/dsh-tools":"0.1.1-rc.2","@deepseek-ai/schemastery":"3.18.1","react":"^18.2.0"},"peerDependenciesMeta":{"@deepseek-ai/dsh-client-connection":{"optional":true},"@deepseek-ai/dsh-client-locale":{"optional":true},"@deepseek-ai/dsh-client-runtime":{"optional":true},"@deepseek-ai/dsh-client-ui-primitives":{"optional":true},"@deepseek-ai/dsh-client-ui-settings":{"optional":true},"@deepseek-ai/dsh-client-ui-settings-plugins":{"optional":true},"@deepseek-ai/dsh-client-ui-slots":{"optional":true},"react":{"optional":true}},"devDependencies":{"@deepseek-ai/cordis":"4.0.1","@deepseek-ai/cordis-plugin-loader":"1.0.2","@deepseek-ai/dsh-client-connection":"0.1.1-rc.2","@deepseek-ai/dsh-client-locale":"0.1.1-rc.2","@deepseek-ai/dsh-client-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-test-runtime":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-primitives":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-settings-plugins":"0.1.1-rc.2","@deepseek-ai/dsh-client-ui-slots":"0.1.1-rc.2","@deepseek-ai/dsh-skill":"0.1.1-rc.2","@deepseek-ai/dsh-tools":"0.1.1-rc.2","@deepseek-ai/schemastery":"3.18.1","@testing-library/react":"^16.3.0","@types/node":"^24.13.3","@types/react":"~18.3.1","@types/react-dom":"^18.3.7","@vitest/coverage-v8":"^4.1.8","jsdom":"^26.1.0","lightningcss":"^1.33.0","react":"^18.2.0","react-dom":"^18.2.0","tsdown":"0.22.2","typescript":"^6.0.3","vitest":"^4.1.8"},"scripts":{"clean":"node scripts/clean.mjs","clean:client-build":"node scripts/clean-client-build.mjs","typecheck":"tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit","build":"pnpm run clean && tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsdown && pnpm run clean:client-build","test":"vitest run","test:maintenance":"node --test scripts/*.test.mjs","test:coverage":"vitest run --coverage","verify:artifacts":"node scripts/verify-committed-artifacts.mjs","verify:package":"node scripts/verify-package.mjs","verify:compatibility":"node scripts/verify-compatibility.mjs","verify":"pnpm run typecheck && pnpm run test && pnpm run test:maintenance && pnpm run verify:artifacts && pnpm run verify:package && pnpm run verify:compatibility"}}'
 const PLUGIN_FILES = Object.freeze([
   'CHANGELOG.md', 'CONTRIBUTING.md', 'LICENSE', 'README.md', 'README.zh.md', 'SECURITY.md',
   'compatibility/dsh.json', 'cordis.patch.yml', 'docs/design.md', 'docs/design.zh.md',
@@ -81,7 +88,16 @@ const PLUGIN_PEERS = Object.freeze({
   '@deepseek-ai/schemastery': '3.18.1',
   react: '^18.2.0',
 })
-const SKILL_BODY = `---
+
+function pluginManifestBody(entry: CatalogEntry): string {
+  const candidate = capabilityResolverCandidate(entry.candidateRef, entry.artifact.version)
+  if (candidate === null) throw new Error('Plugin has no exact package manifest review record')
+  const manifest = JSON.parse(PLUGIN_MANIFEST_TEMPLATE_BODY) as Record<string, unknown>
+  manifest.version = candidate.version
+  return canonicalJson(manifest)
+}
+
+const DOCUMENTATION_WRITER_SKILL_BODY = `---
 name: documentation-writer
 description: 'Diátaxis Documentation Expert. An expert technical writer specializing in creating high-quality software documentation, guided by the principles and structure of the Diátaxis technical documentation authoring framework.'
 ---
@@ -132,21 +148,6 @@ function bytesDigest(value: string): Sha256Digest {
   return `sha256:${createHash('sha256').update(value, 'utf8').digest('hex')}`
 }
 
-async function optionalFileDigest(path: string): Promise<Sha256Digest | null> {
-  let handle
-  try {
-    handle = await openRegularNoFollow(path)
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw error
-  }
-  try {
-    return `sha256:${createHash('sha256').update(await handle.readFile()).digest('hex')}`
-  } finally {
-    await handle.close()
-  }
-}
-
 async function managedBody(version: ManagedVersion | null | undefined): Promise<string | null> {
   if (version === null || version === undefined) return null
   const handle = await openRegularNoFollow(version.materialPath)
@@ -188,12 +189,13 @@ function commonMaterials(
   const digest = existing === null ? null : canonicalSha256(existing)
   if (kind === 'plugin') return Object.freeze({
     removed: operation === 'uninstall' ? [
+      { kind: 'loader-entry', id: record?.extensionId ?? 'dsh-capability-resolver', digest },
       { kind: 'profile-dependency', id: record?.extensionId ?? 'dsh-capability-resolver', digest },
-      { kind: 'bundle-row', id: record?.extensionId ?? 'dsh-capability-resolver', digest },
     ] : [],
     retained: operation === 'uninstall' ? [
+      { kind: 'center-plugin-material', id: existing?.materialPath ?? 'managed-plugin-material', digest },
       { kind: 'plugin-settings', id: record?.targetKey ?? 'plugin-settings', digest },
-      { kind: 'recovery-point', id: record?.profileId ?? 'profile', digest },
+      { kind: 'recovery-point', id: record?.profileId ?? 'managed-plugins', digest },
     ] : [],
   })
   if (kind === 'skill') return Object.freeze({
@@ -231,16 +233,26 @@ function configInvocation(value: RpcJson): Readonly<{ model: boolean; user: bool
 
 async function pluginEvidence(input: BuildReviewEvidenceInput): Promise<PluginReviewEvidence> {
   if (catalogReviewEvidenceSupport(input.entry) !== 'package-pinned') throw new Error('Plugin has no package-pinned review record')
-  const schema = pluginConfigurationReview()
+  if (input.managedPlugins.profileId !== input.profileId
+    || input.managedPlugins.ownerRevision !== input.ownerRevision) {
+    throw new Error('managed Plugin snapshot does not bind the plan owner revision')
+  }
+  const schema = pluginConfigurationReview(input.entry.candidateRef, input.entry.artifact.version)
+  const manifestBody = pluginManifestBody(input.entry)
   const before = currentForOperation(input.managed, input.operationKind)
   const afterVersion = ['uninstall', 'purge'].includes(input.operationKind) ? null : input.entry.artifact.version
   const materials = commonMaterials('plugin', input.operationKind, input.managed)
-  const rollback: ReviewRollbackPoint = input.profile.activeGeneration === null
-    ? { kind: 'absent-state', id: `profile:${input.profileId}:absent-generation`, digest: input.profile.treeDigest as Sha256Digest }
-    : { kind: 'profile-generation', id: input.profile.activeGeneration, digest: input.profile.treeDigest as Sha256Digest }
+  const rollback = rollbackPoint(input.managed)
+  const restartRequired = operationRestartRequired(input.entry, input.operationKind)
   const dependencies = [
-    { kind: 'profile' as const, id: input.entry.artifact.id, beforeVersion: before?.artifactRevision ?? null, afterVersion, required: true },
-    ...input.entry.dependencies.map(item => ({ ...item, beforeVersion: null, afterVersion: item.version })),
+    { kind: 'extension' as const, id: input.entry.artifact.id, beforeVersion: before?.artifactRevision ?? null, afterVersion, required: true },
+    ...input.entry.dependencies.map(item => ({
+      kind: item.kind,
+      id: item.id,
+      beforeVersion: null,
+      afterVersion: item.version,
+      required: item.required,
+    })),
     ...Object.entries(PLUGIN_PEERS).map(([id, version]) => ({
       kind: 'peer' as const, id, beforeVersion: null, afterVersion: version, required: true,
     })),
@@ -248,9 +260,10 @@ async function pluginEvidence(input: BuildReviewEvidenceInput): Promise<PluginRe
   const checks = [
     check('catalog-admission', 'planning'), check('owner-revision', 'planning'), check('review-record', 'planning'),
     check('artifact-integrity', 'prepare'), check('plugin-manifest', 'prepare'), check('plugin-dependencies', 'prepare'),
-    check('plugin-lifecycle-scripts', 'prepare'), check('plugin-bundle', 'prepare'), check('plugin-settings-schema', 'prepare'),
-    check('profile-lockfile', 'apply'), check('owner-mutation', 'apply'), check('isolated-profile-boot', 'external-restart'),
-    check('loader-consumer', 'external-restart'),
+    check('plugin-lifecycle-scripts', 'prepare'), check('plugin-package-metadata', 'prepare'), check('plugin-settings-schema', 'prepare'),
+    check('center-plugin-material', 'apply'), check('official-profile-package', 'apply'), check('owner-mutation', 'apply'),
+    check('loader-consumer', 'verify'),
+    ...(restartRequired ? [check('host-restart-observation', 'external-restart')] : []),
   ]
   return immutableJsonClone({
     schemaVersion: 1,
@@ -260,33 +273,56 @@ async function pluginEvidence(input: BuildReviewEvidenceInput): Promise<PluginRe
     ...materials,
     credentialChoice: 'not-applicable',
     rollbackPoint: rollback,
-    rollbackLimits: ['dsh-managed-state-only', 'third-party-side-effects-not-reversed', 'restart-required-before-runtime-proof'],
-    notProven: ['catalog-admission-is-not-security-audit', 'target-lockfile-bytes-before-staging', 'third-party-code-side-effects', 'post-restart-consumer', 'user-task-outcome'],
+    rollbackLimits: [
+      'dsh-managed-state-only',
+      'third-party-side-effects-not-reversed',
+      ...(restartRequired ? ['restart-required-before-runtime-proof' as const] : []),
+    ],
+    notProven: [
+      'catalog-admission-is-not-security-audit',
+      'third-party-code-side-effects',
+      ...(restartRequired ? ['post-restart-consumer' as const] : []),
+      'user-task-outcome',
+    ],
     manifest: {
       packageName: input.entry.artifact.id,
       beforeVersion: before?.artifactRevision ?? null,
       afterVersion,
-      body: PLUGIN_MANIFEST_BODY,
-      manifestDigest: canonicalSha256(JSON.parse(PLUGIN_MANIFEST_BODY)),
+      body: manifestBody,
+      manifestDigest: canonicalSha256(JSON.parse(manifestBody)),
       files: PLUGIN_FILES,
       fileManifestDigest: canonicalSha256(PLUGIN_FILES),
     },
     dependencies,
-    lockfile: {
-      path: 'pnpm-lock.yaml',
-      beforeDigest: await optionalFileDigest(join(input.profile.effectivePath, 'pnpm-lock.yaml')),
+    managedMaterial: {
+      owner: 'extension-center',
       packageName: input.entry.artifact.id,
       beforeVersion: before?.artifactRevision ?? null,
       afterVersion,
       targetIntegrity: afterVersion === null ? null : input.entry.artifact.integrity,
     },
-    bundles: [{
-      id: input.entry.artifact.id,
-      action: input.operationKind === 'uninstall' ? 'remove' : input.operationKind === 'restore' ? 'restore'
-        : before === null ? 'add' : 'retain',
-      patchDigest: bytesDigest(PLUGIN_PATCH_BODY),
-      patchBody: PLUGIN_PATCH_BODY,
-    }],
+    packageMetadata: {
+      bundlePatch: {
+        path: 'cordis.patch.yml',
+        patchDigest: bytesDigest(PLUGIN_PATCH_BODY),
+        patchBody: PLUGIN_PATCH_BODY,
+      },
+    },
+    activation: {
+      mutationOwner: input.operationKind === 'configure' ? 'official-loader' : 'official-dsh-cli',
+      profileDependency: input.operationKind === 'configure' ? 'retain'
+        : input.operationKind === 'uninstall' ? 'remove'
+        : input.operationKind === 'restore' ? 'restore'
+          : input.operationKind === 'update' ? 'replace'
+            : before === null ? 'add' : 'retain',
+      loaderEntry: input.operationKind === 'configure' ? 'replace'
+        : input.operationKind === 'uninstall' ? 'remove'
+        : input.operationKind === 'restore' ? 'restore'
+          : input.operationKind === 'update' ? 'replace'
+            : before === null ? 'create' : 'retain',
+      restartRequired,
+      packageName: input.entry.artifact.id,
+    },
     scripts: {
       before: before === null ? [] : PLUGIN_SCRIPTS,
       after: afterVersion === null ? [] : PLUGIN_SCRIPTS,
@@ -307,9 +343,16 @@ async function pluginEvidence(input: BuildReviewEvidenceInput): Promise<PluginRe
 
 async function skillEvidence(input: BuildReviewEvidenceInput): Promise<SkillReviewEvidence> {
   if (catalogReviewEvidenceSupport(input.entry) !== 'package-pinned') throw new Error('Skill has no package-pinned review record')
+  const candidate = skillCandidate(input.entry.candidateRef, input.entry.artifact.version)
+  if (candidate === null) throw new Error('Skill has no exact package review record')
+  const admittedBody = candidate.reviewBody ?? DOCUMENTATION_WRITER_SKILL_BODY
+  if (bytesDigest(admittedBody) !== input.entry.artifact.integrity
+    || Buffer.byteLength(admittedBody, 'utf8') !== input.entry.artifact.sizeBytes) {
+    throw new Error('Skill package review body does not match the exact catalog artifact')
+  }
   const prior = currentForOperation(input.managed, input.operationKind)
   const before = await managedBody(prior)
-  const targetBody = ['install', 'update'].includes(input.operationKind) ? SKILL_BODY
+  const targetBody = ['install', 'update'].includes(input.operationKind) ? admittedBody
     : input.operationKind === 'restore' ? await managedBody(input.managed?.removed ?? input.managed?.lastGood)
       : ['uninstall', 'purge'].includes(input.operationKind) ? null : before
   const beforeInvocation = invocation(prior)
@@ -402,7 +445,7 @@ export interface BuildReviewEvidenceInput {
   readonly ownerRevision: string
   readonly configuration: RpcJson
   readonly managed: ManagedTargetRecord | undefined
-  readonly profile: ReviewProfileObservation
+  readonly managedPlugins: ManagedPluginSnapshot
   readonly runtime: McpRuntimePreflight | null
 }
 

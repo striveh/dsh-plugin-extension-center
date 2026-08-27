@@ -76,18 +76,6 @@ export interface StoredProviderSnapshot {
     readonly beforeDigest: string;
     readonly recoveryPoint: RpcJson;
 }
-/** External boot acknowledgement bound to one Profile generation operation. */
-export interface StoredProfileBootAck {
-    readonly schemaVersion: 1;
-    readonly operationId: string;
-    readonly profileId: string;
-    readonly generation: string;
-    readonly phase: 'candidate' | 'rollback';
-    readonly revision: number;
-    readonly treeDigest: string;
-    readonly consumerObserved: true;
-    readonly acknowledgedAtMs: number;
-}
 /** Separate task-completion receipt consumed only by the continuation verifier. */
 export interface StoredTaskReceipt {
     readonly schemaVersion: 1;
@@ -166,10 +154,6 @@ export declare class CenterStateStore {
     putProviderSnapshot(value: StoredProviderSnapshot): Promise<void>;
     /** Read one exact provider recovery point. */
     getProviderSnapshot(operationId: string): Promise<StoredProviderSnapshot | undefined>;
-    /** Persist or idempotently replace an exact external boot acknowledgement. */
-    putBootAck(value: StoredProfileBootAck): Promise<void>;
-    /** Read one external boot acknowledgement. */
-    getBootAck(operationId: string): Promise<StoredProfileBootAck | undefined>;
     /** Persist the single verified lifecycle result that may release one parked task. */
     putTaskReceipt(value: StoredTaskReceipt): Promise<void>;
     /** Read the verified lifecycle result for one continuation claim. */

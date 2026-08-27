@@ -1,103 +1,107 @@
 import { describe, expect, it } from 'vitest'
-import { hostCapabilities, probeHostOwners, type HostOwnerDefinitions } from '../src/host/index.ts'
+import { bindHostOwners, hostCapabilities } from '../src/host/index.ts'
 
-class ProfileDefinition {}
-class McpDefinition {}
-class ContinuationDefinition {}
-
-const profileMethods = {
-  snapshot() {}, stage() {}, commit() {}, abort() {}, restoreLastGood() {}, getRestoreReceipt() {}, acknowledgeBoot() {}, list() {},
-}
-const mcpMethods = {
-  snapshot() {}, get() {}, getRemoved() {}, configure() {}, enable() {}, disable() {}, update() {}, remove() {}, restore() {}, purge() {},
-}
-const continuationMethods = {
-  create() {}, reserve() {}, get() {}, list() {}, cancel() {}, supersede() {}, registerVerifier() {},
-}
-
-class ProfileOwner extends ProfileDefinition {
-  readonly protocolVersion = 1
-  snapshot = profileMethods.snapshot
-  stage = profileMethods.stage
-  commit = profileMethods.commit
-  abort = profileMethods.abort
-  restoreLastGood = profileMethods.restoreLastGood
-  getRestoreReceipt = profileMethods.getRestoreReceipt
-  acknowledgeBoot = profileMethods.acknowledgeBoot
-  list = profileMethods.list
+const managedPlugins = {
+  async snapshot(profileId: string) {
+    return {
+      profileId,
+      revision: 1,
+      digest: `sha256:${'1'.repeat(64)}` as `sha256:${string}`,
+      materialRoot: '/managed',
+      bootStatus: 'verified' as const,
+      ownerRevision: `managed:1:${profileId}`,
+    }
+  },
 }
 
-class McpOwner extends McpDefinition {
-  readonly protocolVersion = 1
-  snapshot = mcpMethods.snapshot
-  get = mcpMethods.get
-  getRemoved = mcpMethods.getRemoved
-  configure = mcpMethods.configure
-  enable = mcpMethods.enable
-  disable = mcpMethods.disable
-  update = mcpMethods.update
-  remove = mcpMethods.remove
-  restore = mcpMethods.restore
-  purge = mcpMethods.purge
+const mcpConnections = {
+  protocolVersion: 1 as const,
+  snapshot() { return { revision: 0, connections: [], removed: [] } },
+  get() {},
+  getRemoved() {},
+  registeredToolNames() { return [] },
+  async configure() {},
+  async enable() {},
+  async disable() {},
+  async update() {},
+  async remove() {},
+  async restore() {},
+  async purge() {},
 }
 
-class ContinuationOwner extends ContinuationDefinition {
-  readonly protocolVersion = 1
-  create = continuationMethods.create
-  reserve = continuationMethods.reserve
-  get = continuationMethods.get
-  list = continuationMethods.list
-  cancel = continuationMethods.cancel
-  supersede = continuationMethods.supersede
-  registerVerifier = continuationMethods.registerVerifier
+const taskContinuations = {
+  protocolVersion: 1 as const,
+  async create() {},
+  async reserve() {},
+  async get() {},
+  async list() { return [] },
+  async cancel() { return false },
+  async supersede() { return false },
+  async reconcile() {},
+  registerVerifier() { return () => {} },
 }
 
-const definitions: HostOwnerDefinitions = {
-  profileTransactions: ProfileDefinition,
-  mcpConnections: McpDefinition,
-  taskContinuations: ContinuationDefinition,
-}
-
-const existingOwners = {
-  skills: { registerProvider() {}, snapshot() {}, list() {}, get() {} },
-  tools: { register() {} },
-  loader: { await() {}, entries() {} },
+const official = {
+  skills: { registerProvider() {}, async snapshot() { return { skills: [], complete: true } }, async list() { return [] }, async get() {} },
+  tools: { register() { return () => {} } },
+  loader: {
+    async create() { return 'entry:1' },
+    async update() {},
+    async remove() {},
+    async await() {},
+    entries() { return [] },
+  },
 }
 
 function lookup(values: Readonly<Record<string, unknown>>) {
   return { get: (name: string) => values[name] }
 }
 
-describe('exact Host owner probing', () => {
-  it('requires the official Definition identity, protocol version, and complete method set', () => {
-    const owners = probeHostOwners(lookup({
-      profileTransactions: new ProfileOwner(),
-      mcpConnections: new McpOwner(),
-      taskContinuations: new ContinuationOwner(),
-      ...existingOwners,
-    }), definitions)
-    expect(hostCapabilities(owners)).toMatchObject({ acquisition: true })
-
-    const sameNameFakes = probeHostOwners(lookup({
-      profileTransactions: { protocolVersion: 1, ...profileMethods },
-      mcpConnections: { protocolVersion: 1, ...mcpMethods },
-      taskContinuations: { protocolVersion: 1, ...continuationMethods },
-      ...existingOwners,
-    }), definitions)
-    expect(hostCapabilities(sameNameFakes)).toMatchObject({
-      profileTransaction: false,
-      dynamicMcpConnection: false,
-      durableContinuation: false,
-      acquisition: false,
+describe('independent Host owner binding', () => {
+  it('requires Center-owned lifecycles and only official generic registries', () => {
+    const owners = bindHostOwners(lookup(official), { managedPlugins, mcpConnections, taskContinuations })
+    expect(hostCapabilities(owners)).toEqual({
+      managedPluginLifecycle: true,
+      dynamicMcpConnection: true,
+      durableContinuation: true,
+      skillRegistry: true,
+      toolRegistry: true,
+      loaderMutation: true,
+      acquisition: true,
+      reason: null,
     })
+    expect('profileTransactions' in owners).toBe(false)
+  })
 
-    const wrongVersion = new ProfileOwner() as ProfileOwner & { protocolVersion: number }
-    Object.defineProperty(wrongVersion, 'protocolVersion', { value: 2 })
-    expect(probeHostOwners(lookup({
-      profileTransactions: wrongVersion,
-      mcpConnections: new McpOwner(),
-      taskContinuations: new ContinuationOwner(),
-      ...existingOwners,
-    }), definitions).profileTransactions).toBeNull()
+  it('fails a malformed Center owner and reports an absent official registry independently', () => {
+    expect(() => bindHostOwners(lookup(official), {
+      managedPlugins,
+      mcpConnections: { ...mcpConnections, protocolVersion: 2 } as never,
+      taskContinuations,
+    })).toThrow('Center MCP owner is invalid')
+    const { registeredToolNames: _registeredToolNames, ...withoutToolRegistryEvidence } = mcpConnections
+    expect(() => bindHostOwners(lookup(official), {
+      managedPlugins,
+      mcpConnections: withoutToolRegistryEvidence as never,
+      taskContinuations,
+    })).toThrow('Center MCP owner is invalid')
+    const { reconcile: _reconcile, ...withoutReconcile } = taskContinuations
+    expect(() => bindHostOwners(lookup(official), {
+      managedPlugins,
+      mcpConnections,
+      taskContinuations: withoutReconcile as never,
+    })).toThrow('Center continuation owner is invalid')
+
+    const withoutLoader = bindHostOwners(lookup({ ...official, loader: undefined }), {
+      managedPlugins,
+      mcpConnections,
+      taskContinuations,
+    })
+    expect(hostCapabilities(withoutLoader)).toMatchObject({
+      managedPluginLifecycle: true,
+      loaderMutation: false,
+      acquisition: false,
+      reason: 'host-capability',
+    })
   })
 })

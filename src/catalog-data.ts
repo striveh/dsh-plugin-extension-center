@@ -1,4 +1,5 @@
 import type { CatalogEntry, CatalogEnvelope, CatalogRoot, CatalogSignature } from './catalog-contract.ts'
+import { FILESYSTEM_MCP_CANDIDATES, SKILL_CANDIDATES } from './kind-candidates.ts'
 
 const admittedLifecycle = {
   install: { status: 'available' },
@@ -8,8 +9,7 @@ const admittedLifecycle = {
   restore: { status: 'available' },
 } as const
 
-/** Curated entries in bootstrap revision 6. Free-form upstream text is not included. */
-export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [{
+const capabilityResolverV010: CatalogEntry = {
   candidateRef: 'plugin:dsh-capability-resolver@0.1.0',
   kind: 'plugin',
   name: 'dsh-capability-resolver',
@@ -152,7 +152,55 @@ export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [{
     zh: '该插件保留内存中的 last-good 目录缓存，不创建安装数据库。',
   },
   tags: ['discovery', 'catalog', 'capability', 'plugin'],
-}, {
+}
+
+const capabilityResolverV011: CatalogEntry = {
+  ...capabilityResolverV010,
+  candidateRef: 'plugin:dsh-capability-resolver@0.1.1',
+  displayName: { en: 'DSH Capability Resolver 0.1.1', zh: 'DSH 能力解析器 0.1.1' },
+  license: {
+    ...capabilityResolverV010.license,
+    sourceUrl: 'https://raw.githubusercontent.com/striveh/dsh-capability-resolver/241a5fed44aec39113ee395c3be4d9f17047440d/LICENSE',
+  },
+  source: {
+    ...capabilityResolverV010.source,
+    label: 'GitHub Release v0.1.1',
+    url: 'https://github.com/striveh/dsh-capability-resolver/releases/tag/v0.1.1',
+    revision: '241a5fed44aec39113ee395c3be4d9f17047440d',
+    admittedAt: '2026-08-27T00:00:00.000Z',
+  },
+  artifact: {
+    ...capabilityResolverV010.artifact,
+    version: '0.1.1',
+    integrity: 'sha256:650fab654ad7a7c22d2dd34814d8625810b67d5b6345e6ffe136c19373127c17',
+    sizeBytes: 92419,
+    acquisitionUrl: 'https://github.com/striveh/dsh-capability-resolver/releases/download/v0.1.1/dsh-capability-resolver-0.1.1.tgz',
+  },
+  verification: [{
+    claim: { en: 'Release artifact integrity', zh: 'Release 物料完整性' },
+    status: 'verified',
+    detail: {
+      en: 'The admitted SHA-256 and byte size match the public immutable GitHub Release asset.',
+      zh: '准入 SHA-256 与字节数和公开、不可变的 GitHub Release asset 一致。',
+    },
+  }, {
+    claim: { en: 'Official rc.2 update path', zh: '官方 rc.2 更新路径' },
+    status: 'verified',
+    detail: {
+      en: 'An official DSH 0.1.1-rc.2 profile updated from public v0.1.0 to v0.1.1, restarted, exposed the Web view and Host RPC, then disabled, restored, and removed the plugin.',
+      zh: '官方 DSH 0.1.1-rc.2 Profile 已从公开 v0.1.0 更新到 v0.1.1，重启后观察到 Web 视图与 Host RPC，并完成禁用、恢复和卸载。',
+    },
+  }, {
+    claim: { en: 'Model-facing Tool execution', zh: '模型可见 Tool 执行' },
+    status: 'unknown',
+    detail: {
+      en: 'The public update acceptance did not independently execute the resolver through a model-facing Tool call.',
+      zh: '公开更新验收没有独立通过模型可见 Tool 调用执行解析器。',
+    },
+  }],
+}
+
+const filesystemMcpV130: CatalogEntry = {
   candidateRef: 'mcp:io.github.domdomegg/filesystem-mcp@1.3.0',
   kind: 'mcp',
   name: 'io.github.domdomegg/filesystem-mcp',
@@ -257,7 +305,43 @@ export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [{
     zh: '扩展中心保留连接恢复数据；外部 runtime 仍由 Host 持有，配置目录内的文件变更不会被撤销。',
   },
   tags: ['filesystem', 'files', 'mcp', 'stdio'],
-}, {
+}
+
+const filesystemMcpV122Identity = FILESYSTEM_MCP_CANDIDATES[0]
+const filesystemMcpV122: CatalogEntry = {
+  ...filesystemMcpV130,
+  candidateRef: filesystemMcpV122Identity.candidateRef,
+  displayName: { en: 'Filesystem MCP 1.2.2', zh: '文件系统 MCP 1.2.2' },
+  license: {
+    ...filesystemMcpV130.license,
+    sourceUrl: 'https://raw.githubusercontent.com/domdomegg/filesystem-mcp/v1.2.2/package.json',
+  },
+  source: {
+    ...filesystemMcpV130.source,
+    revision: '1.2.2',
+    admittedAt: '2026-08-26T18:00:00.000Z',
+  },
+  artifact: {
+    ...filesystemMcpV130.artifact,
+    version: filesystemMcpV122Identity.version,
+    integrity: filesystemMcpV122Identity.integrity,
+    sizeBytes: filesystemMcpV122Identity.sizeBytes,
+    acquisitionUrl: 'https://registry.npmjs.org/filesystem-mcp/-/filesystem-mcp-1.2.2.tgz',
+  },
+  dependencies: filesystemMcpV130.dependencies.map(dependency => dependency.id === 'filesystem-mcp'
+    ? { ...dependency, version: '1.2.2' }
+    : dependency),
+  verification: [{
+    claim: { en: 'Registry and npm coordinates', zh: 'Registry 与 npm 坐标' },
+    status: 'verified',
+    detail: {
+      en: 'Version 1.2.2, its npm integrity, and its exact package byte size were re-resolved during catalog admission.',
+      zh: '目录准入时重新解析了 1.2.2 版本、npm integrity 与准确包字节数。',
+    },
+  }, filesystemMcpV130.verification[1]!],
+}
+
+const documentationWriter: CatalogEntry = {
   candidateRef: 'skill:github-awesome-copilot/documentation-writer@d0d9d9f014abb27bf0d8321851867500a3a46bba',
   kind: 'skill',
   name: 'documentation-writer',
@@ -345,35 +429,187 @@ export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [{
     zh: '未来的受管安装会保留固定 Skill 文件，直到卸载或清除。',
   },
   tags: ['documentation', 'writing', 'diataxis', 'skill'],
-}]
+}
+
+const wikiPageWriterV1Identity = SKILL_CANDIDATES[1]
+const wikiPageWriterV1: CatalogEntry = {
+  candidateRef: wikiPageWriterV1Identity.candidateRef,
+  kind: 'skill',
+  name: 'wiki-page-writer',
+  displayName: { en: 'Wiki Page Writer (6142f8e)', zh: 'Wiki 页面写作 Skill（6142f8e）' },
+  summary: {
+    en: 'A pinned Microsoft Agent Skill for evidence-backed technical wiki pages, source citations, and Mermaid diagrams.',
+    zh: '一个固定版本的 Microsoft Agent Skill，用于编写有源码证据、引用与 Mermaid 图的技术 Wiki 页面。',
+  },
+  publisher: { name: 'microsoft/skills', status: 'community' },
+  license: {
+    spdx: 'MIT',
+    status: 'verified',
+    sourceUrl: 'https://raw.githubusercontent.com/microsoft/skills/6142f8e60ac58372845c0fcdd2dbf043cd1bb698/LICENSE',
+  },
+  source: {
+    type: 'github-content',
+    label: 'Pinned GitHub content',
+    url: 'https://github.com/microsoft/skills/tree/6142f8e60ac58372845c0fcdd2dbf043cd1bb698/.github/plugins/deep-wiki/skills/wiki-page-writer',
+    upstreamUrl: 'https://github.com/microsoft/skills',
+    revision: wikiPageWriterV1Identity.version,
+    admittedAt: '2026-08-26T18:00:00.000Z',
+  },
+  artifact: {
+    id: wikiPageWriterV1Identity.artifactId,
+    version: wikiPageWriterV1Identity.version,
+    integrity: wikiPageWriterV1Identity.integrity,
+    sizeBytes: wikiPageWriterV1Identity.sizeBytes,
+    acquisitionUrl: 'https://raw.githubusercontent.com/microsoft/skills/6142f8e60ac58372845c0fcdd2dbf043cd1bb698/.github/plugins/deep-wiki/skills/wiki-page-writer/SKILL.md',
+  },
+  compatibility: {
+    status: 'compatible',
+    dsh: '0.1.1-rc.2',
+    platforms: ['darwin', 'linux', 'windows'],
+    detail: {
+      en: 'The pinned artifact is one bounded SKILL.md with valid discovery metadata; its instructions request source-file reads and two read-only git commands.',
+      zh: '固定物料是一个具有有效发现元数据的有界 SKILL.md；其指令要求读取源码文件并执行两个只读 git 命令。',
+    },
+  },
+  components: [{ en: 'One SKILL.md file', zh: '一个 SKILL.md 文件' }],
+  permissions: [{
+    phase: 'acquisition', kind: 'network', access: 'read',
+    detail: {
+      en: 'Downloads one exact commit-pinned SKILL.md after approval.',
+      zh: '审批后下载一个固定到准确 commit 的 SKILL.md。',
+    },
+  }, {
+    phase: 'runtime', kind: 'model-context', access: 'send',
+    detail: {
+      en: 'The Skill metadata and full instructions enter model context when DSH selects it.',
+      zh: 'DSH 选择该 Skill 时，其元数据与完整指令会进入模型上下文。',
+    },
+  }, {
+    phase: 'runtime', kind: 'filesystem', access: 'read',
+    detail: {
+      en: 'The instructions require reading source files for evidence; installation does not grant file-write authority, which remains governed by the active Agent tools.',
+      zh: '指令要求读取源码文件作为证据；安装不会授予文件写权限，写入仍由当前 Agent Tool 权限控制。',
+    },
+  }, {
+    phase: 'runtime', kind: 'subprocess', access: 'execute',
+    detail: {
+      en: 'The instructions explicitly call git remote get-url and git rev-parse; actual command execution remains governed by the active Agent tools.',
+      zh: '指令明确调用 git remote get-url 与 git rev-parse；实际命令执行仍由当前 Agent Tool 权限控制。',
+    },
+  }],
+  dependencies: [{ kind: 'host', id: '@deepseek-ai/dsh', version: '0.1.1-rc.2', required: true }],
+  scopes: ['user', 'project'],
+  configuration: { required: false, credentials: 'none', fields: [] },
+  conflicts: [{
+    en: 'An existing Skill with the same name and different content must block promotion.',
+    zh: '存在同名但内容不同的 Skill 时必须阻止 promotion。',
+  }],
+  restart: {
+    required: false,
+    detail: {
+      en: 'The Center must prove the merged Skill winner before claiming live visibility.',
+      zh: '扩展中心必须证明 merged Skill winner，才能声称实时可见。',
+    },
+  },
+  lifecycle: admittedLifecycle,
+  verification: [{
+    claim: { en: 'Pinned content digest and byte size', zh: '固定内容 digest 与字节数' },
+    status: 'verified',
+    detail: {
+      en: 'Admission re-fetched the exact commit and matched SHA-256 7929f8ad…0c8f and 5,807 bytes.',
+      zh: '准入重新获取准确 commit，并匹配 SHA-256 7929f8ad…0c8f 与 5,807 字节。',
+    },
+  }, {
+    claim: { en: 'Instruction authority review', zh: '指令权限审查' },
+    status: 'verified',
+    detail: {
+      en: 'The pinned body was reviewed for model-context exposure, source-file reads, and its explicit git subprocess commands; this is not a safety certification.',
+      zh: '已审查固定正文的模型上下文暴露、源码读取与明确 git 子进程命令；这不是安全认证。',
+    },
+  }, {
+    claim: { en: 'Target Agent visibility', zh: '目标 Agent 可见性' },
+    status: 'unknown',
+    detail: {
+      en: 'Visibility must be observed through the merged Skill registry after installation.',
+      zh: '安装后必须通过 merged Skill registry 观察可见性。',
+    },
+  }],
+  retainedData: {
+    en: 'A managed install retains the pinned Skill file until uninstall or purge; generated documentation and repository changes are outside Center rollback.',
+    zh: '受管安装会保留固定 Skill 文件直到卸载或清除；生成的文档与仓库变更不在扩展中心回滚范围内。',
+  },
+  tags: ['documentation', 'wiki', 'mermaid', 'citations', 'skill'],
+}
+
+const wikiPageWriterV2Identity = SKILL_CANDIDATES[2]
+const wikiPageWriterV2: CatalogEntry = {
+  ...wikiPageWriterV1,
+  candidateRef: wikiPageWriterV2Identity.candidateRef,
+  displayName: { en: 'Wiki Page Writer (67ae723)', zh: 'Wiki 页面写作 Skill（67ae723）' },
+  license: {
+    ...wikiPageWriterV1.license,
+    sourceUrl: 'https://raw.githubusercontent.com/microsoft/skills/67ae723a23ba880e3e5c8a3e5e2320092024476e/LICENSE',
+  },
+  source: {
+    ...wikiPageWriterV1.source,
+    url: 'https://github.com/microsoft/skills/tree/67ae723a23ba880e3e5c8a3e5e2320092024476e/.github/plugins/deep-wiki/skills/wiki-page-writer',
+    revision: wikiPageWriterV2Identity.version,
+  },
+  artifact: {
+    ...wikiPageWriterV1.artifact,
+    version: wikiPageWriterV2Identity.version,
+    integrity: wikiPageWriterV2Identity.integrity,
+    sizeBytes: wikiPageWriterV2Identity.sizeBytes,
+    acquisitionUrl: 'https://raw.githubusercontent.com/microsoft/skills/67ae723a23ba880e3e5c8a3e5e2320092024476e/.github/plugins/deep-wiki/skills/wiki-page-writer/SKILL.md',
+  },
+  verification: [{
+    claim: { en: 'Pinned content digest and byte size', zh: '固定内容 digest 与字节数' },
+    status: 'verified',
+    detail: {
+      en: 'Admission re-fetched the exact commit and matched SHA-256 f1270ea4…feb6 and 5,869 bytes.',
+      zh: '准入重新获取准确 commit，并匹配 SHA-256 f1270ea4…feb6 与 5,869 字节。',
+    },
+  }, ...wikiPageWriterV1.verification.slice(1)],
+}
+
+/** Curated entries in bootstrap revision 8. Free-form upstream text is not included. */
+export const BOOTSTRAP_CATALOG_ENTRIES: readonly CatalogEntry[] = [
+  capabilityResolverV010,
+  capabilityResolverV011,
+  filesystemMcpV122,
+  filesystemMcpV130,
+  documentationWriter,
+  wikiPageWriterV1,
+  wikiPageWriterV2,
+]
 
 /** Packaged trust root. The private signing key is not part of this repository. */
 export const BOOTSTRAP_CATALOG_ROOT: CatalogRoot = {
   catalogId: 'dsh-extension-center-public',
-  minimumRevision: 6,
+  minimumRevision: 8,
   maximumAgeMs: 366 * 24 * 60 * 60 * 1000,
   threshold: 1,
   keys: [{
-    keyId: 'bootstrap-2026-08-25-6',
+    keyId: 'bootstrap-2026-08-26-8',
     algorithm: 'ed25519',
-    publicKeyPem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA0Kr1n12i96xOZnD1lqwtlb3qHTOT0cD7tDZsTbGOfHY=\n-----END PUBLIC KEY-----\n',
+    publicKeyPem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAPCfm5pJQuAgUFv7jQ5JdZ9/okSkPXCoKDFVFiCGQlqw=\n-----END PUBLIC KEY-----\n',
   }],
 }
 
 /** Immutable bootstrap catalog shipped for fully offline Store discovery. */
 export const BOOTSTRAP_CATALOG_ENVELOPE: CatalogEnvelope = {
   catalogId: 'dsh-extension-center-public',
-  revision: 6,
-  issuedAt: '2026-08-25T10:15:00.000Z',
-  expiresAt: '2027-08-25T10:15:00.000Z',
-  previousRevisionDigest: 'sha256:a7c608a1e2df649aa8e9dda7d9b276ef28a4504d48d4bf02eda228d67092802d',
-  entriesDigest: 'sha256:cf753732e6a453c13373d9af2bca99257b74e1f8112420504eea20ce42b9afc2',
+  revision: 8,
+  issuedAt: '2026-08-26T18:00:00.000Z',
+  expiresAt: '2027-08-26T18:00:00.000Z',
+  previousRevisionDigest: 'sha256:e222344dc9c0c63cce0f3f9304841041a43d70a135abbbbaa323c29135c8096c',
+  entriesDigest: 'sha256:37a10ad2e71edf5574a16c63541a10e9fc492088133d92d9f5137ccb6f15a299',
   entries: BOOTSTRAP_CATALOG_ENTRIES,
 }
 
 /** Threshold signature for the immutable bootstrap envelope. */
 export const BOOTSTRAP_CATALOG_SIGNATURES: readonly CatalogSignature[] = [{
-  keyId: 'bootstrap-2026-08-25-6',
+  keyId: 'bootstrap-2026-08-26-8',
   algorithm: 'ed25519',
-  value: 'xbQ1GkIVBgau1u5KRcleGM7hN1F1IdD++zeaRCDO++RXFYZg58Rxr6NCCF0GAl9sy1hMLotsG0ndUI7C0ij+Cw==',
+  value: 'rZysVT2B10GBcYHDjXDKoSnZ+hK755+J88iDQ0KQiGeD7m6Up05VUBrA/6jy9nAd7ro+AbIhpyh07OYcPILxAQ==',
 }]

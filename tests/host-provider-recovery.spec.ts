@@ -2,18 +2,24 @@ import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { CatalogEntry } from '../src/catalog-contract.ts'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
-import { canonicalSha256 } from '../src/domain/index.ts'
+import { canonicalJson, canonicalSha256 } from '../src/domain/index.ts'
 import { CenterStateStore, storageKey } from '../src/host/index.ts'
 import {
   McpLifecycleProvider,
+  inspectNpmArchive,
   PluginLifecycleProvider,
   SkillLifecycleProvider,
   type AdmittedMcpRuntime,
+  type ManagedPluginLoader,
   type ProviderOperationRequest,
 } from '../src/providers/index.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
+import { ProfilePluginCli } from './support/managed-plugin-cli.ts'
+import { managedStateDigest } from '../src/providers/records.ts'
 
 const roots: string[] = []
 
@@ -168,99 +174,101 @@ class IdempotentMcpOwner {
   }
 }
 
-class IdempotentProfileOwner {
-  readonly stages = new Map<string, { request: string; value: any }>()
-  readonly restores = new Map<string, { request: string; value: any }>()
-  private state: any
+interface LoaderRow {
+  readonly id: string
+  readonly options: Readonly<{ id?: string; name: string; config?: unknown; group?: boolean }>
+  readonly disabled: boolean
+  readonly refresh: () => Promise<void>
+  readonly fiber?: Readonly<{ state: number; await: () => Promise<void> }>
+}
 
-  constructor(private readonly root: string) {
-    this.state = {
-      profile: 'web', revision: 1, treeDigest: 'tree:before', effectivePath: root,
-      activeGeneration: 'generation:before', lastGoodGeneration: 'generation:baseline',
-      rollbackGeneration: null, bootStatus: 'verified',
-    }
+class MemoryLoader implements ManagedPluginLoader {
+  readonly rows = new Map<string, LoaderRow>()
+
+  async create(options: Readonly<{ name: string; config?: unknown }>): Promise<string> {
+    const id = `row-${String(this.rows.size + 1)}`
+    this.rows.set(id, {
+      id, options, disabled: false, refresh: async () => {}, fiber: { state: 2, await: async () => {} },
+    })
+    return id
   }
 
-  async snapshot() { return structuredClone(this.state) }
-
-  markBootVerified(revision = this.state.revision) {
-    this.state = { ...this.state, revision, bootStatus: 'verified' }
+  async remove(id: string): Promise<void> {
+    this.rows.delete(id)
   }
 
-  replaceBootEvidence(value: Readonly<{ treeDigest?: string; activeGeneration?: string }>) {
-    this.state = { ...this.state, ...value }
+  async update(id: string, options: Readonly<{ config?: unknown }>): Promise<void> {
+    const row = this.rows.get(id)
+    if (row === undefined) throw new Error(`missing loader row: ${id}`)
+    this.rows.set(id, { ...row, options: { ...row.options, ...options } })
   }
 
-  async stage(request: any) {
-    const encoded = JSON.stringify(request)
-    const replay = this.stages.get(request.mutationId)
-    if (replay !== undefined) {
-      if (replay.request !== encoded) throw new Error('Profile mutation replay changed request')
-      return structuredClone(replay.value)
-    }
-    if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-      throw new Error('Profile stage fence conflict')
-    }
-    const value = {
-      profile: request.profile,
-      mutationId: request.mutationId,
-      generation: `generation:${request.mutationId}`,
-      basedOnRevision: request.expectedRevision,
-      basedOnTreeDigest: request.expectedTreeDigest,
-      treeDigest: `tree:${request.mutationId}`,
-      mutation: request.mutation,
-    }
-    this.stages.set(request.mutationId, { request: encoded, value })
-    return structuredClone(value)
+  seed(name: string): void {
+    const id = `seed-${String(this.rows.size + 1)}`
+    this.rows.set(id, {
+      id, options: { name }, disabled: false, refresh: async () => {}, fiber: { state: 2, await: async () => {} },
+    })
   }
 
-  async commit(request: any) {
-    const staged = [...this.stages.values()].find(value => value.value.generation === request.generation)?.value
-    if (staged === undefined) throw new Error('Profile generation is absent')
-    const before = structuredClone(this.state)
-    if (this.state.activeGeneration !== request.generation) {
-      if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-        throw new Error('Profile commit fence conflict')
-      }
-      this.state = {
-        ...this.state,
-        revision: this.state.revision + 1,
-        treeDigest: staged.treeDigest,
-        effectivePath: join(this.root, request.generation),
-        activeGeneration: request.generation,
-        bootStatus: 'pending-restart',
-      }
-    }
-    return { operation: 'commit', before, after: structuredClone(this.state), restartRequired: true }
+  entries(): Iterable<LoaderRow> {
+    return this.rows.values()
   }
 
-  async abort() { return false }
-
-  async restoreLastGood(request: any) {
-    const encoded = JSON.stringify(request)
-    const replay = this.restores.get(request.mutationId)
-    if (replay !== undefined) {
-      if (replay.request !== encoded) throw new Error('Profile restore replay changed request')
-      return structuredClone(replay.value)
-    }
-    if (request.expectedRevision !== this.state.revision || request.expectedTreeDigest !== this.state.treeDigest) {
-      throw new Error('Profile restore fence conflict')
-    }
-    const before = structuredClone(this.state)
-    this.state = {
-      ...this.state,
-      revision: this.state.revision + 1,
-      treeDigest: 'tree:rollback',
-      activeGeneration: this.state.lastGoodGeneration,
-      bootStatus: 'pending-restart',
-    }
-    const value = { operation: 'restore', before, after: structuredClone(this.state), restartRequired: true }
-    this.restores.set(request.mutationId, { request: encoded, value })
-    return structuredClone(value)
+  await(): Promise<void> {
+    return Promise.resolve()
   }
+}
 
-  async acknowledgeBoot() { return { before: this.state, after: this.state, restartRequired: false } }
-  async list() { return { snapshot: this.state, active: null, staged: [], recoverable: [] } }
+function octal(value: number, length: number): Buffer {
+  return Buffer.from(`${value.toString(8).padStart(length - 1, '0')}\0`, 'ascii')
+}
+
+function tarEntry(name: string, content: Buffer): Buffer {
+  const header = Buffer.alloc(512)
+  header.write(name, 0, 100, 'utf8')
+  octal(0o644, 8).copy(header, 100)
+  octal(0, 8).copy(header, 108)
+  octal(0, 8).copy(header, 116)
+  octal(content.length, 12).copy(header, 124)
+  octal(0, 12).copy(header, 136)
+  header.fill(32, 148, 156)
+  header[156] = '0'.charCodeAt(0)
+  header.write('ustar\0', 257, 6, 'ascii')
+  header.write('00', 263, 2, 'ascii')
+  let checksum = 0
+  for (const byte of header) checksum += byte
+  Buffer.from(`${checksum.toString(8).padStart(6, '0')}\0 `, 'ascii').copy(header, 148)
+  return Buffer.concat([header, content, Buffer.alloc((512 - content.length % 512) % 512)])
+}
+
+async function pluginArchive(root: string): Promise<Readonly<{ path: string; integrity: `sha256:${string}` }>> {
+  await mkdir(root, { recursive: true })
+  const patch = Buffer.from('- insert:\n    - id: dsh-capability-resolver\n      name: dsh-capability-resolver\n')
+  const manifest = Buffer.from(JSON.stringify({
+    name: 'dsh-capability-resolver', version: '0.1.0', type: 'module', main: './index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web', inject: [] } },
+    peerDependencies: { '@deepseek-ai/cordis': '4.0.1' },
+  }))
+  const bytes = gzipSync(Buffer.concat([
+    tarEntry('package/package.json', manifest),
+    tarEntry('package/index.js', Buffer.from("import '@deepseek-ai/cordis'\nexport default function apply() {}\n")),
+    tarEntry('package/cordis.patch.yml', patch),
+    Buffer.alloc(1024),
+  ]))
+  const path = join(root, 'dsh-capability-resolver-0.1.0.tgz')
+  await writeFile(path, bytes)
+  return { path, integrity: `sha256:${createHash('sha256').update(bytes).digest('hex')}` }
+}
+
+async function profileWithCordis(hostHome: string): Promise<string> {
+  const profile = join(hostHome, 'profiles', 'web')
+  const cordis = join(profile, 'node_modules', '@deepseek-ai', 'cordis')
+  await mkdir(cordis, { recursive: true })
+  await writeFile(join(cordis, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/cordis', version: '4.0.1', type: 'module', main: './index.js',
+  }))
+  await writeFile(join(cordis, 'index.js'), 'export const fixture = true\n')
+  return profile
 }
 
 function request(
@@ -327,7 +335,6 @@ function request(
         profileRevision: 'profile:0:tree',
       },
     },
-    entry,
     payload: {
       configuration,
       continuationId: null,
@@ -337,6 +344,145 @@ function request(
       taskOriginalMessageId: null,
     },
     artifactPath: null,
+    signal: new AbortController().signal,
+  }
+}
+
+async function pluginRequest(
+  provider: PluginLifecycleProvider,
+  input: Readonly<{
+    operationId: string
+    operationKind: 'install' | 'uninstall'
+    entry: CatalogEntry
+    artifactPath?: string | null
+  }>,
+): Promise<ProviderOperationRequest> {
+  const inspection = input.artifactPath === null || input.artifactPath === undefined
+    ? null
+    : await inspectNpmArchive(input.artifactPath, null)
+  const owner = await provider.snapshot('web')
+  const targetKey = `plugin:web:profile:web:${input.entry.name}`
+  const managed = await provider.observe(targetKey)
+  const operationKind = input.operationKind
+  const review = testReviewEvidence('plugin', operationKind)
+  const reviewEvidence = {
+    ...review,
+    rollbackPoint: managed?.current === null || managed === null
+      ? { kind: 'absent-state' as const, id: 'absent', digest: canonicalSha256(null) }
+      : { kind: 'managed-version' as const, id: managed.current!.candidateRef, digest: canonicalSha256(managed.current) },
+    rollbackLimits: ['dsh-managed-state-only' as const],
+    manifest: {
+      ...review.manifest,
+      packageName: input.entry.artifact.id,
+      beforeVersion: managed?.current?.artifactRevision ?? null,
+      afterVersion: operationKind === 'uninstall' ? null : input.entry.artifact.version,
+      body: inspection?.manifestBody ?? '',
+      manifestDigest: inspection?.manifestDigest ?? canonicalSha256({}),
+      files: inspection?.files ?? [],
+      fileManifestDigest: inspection?.fileManifestDigest ?? canonicalSha256([]),
+    },
+    dependencies: Object.entries(inspection?.peerDependencies ?? {}).map(([id, afterVersion]) => ({
+      id, kind: 'peer' as const, beforeVersion: null, afterVersion, required: true,
+    })),
+    managedMaterial: {
+      ...review.managedMaterial,
+      packageName: input.entry.artifact.id,
+      beforeVersion: managed?.current?.artifactRevision ?? null,
+      afterVersion: operationKind === 'uninstall' ? null : input.entry.artifact.version,
+      targetIntegrity: operationKind === 'uninstall' ? null : input.entry.artifact.integrity,
+    },
+    packageMetadata: {
+      bundlePatch: inspection?.bundlePatch === null || inspection === null ? null : {
+        path: 'cordis.patch.yml' as const,
+        patchDigest: inspection.bundlePatch.digest,
+        patchBody: inspection.bundlePatch.body,
+      },
+    },
+    activation: {
+      ...review.activation,
+      profileDependency: operationKind === 'uninstall' ? 'remove' as const
+        : operationKind === 'restore' ? 'restore' as const
+          : operationKind === 'update' ? 'replace' as const
+            : managed?.current === null || managed === null ? 'add' as const : 'retain' as const,
+      loaderEntry: operationKind === 'uninstall' ? 'remove' as const
+        : operationKind === 'restore' ? 'restore' as const
+          : operationKind === 'update' ? 'replace' as const
+            : managed?.current === null || managed === null ? 'create' as const : 'retain' as const,
+      packageName: input.entry.artifact.id,
+    },
+    scripts: { ...review.scripts, after: inspection?.scripts ?? [] },
+    settings: {
+      ...review.settings,
+      ownerRevision: owner.ownerRevision,
+      diffDigest: canonicalSha256({}),
+    },
+  }
+  const externalRuntimeAction = operationKind === 'install' ? 'download' as const : 'none' as const
+  return {
+    authorization: {
+      operationId: input.operationId,
+      planId: `plan:${input.operationId}`,
+      planHash: canonicalSha256({ operationId: input.operationId }),
+      operationKind,
+      managedObject: 'artifact',
+      externalRuntimeAction,
+      runtimeBinding: null,
+      targetKey,
+      ownerKey: 'managedPlugins',
+      scopeKey: 'profile:web',
+      profileId: 'web',
+      authorizedAtMs: 1,
+    },
+    plan: {
+      schemaVersion: 1,
+      singleUse: true,
+      planId: `plan:${input.operationId}`,
+      intentId: `intent:${input.operationId}`,
+      origin: 'store',
+      candidateRef: input.entry.candidateRef,
+      extensionKind: 'plugin',
+      extensionId: input.entry.name,
+      managedObject: 'artifact',
+      externalRuntimeAction,
+      runtimeBinding: null,
+      artifactRevision: input.entry.artifact.version,
+      artifactIntegrity: input.entry.artifact.integrity,
+      artifactUrl: input.entry.artifact.acquisitionUrl,
+      artifactSizeBytes: input.entry.artifact.sizeBytes,
+      operationKind,
+      desiredState: operationKind === 'uninstall' ? 'removed' : 'enabled',
+      targetKey,
+      ownerKey: 'managedPlugins',
+      scopeKey: 'profile:web',
+      profileId: 'web',
+      idempotencyKey: input.operationId,
+      authorityDigest: canonicalSha256({ authority: input.operationId }),
+      configurationDigest: canonicalSha256({}),
+      retentionDigest: canonicalSha256({ candidateRef: input.entry.candidateRef, retainedData: input.entry.retainedData }),
+      reviewEvidence,
+      mutationDigest: canonicalSha256({ operationKind, ownerRevision: owner.ownerRevision }),
+      verificationDigest: canonicalSha256({ verification: input.operationId }),
+      restartRequired: input.entry.restart.required,
+      createdAtMs: 1,
+      expiresAtMs: 10_000,
+      fences: {
+        catalogRevision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
+        inventoryRevision: canonicalSha256({ inventory: input.operationId }),
+        targetRevision: managed === null ? 'absent' : `center:${String(managed.revision)}`,
+        ownerRevision: owner.ownerRevision,
+        scopeRevision: canonicalSha256({ scope: 'profile:web' }),
+        profileRevision: owner.ownerRevision,
+      },
+    },
+    payload: {
+      configuration: {},
+      continuationId: null,
+      resolutionId: null,
+      verificationPayloadDigest: null,
+      taskSessionId: null,
+      taskOriginalMessageId: null,
+    },
+    artifactPath: input.artifactPath ?? null,
     signal: new AbortController().signal,
   }
 }
@@ -602,122 +748,62 @@ describe('provider crash-point reconciliation', () => {
     await expect(lstat(orphanedQuarantine)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('reconciles an idempotent Profile commit that completed before the Center record write', async () => {
+  it('reconciles Center-owned Plugin sidecar state after the Loader mutation completed before the Center write', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-plugin-recovery-'))
     roots.push(root)
-    const store = new FailOnceManagedStore(root)
+    const centerRoot = join(root, 'center')
+    const hostHome = join(root, 'dsh-home')
+    const profile = await profileWithCordis(hostHome)
+    await writeFile(join(profile, 'package.json'), '{"name":"official-profile","dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
+    await writeFile(join(profile, 'cordis.patch.yml'), '[]\n')
+    const archive = await pluginArchive(join(centerRoot, 'artifacts', 'sha256'))
+    const baseEntry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'plugin')!
+    const entry: CatalogEntry = {
+      ...baseEntry,
+      artifact: {
+        ...baseEntry.artifact,
+        integrity: archive.integrity,
+        sizeBytes: (await readFile(archive.path)).length,
+      },
+    }
+    const store = new FailOnceManagedStore(centerRoot)
     await store.initialize()
-    const owner = new IdempotentProfileOwner(root)
-    const provider = new PluginLifecycleProvider(store, owner as any, {
-      observe: async (_packageName: string, operationKind: string) => ({
-        entryId: 'dsh-capability-resolver',
-        moduleName: 'dsh-capability-resolver',
-        fiberPhase: operationKind === 'uninstall' ? 'absent' : 'active',
-      }),
+    const cli = new ProfilePluginCli(hostHome)
+    let loader = new MemoryLoader()
+    let provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await provider.initialize()
+
+    const install = await pluginRequest(provider, {
+      operationId: 'operation:plugin-install', operationKind: 'install', entry, artifactPath: archive.path,
     })
-    const entry = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'plugin')!
-    const targetKey = `plugin:web:profile:web:${entry.name}`
-    const version = {
-      candidateRef: entry.candidateRef,
-      artifactRevision: entry.artifact.version,
-      artifactIntegrity: entry.artifact.integrity,
-      materialPath: root,
-      configuration: {},
-      enabled: true,
-      ownerRevision: 'profile:1:tree:before',
-      kindState: {
-        packageName: entry.artifact.id,
-        profileGeneration: 'generation:before',
-        treeDigest: 'tree:before',
-        loaderPhase: 'active',
-        consumerObserved: true,
-        externalRestartObserved: true,
-        runtimeEvidence: {
-          entryId: entry.artifact.id,
-          moduleName: entry.artifact.id,
-          fiberPhase: 'active',
-        },
-      },
-    }
-    await store.putManaged({
+    const installPrepared = await provider.prepare(install)
+    await store.putProviderSnapshot({
       schemaVersion: 1,
-      kind: 'plugin',
-      extensionId: entry.name,
-      targetKey,
-      scopeKey: 'profile:web',
-      profileId: 'web',
-      revision: 1,
-      lastOperationId: 'operation:prior-plugin',
-      current: version,
-      lastGood: null,
-      removed: null,
-      pending: null,
-      updatedAtMs: 1,
-    }, 0)
-    const operation: ProviderOperationRequest = {
-      authorization: {
-        operationId: 'operation:plugin-kill',
-        planId: 'plan:plugin-kill',
-        planHash: canonicalSha256({ plan: 'plugin-kill' }),
-        operationKind: 'uninstall',
-        managedObject: 'artifact',
-        externalRuntimeAction: 'none',
-        runtimeBinding: null,
-        targetKey,
-        ownerKey: 'profileTransactions',
-        scopeKey: 'profile:web',
-        profileId: 'web',
-        authorizedAtMs: 1,
-      },
-      plan: {
-        schemaVersion: 1,
-        singleUse: true,
-        planId: 'plan:plugin-kill',
-        intentId: 'intent:plugin-kill',
-        origin: 'store',
-        candidateRef: entry.candidateRef,
-        extensionKind: 'plugin',
-        extensionId: entry.name,
-        managedObject: 'artifact',
-        externalRuntimeAction: 'none',
-        runtimeBinding: null,
-        artifactRevision: entry.artifact.version,
-        artifactIntegrity: entry.artifact.integrity,
-        artifactUrl: entry.artifact.acquisitionUrl,
-        artifactSizeBytes: entry.artifact.sizeBytes,
-        operationKind: 'uninstall',
-        desiredState: 'removed',
-        targetKey,
-        ownerKey: 'profileTransactions',
-        scopeKey: 'profile:web',
-        profileId: 'web',
-        idempotencyKey: 'plugin-kill',
-        authorityDigest: canonicalSha256({ authority: 'plugin-kill' }),
-        reviewEvidence: testReviewEvidence('plugin', 'uninstall', {
-          generation: 'generation:baseline',
-          treeDigest: 'tree:rollback' as `sha256:${string}`,
-        }),
-        mutationDigest: canonicalSha256({ mutation: 'plugin-kill' }),
-        verificationDigest: canonicalSha256({ verification: 'plugin-kill' }),
-        createdAtMs: 1,
-        expiresAtMs: 10_000,
-        fences: {
-          catalogRevision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
-          inventoryRevision: canonicalSha256({ inventory: 'plugin-kill' }),
-          targetRevision: 'center:1',
-          ownerRevision: 'profile:1:tree:before',
-          scopeRevision: canonicalSha256({ scope: 'plugin-kill' }),
-          profileRevision: 'profile:1:tree:before',
-        },
-      },
-      entry,
-      payload: {
-        configuration: {}, continuationId: null, resolutionId: null, verificationPayloadDigest: null,
-        taskSessionId: null, taskOriginalMessageId: null,
-      },
-      artifactPath: null,
-      signal: new AbortController().signal,
-    }
+      operationId: install.authorization.operationId,
+      targetKey: install.plan.targetKey,
+      before: installPrepared.before,
+      beforeDigest: installPrepared.beforeDigest,
+      recoveryPoint: provider.recoveryPoint(installPrepared),
+    })
+    const installed = await provider.apply(installPrepared)
+    expect(installed.restartRequired).toBe(true)
+    await expect(provider.verify(installed)).resolves.toBeNull()
+
+    loader = new MemoryLoader()
+    loader.seed(entry.artifact.id)
+    provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await provider.initialize()
+    const recoveredInstall = await provider.recover(install)
+    expect(recoveredInstall).not.toBeNull()
+    await expect(provider.verify(recoveredInstall!)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+    expect([...loader.rows.values()].map(row => row.options.name)).toEqual([entry.artifact.id])
+    const targetKey = install.plan.targetKey
+    const installedPath = join(profile, 'node_modules', 'dsh-capability-resolver')
+    expect((await lstat(installedPath)).isSymbolicLink()).toBe(false)
+
+    const operation = await pluginRequest(provider, {
+      operationId: 'operation:plugin-kill', operationKind: 'uninstall', entry,
+    })
     const prepared = await provider.prepare(operation)
     await store.putProviderSnapshot({
       schemaVersion: 1,
@@ -727,127 +813,163 @@ describe('provider crash-point reconciliation', () => {
       beforeDigest: prepared.beforeDigest,
       recoveryPoint: provider.recoveryPoint(prepared),
     })
+    store.failManagedWrite = true
+    await expect(provider.apply(prepared)).rejects.toThrow('simulated kill')
+    expect((await store.getManaged(targetKey))?.current).not.toBeNull()
+    await expect(lstat(installedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect([...loader.rows.values()].map(row => row.options.name)).toEqual([entry.artifact.id])
+
+    loader = new MemoryLoader()
+    provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await provider.initialize()
     store.snapshotTransform = value => {
       const point = value.recoveryPoint as Record<string, any>
       return {
         ...value,
-        recoveryPoint: { ...point, snapshot: { ...point.snapshot, revision: 2 } },
+        recoveryPoint: { ...point, snapshot: { ...(point.snapshot as Record<string, any>), profileId: 'replacement' } },
       }
     }
-    await expect(provider.recover(operation)).rejects.toThrow('does not bind the immutable Profile fence')
-    expect(owner.stages.size).toBe(0)
+    await expect(provider.recover(operation)).rejects.toThrow('does not bind the plan')
     store.snapshotTransform = null
-    store.failManagedWrite = true
-    await expect(provider.apply(prepared)).rejects.toThrow('simulated kill')
-    expect((await owner.snapshot()).activeGeneration).toBe('generation:operation:plugin-kill:apply')
-    expect((await store.getManaged(targetKey))?.current).not.toBeNull()
-
     const recovered = await provider.recover(operation)
-    expect(recovered).toMatchObject({ profileGeneration: 'generation:operation:plugin-kill:apply', restartRequired: true })
-    expect((await store.getManaged(targetKey))?.current).toBeNull()
-    expect((await store.getManaged(targetKey))?.pending).toMatchObject({
-      operationId: 'operation:plugin-kill',
-      revision: 2,
-    })
-    expect(owner.stages.size).toBe(1)
-
-    owner.markBootVerified(3)
-    await expect(provider.acknowledgeBoot({
-      operationId: operation.authorization.operationId,
-      targetKey,
-      profileId: 'web',
-      generation: 'generation:operation:plugin-kill:apply',
-    })).resolves.toBeUndefined()
-    const candidateAcknowledged = await provider.recover(operation)
-    expect(candidateAcknowledged).toMatchObject({
-      rollbackRestart: false,
-      profileGeneration: 'generation:operation:plugin-kill:apply',
+    expect(recovered).toMatchObject({
+      restartToken: 'managed:operation:plugin-kill',
+      restartRequired: true,
+      rollbackRestartRequired: false,
     })
     expect((await store.getManaged(targetKey))?.current).toBeNull()
     expect((await store.getManaged(targetKey))?.pending).toBeNull()
-    expect(await store.getBootAck(operation.authorization.operationId)).toMatchObject({ phase: 'candidate', revision: 3 })
-
-    store.failManagedWrite = true
-    await expect(provider.rollback(candidateAcknowledged!)).rejects.toThrow('simulated kill')
-    expect((await owner.snapshot()).treeDigest).toBe('tree:rollback')
-    owner.replaceBootEvidence({ treeDigest: 'tree:drifted' })
-    await expect(provider.reconcileBreakGlassRestore(operation, prepared.beforeDigest)).resolves.toBeNull()
-    owner.replaceBootEvidence({ treeDigest: 'tree:rollback' })
-    await expect(provider.reconcileBreakGlassRestore(operation, canonicalSha256({ tampered: true })))
+    expect(loader.rows.size).toBe(0)
+    await expect(provider.verify(recovered!)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+    const retained = (await store.getManaged(targetKey))?.removed?.materialPath
+    expect(retained).toContain(join(centerRoot, 'material', 'plugins'))
+    const recoveryHead = canonicalSha256({ recoveryRequired: operation.authorization.operationId })
+    await expect(provider.reconcileBreakGlassRestore(operation, canonicalSha256({ tampered: true }), recoveryHead))
       .rejects.toThrow('does not bind the journal')
-    await expect(provider.reconcileBreakGlassRestore(operation, prepared.beforeDigest)).resolves.toMatchObject({
-      rollbackRestart: true,
-      profileGeneration: 'generation:baseline',
-    })
-    expect(owner.restores.size).toBe(1)
-    const rollback = await provider.recover(operation)
-    expect(rollback).toMatchObject({ rollbackRestart: true, profileGeneration: 'generation:baseline' })
-    expect((await store.getManaged(targetKey))?.pending).toMatchObject({
-      operationId: 'operation:plugin-kill',
-      operationKind: 'rollback',
-      revision: 4,
-    })
+    await expect(provider.reconcileBreakGlassRestore(operation, prepared.beforeDigest, recoveryHead)).resolves.toBeNull()
 
-    owner.markBootVerified(5)
     await expect(provider.acknowledgeBoot({
       operationId: 'operation:replacement',
       targetKey,
       profileId: 'web',
-      generation: 'generation:baseline',
+      restartToken: 'managed:operation:plugin-kill',
     })).rejects.toThrow('does not bind')
     await expect(provider.acknowledgeBoot({
       operationId: operation.authorization.operationId,
       targetKey,
       profileId: 'replacement',
-      generation: 'generation:baseline',
+      restartToken: 'managed:operation:plugin-kill',
     })).rejects.toThrow('does not bind')
     await expect(provider.acknowledgeBoot({
       operationId: operation.authorization.operationId,
       targetKey,
       profileId: 'web',
-      generation: 'generation:replacement',
-    })).rejects.toThrow('does not bind')
-
-    owner.markBootVerified(6)
-    await expect(provider.acknowledgeBoot({
-      operationId: operation.authorization.operationId,
-      targetKey,
-      profileId: 'web',
-      generation: 'generation:baseline',
-    })).rejects.toThrow('successful app boot')
-    expect((await store.getManaged(targetKey))?.pending).not.toBeNull()
-
-    owner.markBootVerified(5)
-    owner.replaceBootEvidence({ treeDigest: 'tree:replacement' })
-    await expect(provider.acknowledgeBoot({
-      operationId: operation.authorization.operationId,
-      targetKey,
-      profileId: 'web',
-      generation: 'generation:baseline',
-    })).rejects.toThrow('successful app boot')
-    owner.replaceBootEvidence({ treeDigest: 'tree:rollback', activeGeneration: 'generation:replacement' })
-    await expect(provider.acknowledgeBoot({
-      operationId: operation.authorization.operationId,
-      targetKey,
-      profileId: 'web',
-      generation: 'generation:baseline',
-    })).rejects.toThrow('successful app boot')
-    owner.replaceBootEvidence({ activeGeneration: 'generation:baseline' })
-    await expect(provider.acknowledgeBoot({
-      operationId: operation.authorization.operationId,
-      targetKey,
-      profileId: 'web',
-      generation: 'generation:baseline',
+      restartToken: 'managed:operation:plugin-kill',
     })).resolves.toBeUndefined()
     expect((await store.getManaged(targetKey))?.pending).toBeNull()
-    expect(await store.getBootAck(operation.authorization.operationId)).toMatchObject({
-      phase: 'rollback',
-      revision: 5,
-      generation: 'generation:baseline',
+    expect((await store.getManaged(targetKey))?.current).toBeNull()
+    await expect(lstat(installedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+
+    await expect(provider.rollback(recovered!)).resolves.toBe(prepared.beforeDigest)
+    const rollbackPending = await provider.recover(operation)
+    expect(rollbackPending).toMatchObject({
+      restartRequired: false,
+      rollbackRestartRequired: true,
+      restartToken: 'managed-rollback:operation:plugin-kill',
     })
-    await expect(provider.recover(operation)).resolves.toMatchObject({
-      rollbackRestart: true,
-      profileGeneration: 'generation:baseline',
+    expect((await store.getManaged(targetKey))?.pending).toMatchObject({
+      operationId: 'operation:plugin-kill',
+      operationKind: 'rollback',
+    })
+    await expect(provider.verify(rollbackPending!)).resolves.toBeNull()
+    expect((await lstat(installedPath)).isSymbolicLink()).toBe(false)
+
+    loader = new MemoryLoader()
+    loader.seed(entry.artifact.id)
+    provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await provider.initialize()
+    const rollback = await provider.recover(operation)
+    expect(rollback).toMatchObject({
+      restartRequired: false,
+      rollbackRestartRequired: true,
+      restartToken: 'managed-rollback:operation:plugin-kill',
+    })
+    await expect(provider.verify(rollback!)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
+    expect([...loader.rows.values()].map(row => row.options.name)).toEqual([entry.artifact.id])
+    await expect(provider.acknowledgeBoot({
+      operationId: operation.authorization.operationId,
+      targetKey,
+      profileId: 'web',
+      restartToken: 'managed-rollback:operation:plugin-kill',
+    })).resolves.toBeUndefined()
+    expect((await store.getManaged(targetKey))?.pending).toBeNull()
+    expect((await store.getManaged(targetKey))?.current?.kindState).toMatchObject({
+      rollbackOperationId: operation.authorization.operationId,
+      loaderPhase: 'active',
+    })
+    expect((await lstat(installedPath)).isSymbolicLink()).toBe(false)
+    expect(JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'))).toMatchObject({
+      name: 'official-profile', dependencies: { 'dsh-capability-resolver': `file:${archive.path}` },
+    })
+    expect(await readFile(join(profile, 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
+
+    const settled = (await store.getManaged(targetKey))!
+    const breakGlassRestored = {
+      ...prepared.before!,
+      revision: settled.revision + 1,
+      lastOperationId: operation.authorization.operationId,
+      pending: null,
+      updatedAtMs: Date.now(),
+    }
+    await store.putManaged(breakGlassRestored, settled.revision)
+    const sidecarPath = join(
+      centerRoot,
+      'plugin',
+      'profiles',
+      storageKey('web'),
+      'packages',
+      `${storageKey(targetKey)}.json`,
+    )
+    const priorSidecar = JSON.parse(await readFile(sidecarPath, 'utf8')) as Record<string, unknown>
+    await writeFile(sidecarPath, canonicalJson({
+      ...priorSidecar,
+      revision: breakGlassRestored.revision,
+      lastOperationId: operation.authorization.operationId,
+      managed: breakGlassRestored,
+      loaderEntryId: null,
+      loaderName: null,
+      restartPending: true,
+      lastGoodMaterialPath: breakGlassRestored.lastGood?.materialPath ?? null,
+      tombstoneMaterialPath: breakGlassRestored.removed?.materialPath ?? null,
+    }) + '\n')
+    const durable = (await store.getProviderSnapshot(operation.authorization.operationId))!
+    const markerDirectory = join(centerRoot, 'plugin', 'break-glass-restores')
+    await mkdir(markerDirectory, { recursive: true })
+    await writeFile(join(markerDirectory, `${storageKey(operation.authorization.operationId)}.json`), canonicalJson({
+      schemaVersion: 1,
+      operationId: operation.authorization.operationId,
+      targetKey,
+      profileId: 'web',
+      packageName: entry.artifact.id,
+      journalHeadDigest: recoveryHead,
+      providerSnapshotDigest: canonicalSha256(durable),
+      beforeDigest: prepared.beforeDigest,
+      restoredManagedDigest: managedStateDigest(breakGlassRestored),
+      restoredRevision: breakGlassRestored.revision,
+      status: 'settled',
+    }) + '\n')
+    loader = new MemoryLoader()
+    loader.seed(entry.artifact.id)
+    provider = new PluginLifecycleProvider(store, loader, { hostHome, pluginCli: cli })
+    await provider.initialize()
+    expect((await store.getManaged(targetKey))?.revision).toBe(breakGlassRestored.revision + 1)
+    await expect(provider.reconcileBreakGlassRestore(
+      operation, prepared.beforeDigest, canonicalSha256({ wrongHead: true }),
+    )).rejects.toThrow('does not bind')
+    await expect(provider.reconcileBreakGlassRestore(operation, prepared.beforeDigest, recoveryHead)).resolves.toMatchObject({
+      restartRequired: false,
+      rollbackRestartRequired: true,
+      restartToken: `managed-rollback:${operation.authorization.operationId}`,
     })
   })
 })

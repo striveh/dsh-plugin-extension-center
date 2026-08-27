@@ -27,7 +27,8 @@ export function safeChild(root: string, ...segments: readonly string[]): string 
   return child
 }
 
-async function syncDirectory(path: string): Promise<void> {
+/** Flush one directory entry update where the platform exposes directory fsync. */
+export async function syncDirectory(path: string): Promise<void> {
   let handle
   try {
     handle = await open(path, 'r')

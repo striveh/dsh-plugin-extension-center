@@ -291,22 +291,22 @@ export function parseCatalogListResponse(value: unknown): CatalogListResponse {
   keyIds.forEach((key, at) => { expectString(key, `catalog response.catalog.keyIds[${at}]`, 128) })
 
   const capabilities = expectRecord(input.hostCapabilities, 'catalog response.hostCapabilities', [
-    'acquisition', 'durableContinuation', 'dynamicMcpConnection', 'loaderObservation', 'profileTransaction',
+    'acquisition', 'durableContinuation', 'dynamicMcpConnection', 'loaderMutation', 'managedPluginLifecycle',
     'reason', 'skillRegistry', 'toolRegistry',
   ])
-  const profileTransaction = expectBoolean(capabilities.profileTransaction, 'catalog response.hostCapabilities.profileTransaction')
+  const managedPluginLifecycle = expectBoolean(capabilities.managedPluginLifecycle, 'catalog response.hostCapabilities.managedPluginLifecycle')
   const dynamicMcpConnection = expectBoolean(capabilities.dynamicMcpConnection, 'catalog response.hostCapabilities.dynamicMcpConnection')
   const durableContinuation = expectBoolean(capabilities.durableContinuation, 'catalog response.hostCapabilities.durableContinuation')
   const skillRegistry = expectBoolean(capabilities.skillRegistry, 'catalog response.hostCapabilities.skillRegistry')
   const toolRegistry = expectBoolean(capabilities.toolRegistry, 'catalog response.hostCapabilities.toolRegistry')
-  const loaderObservation = expectBoolean(capabilities.loaderObservation, 'catalog response.hostCapabilities.loaderObservation')
+  const loaderMutation = expectBoolean(capabilities.loaderMutation, 'catalog response.hostCapabilities.loaderMutation')
   const acquisition = expectBoolean(capabilities.acquisition, 'catalog response.hostCapabilities.acquisition')
-  const ownersAvailable = profileTransaction
+  const ownersAvailable = managedPluginLifecycle
     && dynamicMcpConnection
     && durableContinuation
     && skillRegistry
     && toolRegistry
-    && loaderObservation
+    && loaderMutation
   if (acquisition && !ownersAvailable) {
     throw new Error('extension-center: Host acquisition claim requires all owners and a ready writable runtime')
   }

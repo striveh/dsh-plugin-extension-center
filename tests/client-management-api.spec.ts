@@ -31,12 +31,12 @@ import { testReviewEvidence } from './support/review-evidence.ts'
 
 const CREATED = Date.parse('2026-08-25T10:00:00.000Z')
 const capabilities = {
-  profileTransaction: true,
+  managedPluginLifecycle: true,
   dynamicMcpConnection: true,
   durableContinuation: true,
   skillRegistry: true,
   toolRegistry: true,
-  loaderObservation: true,
+  loaderMutation: true,
   acquisition: true,
   reason: null,
 } as const
@@ -92,6 +92,25 @@ function immutablePlan(
   })
 }
 
+function pluginConfigurePlan(): ImmutablePlan {
+  const base = immutablePlan('configure')
+  return createImmutablePlan({
+    ...base.content,
+    planId: 'plan:plugin-configure:1',
+    intentId: 'intent:plugin-configure:1',
+    candidateRef: 'plugin:fixture@1.0.0',
+    extensionKind: 'plugin',
+    extensionId: 'fixture',
+    artifactRevision: '1.0.0',
+    artifactUrl: 'https://example.test/fixture.tgz',
+    targetKey: 'plugin:web:profile:web:fixture',
+    ownerKey: 'managedPlugins',
+    scopeKey: 'profile:web',
+    reviewEvidence: testReviewEvidence('plugin', 'configure'),
+    restartRequired: false,
+  })
+}
+
 function useContext(plan: ImmutablePlan): PlanUseContext {
   return {
     operationKind: plan.content.operationKind,
@@ -128,6 +147,12 @@ function inventoryResponse() {
       candidateRef: 'skill:example@revision-2',
       revision: 'revision-2',
       integrity: digest('artifact-2'),
+    },
+    restoreObservation: {
+      status: 'available',
+      candidateRef: 'skill:example@revision-1',
+      revision: 'revision-1',
+      integrity: digest('artifact-1'),
     },
     evidence: {
       kind: 'skill',
@@ -213,6 +238,16 @@ describe('management Client wire validation', () => {
     const wrongEvidence = structuredClone(response) as unknown as { inventory: { rows: Array<{ evidence: { kind: string } }> } }
     wrongEvidence.inventory.rows[0]!.evidence.kind = 'plugin'
     await expect(parseInventoryListResponse(wrongEvidence)).rejects.toThrow('evidence.kind')
+    const incompleteRestore = structuredClone(response) as unknown as {
+      inventory: { rows: Array<{ restoreObservation: { integrity?: string } }> }
+    }
+    delete incompleteRestore.inventory.rows[0]!.restoreObservation.integrity
+    await expect(parseInventoryListResponse(incompleteRestore)).rejects.toThrow('restoreObservation')
+    const unboundRestore = structuredClone(response)
+    unboundRestore.inventory.rows[0]!.restoreObservation = { status: 'unknown' }
+    const { revision: _revision, ...unboundBody } = unboundRestore.inventory
+    unboundRestore.inventory.revision = canonicalSha256(unboundBody)
+    await expect(parseInventoryListResponse(unboundRestore)).rejects.toThrow('restoreObservation')
   })
 
   it('carries only explicit inventory target keys and binds the returned plan to them', async () => {
@@ -268,6 +303,43 @@ describe('management Client wire validation', () => {
     tamperedPlan.plan.content.artifactRevision = 'moving-target'
     await expect(parseIntentPreviewResponse(tamperedPlan)).rejects.toThrow('plan hash mismatch')
 
+    const legacyReview = structuredClone(preview) as unknown as {
+      plan: { content: { reviewEvidence: { checks: Array<{ code: string }> } }; hash: string }
+    }
+    legacyReview.plan.content.reviewEvidence.checks[0]!.code = 'profile-lockfile'
+    legacyReview.plan.hash = canonicalSha256(legacyReview.plan.content)
+    await expect(parseIntentPreviewResponse(legacyReview)).rejects.toThrow('checks[0].code')
+
+    const pluginPlan = pluginConfigurePlan()
+    const pluginPreview = {
+      protocolVersion: 1 as const,
+      intentId: pluginPlan.content.intentId,
+      plan: pluginPlan,
+      policy: {
+        status: 'eligible' as const,
+        policyRevision: 'extension-center-p0-policy-v2',
+        authorityDigest: pluginPlan.content.authorityDigest,
+      },
+    }
+    await expect(parseIntentPreviewResponse(pluginPreview)).resolves.toEqual(pluginPreview)
+    for (const [field, value] of [
+      ['mutationOwner', 'official-dsh-cli'],
+      ['profileDependency', 'replace'],
+      ['loaderEntry', 'retain'],
+      ['restartRequired', true],
+    ] as const) {
+      const forged = structuredClone(pluginPreview)
+      Object.assign(forged.plan.content.reviewEvidence.kind === 'plugin'
+        ? forged.plan.content.reviewEvidence.activation
+        : {}, { [field]: value })
+      forged.plan.hash = canonicalSha256(forged.plan.content)
+      await expect(parseIntentPreviewResponse(forged)).rejects.toThrow('activation operation binding')
+    }
+    const forgedRestart = structuredClone(pluginPreview)
+    forgedRestart.plan.content.restartRequired = true
+    forgedRestart.plan.hash = canonicalSha256(forgedRestart.plan.content)
+    await expect(parseIntentPreviewResponse(forgedRestart)).rejects.toThrow('restartRequired binding')
+
     const receipt = issuedReceipt()
     const receipts = {
       protocolVersion: 1 as const,
@@ -294,10 +366,10 @@ describe('management Client wire validation', () => {
     rawConfiguration.receipts[0]!.receipt.body.planEvidence.configuration = { secret: 'must-not-cross-wire' }
     await expect(parseOperationReceiptsResponse(rawConfiguration)).rejects.toThrow('unexpected fields')
 
-    const missingHostHome = structuredClone(receipts) as unknown as { receipts: Array<{ receipt: { body: { planEvidence: { recoveryExecutable: Record<string, unknown> } }; digest: string } }> }
-    delete missingHostHome.receipts[0]!.receipt.body.planEvidence.recoveryExecutable.hostHome
-    missingHostHome.receipts[0]!.receipt.digest = canonicalSha256(missingHostHome.receipts[0]!.receipt.body)
-    await expect(parseOperationReceiptsResponse(missingHostHome)).rejects.toThrow('unexpected fields')
+    const missingCenterRoot = structuredClone(receipts) as unknown as { receipts: Array<{ receipt: { body: { planEvidence: { recoveryExecutable: Record<string, unknown> } }; digest: string } }> }
+    delete missingCenterRoot.receipts[0]!.receipt.body.planEvidence.recoveryExecutable.centerRoot
+    missingCenterRoot.receipts[0]!.receipt.digest = canonicalSha256(missingCenterRoot.receipts[0]!.receipt.body)
+    await expect(parseOperationReceiptsResponse(missingCenterRoot)).rejects.toThrow('unexpected fields')
 
     const lifecycleCall = vi.fn().mockResolvedValue({
       ok: true,
@@ -316,6 +388,7 @@ describe('management Client wire validation', () => {
   it('binds safe configuration selectors to the exact candidate and target request', async () => {
     const request = {
       candidateRef: 'mcp:filesystem@1.0.0',
+      operationKind: 'configure',
       targetKey: 'mcp:profile:web:filesystem',
       scopeKey: 'profile:web',
       profileId: 'web',
@@ -632,7 +705,8 @@ describe('management Client wire validation', () => {
       'task-attempt/list', 'task-attempt/select', 'task-attempt/retry', 'task-attempt/cancel', 'task-attempt/cancel',
     ])
     for (const state of [
-      'pending', 'ready', 'consumed', 'claimed', 'canceled', 'superseded', 'expired', 'invalid',
+      'pending', 'ready', 'consumed', 'dispatching', 'dispatched', 'claimed', 'delivery-unknown',
+      'canceled', 'superseded', 'expired', 'invalid',
       'reconciling', 'unavailable',
     ] as const) {
       expect(parseTaskAttemptListResponse({

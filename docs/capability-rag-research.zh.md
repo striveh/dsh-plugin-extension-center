@@ -17,13 +17,13 @@ DSH 应该怎样同时支持用户主动浏览扩展商店，以及 Agent 在完
 | [VS Code Agent Tools](https://code.visualstudio.com/docs/agents/concepts/tools) | 模型会在当前 Session 已有工具中自主选择。VS Code 建议缩小工具集合，并把可用性与审批分开。 | DSH 应检索一个任务相关的小能力集合，而不是把整个目录描述塞进模型上下文。 |
 | [VS Code Approvals and Permissions](https://code.visualstudio.com/docs/agents/run/approvals) | 工具可以单次或按更大范围审批；外部结果可能因提示注入而需要结果后复核；高自治模式带明确警告。 | 新扩展会引入代码、进程、网络或指令权限。P0 对一个准确计划只进行一次人工授权，并把检索到的文案当作不可信数据。 |
 | [Claude Code 插件发现](https://code.claude.com/docs/en/discover-plugins)与[插件提示](https://code.claude.com/docs/en/plugin-hints) | 用户浏览并安装 marketplace 插件。Claude 可以建议匹配的 LSP 插件，CLI 也可以发出安装提示，但产品明确不会自动安装；已安装插件可以在 Session 内 reload。 | 任务触发的建议有价值，但候选选择、安装授权与运行时生效是不同状态。DSH 可以让 Agent 发起准确请求，同时把确认权留在模型之外。 |
-| [OpenClaw ClawHub Skill `935c555`](https://github.com/openclaw/openclaw/blob/935c555c98d6b38af76faa6a0b1370353d1828df/skills/clawhub/SKILL.md) | 模型侧指令要求在声称能力不存在前先搜索、验证所选第三方 Skill、取得用户批准、安装准确版本，并依靠 watcher 在下一 agent turn 刷新 Skill。 | 这是最接近目标闭环的公开先例。DSH 应保留 existing-first、verify、人工授权与 next-turn 模式，但把模型执行命令改成 Host-owned transaction。 |
+| [OpenClaw ClawHub Skill `935c555`](https://github.com/openclaw/openclaw/blob/935c555c98d6b38af76faa6a0b1370353d1828df/skills/clawhub/SKILL.md) | 模型侧指令要求在声称能力不存在前先搜索、验证所选第三方 Skill、取得用户批准、安装准确版本，并依靠 watcher 在下一 agent turn 刷新 Skill。 | 这是最接近目标闭环的公开先例。DSH 应保留 existing-first、verify、人工授权与 next-turn 模式，同时把变更移出模型命令。扩展中心拥有 plan 与 evidence；每个已准入 child Plugin Bundle 的 package membership 变更仍使用官方 Plugin CLI，纯配置则使用官方 Loader。 |
 | [OpenHands 对话内 Skill 安装](https://docs.openhands.dev/overview/skills/adding) | 用户可以在 `/add-skill` 中提供 GitHub URL；当前官方页面称 OpenHands 会 fetch、write、verify 并让 Skill 立即可用。 | 对话内获取可行，但用户提供 coordinate 不是普通用户发现。由于 activation 主张会随产品 surface 与 Release 变化，DSH 仍须验证当前任务可见性，而不能相信安装结果。 |
 | [Claude Code Plugin Reference](https://code.claude.com/docs/en/plugins-reference)、[Cursor Agent Skills](https://prod.cursor.com/docs/skills)与[OpenHands Skills](https://docs.openhands.dev/overview/skills) | 已安装 Skill 先以摘要暴露，Agent 可以在任务匹配时调用。OpenHands 明确说明 Skill 本身不授予权限，也不安装依赖。 | 必须先匹配已有能力。获取缺失 Skill 是独立生命周期操作，不能由模型相关性自动推出。 |
 | [Agent Skills 规范](https://agentskills.io/specification) | Skill 具有有界的发现元数据，并按需加载指令、reference、script 与 asset。 | 检索索引应先使用标准化摘要，只对短名单补齐完整证据。完整 Skill 指令在计划阶段审查，不能成为检索指令。 |
 | [Cursor Plugins](https://prod.cursor.com/docs/plugins) | Plugin 在一个管理面统一承载 Skill 和 MCP，同时明显区分官方与社区发现来源。 | 中心可以统一导航和获取入口，但不能假装 Plugin、MCP、Skill 拥有相同运行 owner 或信任等级。 |
 | [OpenAI 的 ChatGPT/Codex Plugins](https://help.openai.com/en/articles/20001256-plugins-in-codex/) | Plugin Directory 是主要发现入口，但安装与使用仍受套餐、角色、App 设置、动作控制和源系统权限约束。 | “找到”不等于“可准入”“已安装”“已授权”或“可用”。候选、策略、凭据、运行与任务证据必须分开。 |
-| [DSH Capability Resolver `v0.1.0`](https://github.com/striveh/dsh-capability-resolver/tree/b2676e4fb311a0df2eaa17bdce2d6929317c1ea0)与[社区目录](https://awesome-dsh-plugin.com/plugins.json) | 这个非官方 DSH 插件读取一个固定公开目录，将用户任务留在本地 Host，并在本地排序标准化候选。它声明为只读：不安装、启用、禁用、更新或执行候选。 | 将其 need-first 发现与安全模型投影复用为原型证据。独立扩展中心负责准入、商店、Host transaction 和完整生命周期，不能把 resolver 拉伸成第二套管理器。 |
+| [DSH Capability Resolver `v0.1.0`](https://github.com/striveh/dsh-capability-resolver/tree/b2676e4fb311a0df2eaa17bdce2d6929317c1ea0)与[社区目录](https://awesome-dsh-plugin.com/plugins.json) | 这个非官方 DSH 插件读取一个固定公开目录，将用户任务留在本地 Host，并在本地排序标准化候选。它声明为只读：不安装、启用、禁用、更新或执行候选。 | 将其 need-first 发现与安全模型投影复用为原型证据。独立扩展中心负责准入、商店、plan、grant、evidence、恢复编排与续行，不会变成第二个物理 Plugin package manager。 |
 | [官方 MCP Registry 公告](https://blog.modelcontextprotocol.io/posts/2025-09-08-mcp-registry-preview/)、[发布指南](https://modelcontextprotocol.io/registry/quickstart)与[条款](https://modelcontextprotocol.io/registry/terms-of-service) | Registry 仍是 preview 的元数据目录，不托管 artifact；它被设计为 opinionated public/private subregistry 的上游，并且不保证安全、准确或可用。 | MCP Registry 是目录摄取来源，不是可写事实。扩展中心必须生成 DSH 专用准入快照，补充准确 artifact、兼容性、权限和验证数据。 |
 
 **对所抽样产品的综合判断：**用户自主目录已经是成熟获取路径，Agent 也越来越能选择已经存在的能力。仍不常见的是：任务上下文缺能力流程与商店共享同一目录、政策、生命周期状态和回执，并在获取后证明原任务续行。因此，P0 把扩展商店与 Agent 辅助获取保留为平等入口，而不是用任一入口取代另一个。
@@ -48,7 +48,7 @@ DSH 应该怎样同时支持用户主动浏览扩展商店，以及 Agent 在完
 ### 运行时检索平面
 
 1. **当前 Agent scope：**准确 Session、工作目录与 Agent scope 下的 qualified Tool schema 和官方 merged Skill catalog。任务路径先检查这里；商店把匹配条目标成已安装或可见。
-2. **受管运行证据：**center-owned inventory，以及 Skill、MCP Tool、Loader、Profile 的官方 observation。
+2. **受管运行证据：**扩展中心自有 operation inventory，以及官方 Profile package manager、Skill、MCP Tool、Loader 与声明 consumer 的 observation。
 3. **准入目录快照：**依据 Bundle-pinned catalog root 验证 versioned snapshot 与 offline bootstrap，再由 Agent 和商店共同在本机匹配。原始任务文本、商店查询、Session 标识、凭据、cookie 与 workspace 内容绝不进入目录请求。
 4. **外部线索：**只有用户明确要求审查时才在 runtime 获取其显式 URL，并保持 `external-only`。任意 Web/community discovery 属于 catalog ingestion，不进入任务或商店检索。
 
@@ -73,7 +73,7 @@ Agent 获得的是一个狭窄的模型工具，而不是原始目录。商店�
 
 这才是检索增强的能力解析：模型基于带来源的检索事实推理，而不是凭权重记忆包名或编造安装命令。
 
-商店使用同一个确定性 eligibility filter，但允许用户浏览全部准入匹配、筛选并比较最多三个候选。用户选择可以解决取舍，但不能绕过 trust、compatibility、lifecycle、integrity 或 authority policy。两个入口使用相同的 Host-derived intent schema 与 transaction engine。只有 candidate、scope、operation 与 desired state 相同时，它们的规范化 mutation 与 authority core 才必须相同；origin、task-only continuation、idempotency 与 plan identity 按请求独立。人工 MCP Install 与任务组合 Install-and-Enable 因此共享准入与 owner，但不伪装成同一个 intent 或 plan。
+商店使用同一个确定性 eligibility filter，但允许用户浏览全部准入匹配、筛选并比较最多三个候选。用户选择可以解决取舍，但不能绕过 trust、compatibility、lifecycle、integrity 或 authority policy。两个入口使用相同的 Host-side Center intent schema、授权、journal、receipt、验证与恢复编排。只有 candidate、scope、operation 与 desired state 相同时，它们的规范化 mutation 与 authority core 才必须相同；origin、task-only continuation、idempotency 与 plan identity 按请求独立。人工 MCP Install 与任务组合 Install-and-Enable 共享准入与扩展中心自有 MCP state，但不伪装成同一个 intent 或 plan；已准入 child Plugin Bundle 的 package membership 变更使用官方 Plugin CLI，纯配置则使用官方 Loader。
 
 ## 产品决策：自治边界
 
@@ -86,7 +86,7 @@ Agent 获得的是一个狭窄的模型工具，而不是原始目录。商店�
 | 用不透明标识请 Host 准备准确获取计划 | Agent 自主发起 |
 | 批准新的代码、进程、网络、指令或凭据权限 | 仅人类，对一个准确计划单次授权 |
 | 向变更路径提供包名、URL、shell command 或 secret | 禁止 |
-| 人工确认后执行安装 | Host owner transaction，绝不是模型执行 |
+| 人工确认后执行安装 | 扩展中心编排的类型化操作，绝不是模型执行；每个已准入 child Plugin Bundle 的 package membership 变更使用官方 Plugin CLI |
 | 验证当前 Agent 可见性并继续原任务 | owner evidence 通过后自主 |
 | 从任意 Web 或社区搜索结果直接安装 | 禁止；结果保持 `external-only` |
 | 记住宽泛安装授权或替未来候选批准 | P0 排除 |
@@ -95,8 +95,8 @@ Agent 获得的是一个狭窄的模型工具，而不是原始目录。商店�
 
 ## 产品决策：续行
 
-当 owner 能实时变更并暴露新 contribution 时，Skill 或 MCP connection 的获取调用可以等待确认、验证新 winner 或 Tool generation、重新读取准确 Agent 可见能力，并为同一 objective 派发新的 step。已发布 rc.2 缺少 dynamic MCP connection owner；另一份本地 DSH HEAD 已为集成测试实现该 owner，但在准确 DSH Release 发布它之前，这条路径仍是 Release gate。商店来源的获取没有 continuation claim。
+对于 Skill 或 MCP connection，扩展中心自有 lifecycle engine 可以等待确认、改变自有 desired state、验证官方 registry winner 或 MCP Tool set、重新读取准确 Agent 可见能力，并为同一 objective 派发新的 step。MCP engine 在扩展中心自有 fiber 内挂载和释放已发布 rc.2 MCP Client，不需要新增官方 mutation service。商店来源的获取没有 continuation claim。
 
-Profile Plugin 需要真实 Host restart。已发布 `dsh-v0.1.1-rc.2` 能持久化 Session 历史，但没有通用 restart-safe continuation owner。本地 DSH HEAD 现在实现了带 cancel/supersession fence 的 durable single-use claim，以及绑定 continuation message 的 at-most-once dispatch；它不承诺 exactly-once task completion。在准确 DSH Release 发布并通过该门禁之前，Plugin 获取仍结束为 `restart-required`；外部重启后必须在新 turn 重新检查证据再续行。
+受管 Plugin 可能需要真实 Host restart，因为 Node 与 Web module cache 会阻止同进程证明。扩展中心保留带 cancellation/supersession fence 的 durable single-use claim，官方 Plugin CLI 拥有所选 Profile dependency 与 package 安装。下一次 boot 中，扩展中心验证该准确 dependency、Loader contribution 与声明 consumer，再通过官方 Agent 与 Session 服务最多派发一次绑定 continuation message；它不承诺 exactly-once task completion。
 
 安装成功与任务成功始终是两个事实。只有新能力已经真实用于原任务，并且任务级 observable 通过，原任务才算完成。

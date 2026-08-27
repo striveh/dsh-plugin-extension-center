@@ -62,9 +62,9 @@ export function lifecycleActions(
     ]))) as LifecycleActions
   }
   const ownerAvailable = row.kind === 'plugin'
-    ? host.profileTransaction
+    ? host.managedPluginLifecycle
     : row.kind === 'mcp'
-      ? host.profileTransaction && host.dynamicMcpConnection
+      ? host.managedPluginLifecycle && host.dynamicMcpConnection
       : true
   if (!ownerAvailable) {
     return immutableJsonClone(Object.fromEntries(OPERATIONS.map(operation => [
@@ -84,9 +84,11 @@ export function lifecycleActions(
     enable: installed && !enabled ? available() : unavailable(installed ? 'already-enabled' : 'not-installed'),
     disable: installed && enabled ? available() : unavailable(installed ? 'already-disabled' : 'not-installed'),
     uninstall: installed ? available() : unavailable('not-installed'),
-    restore: row.rollback === 'available' || row.rollback === 'used'
-      ? available()
-      : unavailable('no-recovery-point'),
+    restore: row.rollback !== 'available' && row.rollback !== 'used'
+      ? unavailable('no-recovery-point')
+      : row.restoreObservation.status === 'available'
+        ? available()
+        : unavailable('no-exact-restore'),
     purge: row.materialized === 'absent' && row.rollback === 'available'
       ? available()
       : unavailable('no-center-owned-retained-data'),
@@ -100,6 +102,10 @@ export function lifecycleActions(
 }
 
 function assertEvidenceKind(row: InventoryRow): void {
+  if (row.restoreObservation.status === 'available'
+    && (row.ownership !== 'center' || !['available', 'used'].includes(row.rollback))) {
+    failDomain('invalid-data', `inventory restore target for ${row.extensionId} lacks a center recovery point`)
+  }
   const evidence = row.evidence
   if (evidence.kind !== row.kind) {
     failDomain('invalid-data', `inventory evidence kind does not match ${row.extensionId}`)
@@ -126,7 +132,7 @@ function assertEvidenceKind(row: InventoryRow): void {
       }
       break
     case 'plugin':
-      if (row.effective === 'active' && (!evidence.externalRestartObserved || !evidence.consumerObserved)) {
+      if (row.effective === 'active' && (!evidence.restartObserved || !evidence.consumerObserved)) {
         failDomain('invalid-data', `active Plugin ${row.extensionId} lacks restart and consumer evidence`)
       }
       if (row.agentVisibility === 'visible' && !evidence.consumerObserved) {

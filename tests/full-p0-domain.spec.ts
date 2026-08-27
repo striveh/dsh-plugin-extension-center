@@ -128,7 +128,34 @@ function approvedState(plan: ImmutablePlan, context = useContext(plan)) {
 }
 
 describe('full P0 canonical plan kernel', () => {
-  it('requires the exact pinned Host home in recovery executable bindings', () => {
+  it('rejects a Plugin plan whose restart bit contradicts its operation-bound activation evidence', () => {
+    const content: PlanContent = {
+      ...planContent(),
+      planId: 'plan:plugin-configure:1',
+      intentId: 'intent:plugin-configure:1',
+      candidateRef: 'plugin:fixture@1.0.0',
+      extensionKind: 'plugin',
+      extensionId: 'fixture',
+      externalRuntimeAction: 'none',
+      artifactRevision: '1.0.0',
+      artifactUrl: 'https://example.test/fixture.tgz',
+      operationKind: 'configure',
+      targetKey: 'plugin:web:profile:web:fixture',
+      ownerKey: 'managedPlugins',
+      scopeKey: 'profile:web',
+      reviewEvidence: testReviewEvidence('plugin', 'configure'),
+      restartRequired: false,
+    }
+    const plan = createImmutablePlan(content)
+    expect(decodeImmutablePlan(plan)).toEqual(plan)
+
+    const forged = structuredClone(plan)
+    forged.content.restartRequired = true
+    forged.hash = canonicalSha256(forged.content)
+    expectDomainCode(() => decodeImmutablePlan(forged), 'invalid-data')
+  })
+
+  it('requires the exact pinned Center root in recovery executable bindings', () => {
     expect(decodeRecoveryExecutableBinding(TEST_RECOVERY_EXECUTABLE_BINDING))
       .toEqual(TEST_RECOVERY_EXECUTABLE_BINDING)
     expectDomainCode(
@@ -136,10 +163,10 @@ describe('full P0 canonical plan kernel', () => {
       'invalid-data',
     )
     const missing = { ...TEST_RECOVERY_EXECUTABLE_BINDING } as Record<string, unknown>
-    delete missing.hostHome
+    delete missing.centerRoot
     expectDomainCode(() => decodeRecoveryExecutableBinding(missing), 'invalid-data')
     expectDomainCode(
-      () => decodeRecoveryExecutableBinding({ ...TEST_RECOVERY_EXECUTABLE_BINDING, hostHome: 'relative-home' }),
+      () => decodeRecoveryExecutableBinding({ ...TEST_RECOVERY_EXECUTABLE_BINDING, centerRoot: 'relative-root' }),
       'invalid-data',
     )
   })

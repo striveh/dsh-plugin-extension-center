@@ -69,27 +69,29 @@ import { canonicalSha256 } from '../src/domain/index.ts'
 import { createInventorySnapshot, type InventoryRow } from '../src/inventory/index.ts'
 import type { OperationReceipt } from '../src/operations/index.ts'
 import type { HostCapabilityProjection, InventoryListResponse, RpcJson } from '../src/service/rpc-contract.ts'
+import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 import {
   createImmutablePlan,
   createPlanAuthorizationState,
   decidePlan,
   type ImmutablePlan,
+  type OperationKind,
   type PlanAuthorizationState,
   type PlanUseContext,
 } from '../src/plans/index.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
-const NOW = Date.parse('2026-08-25T10:15:00.000Z')
+const NOW = Date.parse('2026-08-27T00:00:01.000Z')
 beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(NOW + 10) })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 const hostCapabilities = {
-  profileTransaction: true,
+  managedPluginLifecycle: true,
   dynamicMcpConnection: true,
   durableContinuation: true,
   skillRegistry: true,
   toolRegistry: true,
-  loaderObservation: true,
+  loaderMutation: true,
   acquisition: true,
   reason: null,
 } as const
@@ -104,7 +106,12 @@ function digest(label: string) {
   return canonicalSha256({ label })
 }
 
-function inventoryResponse(capabilities: HostCapabilityProjection = hostCapabilities): InventoryListResponse {
+function inventoryResponse(
+  capabilities: HostCapabilityProjection = hostCapabilities,
+  resolverCandidateRef = plugin.candidateRef,
+  resolverUpdate: InventoryRow['updateObservation'] = { status: 'none' },
+  resolverRestore: InventoryRow['restoreObservation'] = { status: 'none' },
+): InventoryListResponse {
   const row: Omit<InventoryRow, 'actions'> = {
     schemaVersion: 1,
     kind: 'skill',
@@ -130,6 +137,7 @@ function inventoryResponse(capabilities: HostCapabilityProjection = hostCapabili
       revision: `${skill.artifact.version}+admitted.2`,
       integrity: skill.artifact.integrity,
     },
+    restoreObservation: { status: 'none' },
     evidence: {
       kind: 'skill',
       contentRevision: skill.source.revision,
@@ -144,7 +152,7 @@ function inventoryResponse(capabilities: HostCapabilityProjection = hostCapabili
     schemaVersion: 1,
     kind: 'plugin',
     extensionId: plugin.name,
-    candidateRef: plugin.candidateRef,
+    candidateRef: resolverCandidateRef,
     targetKey: pluginTargetKey,
     scopeKey: 'profile:web',
     profileId: 'web',
@@ -159,13 +167,14 @@ function inventoryResponse(capabilities: HostCapabilityProjection = hostCapabili
     ownerRevision: 'owner:plugin:2',
     configurationRevision: 'configuration:resolver:1',
     observedAtMs: NOW,
-    updateObservation: { status: 'none' },
+    updateObservation: resolverUpdate,
+    restoreObservation: resolverRestore,
     evidence: {
       kind: 'plugin',
-      profileGeneration: 'generation:2',
+      restartToken: 'generation:2',
       loaderPhase: 'active',
       consumerObserved: true,
-      externalRestartObserved: true,
+      restartObserved: true,
     },
   }
   return {
@@ -218,7 +227,9 @@ function planFor(input: StorePreviewInput): ImmutablePlan {
     reviewEvidence: testReviewEvidence(candidate.kind, input.operationKind),
     mutationDigest: digest(`mutation:${input.operationKind}`),
     verificationDigest: digest(`verification:${input.operationKind}`),
-    restartRequired: candidate.restart.required,
+    restartRequired: candidate.kind === 'plugin' && input.operationKind === 'configure'
+      ? false
+      : candidate.restart.required,
     createdAtMs: NOW,
     expiresAtMs: NOW + 60_000,
     fences: {
@@ -358,7 +369,7 @@ function managementFixture() {
     }
   })
   const decide = vi.fn(async (plan: ImmutablePlan, value: 'approve' | 'reject') => decided(plan, value))
-  const configurationOptions = vi.fn(async (input: { candidateRef: string; targetKey: string | null; scopeKey: string; profileId: string }) => ({
+  const configurationOptions = vi.fn(async (input: { candidateRef: string; operationKind: OperationKind; targetKey: string | null; scopeKey: string; profileId: string }) => ({
     protocolVersion: 1 as const,
     options: input.candidateRef.startsWith('mcp:') ? [{
       candidateRef: input.candidateRef,
@@ -648,6 +659,183 @@ describe('full P0 Browser management flow', () => {
       targetKey: null,
       configuration: {},
     }, expect.any(AbortSignal))
+  })
+
+  it('opens the typed management draft for the exact resolver 0.1.1 candidate', async () => {
+    const fixture = managementFixture()
+    const [, next] = CAPABILITY_RESOLVER_CANDIDATES
+    const nextResolver = {
+      ...plugin,
+      candidateRef: next.candidateRef,
+      artifact: {
+        ...plugin.artifact,
+        version: next.version,
+        integrity: next.integrity,
+        sizeBytes: next.sizeBytes,
+      },
+    }
+    fixture.inventory.mockResolvedValue(inventoryResponse(hostCapabilities, next.candidateRef))
+    fixture.configurationOptions.mockResolvedValue({
+      protocolVersion: 1,
+      options: [],
+      currentConfiguration: {},
+    })
+    renderCenter(fixture.client, {
+      ...catalogSnapshot,
+      entries: catalogSnapshot.entries.map(entry => entry === plugin ? nextResolver : entry),
+    })
+    const dialog = openStore()
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Installed' }))
+    const installed = within(dialog).getByRole('tabpanel', { name: 'Installed' })
+    const card = (await within(installed).findByRole('heading', { name: plugin.name })).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: 'Configure' }))
+
+    await waitFor(() => { expect(within(card).getAllByRole('spinbutton')).toHaveLength(10) })
+    expect(fixture.configurationOptions).toHaveBeenCalledWith({
+      candidateRef: next.candidateRef,
+      operationKind: 'configure',
+      targetKey: pluginTargetKey,
+      scopeKey: 'profile:web',
+      profileId: 'web',
+    }, expect.any(AbortSignal))
+  })
+
+  it('carries the installed resolver configuration into the exact 0.1.1 update preview', async () => {
+    const fixture = managementFixture()
+    const [, next] = CAPABILITY_RESOLVER_CANDIDATES
+    const nextResolver = {
+      ...plugin,
+      candidateRef: next.candidateRef,
+      artifact: {
+        ...plugin.artifact,
+        version: next.version,
+        integrity: next.integrity,
+        sizeBytes: next.sizeBytes,
+      },
+    }
+    const currentConfiguration = {
+      freshCacheMs: 900000,
+      staleCacheMs: 86400000,
+      fetchTimeoutMs: 5000,
+      maxCatalogBytes: 8388608,
+      maxCatalogEntries: 5000,
+      maxTaskChars: 2000,
+      maxResults: 8,
+      maxCurrentMatches: 8,
+      maxMatchedTerms: 12,
+      maxDescriptionChars: 600,
+    }
+    fixture.inventory.mockResolvedValue(inventoryResponse(hostCapabilities, plugin.candidateRef, {
+      status: 'available',
+      candidateRef: next.candidateRef,
+      revision: next.version,
+      integrity: next.integrity,
+    }))
+    fixture.configurationOptions.mockResolvedValue({
+      protocolVersion: 1,
+      options: [],
+      currentConfiguration,
+    })
+    fixture.preview.mockRejectedValue(new Error('stop after exact update request'))
+    renderCenter(fixture.client, {
+      ...catalogSnapshot,
+      entries: [...catalogSnapshot.entries, nextResolver],
+    })
+    const dialog = openStore()
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Installed' }))
+    const installed = within(dialog).getByRole('tabpanel', { name: 'Installed' })
+    const card = (await within(installed).findByRole('heading', { name: plugin.name })).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: 'Update' }))
+
+    await waitFor(() => {
+      expect(fixture.preview).toHaveBeenCalledWith({
+        candidateRef: next.candidateRef,
+        operationKind: 'update',
+        scopeKey: 'profile:web',
+        profileId: 'web',
+        targetKey: pluginTargetKey,
+        configuration: currentConfiguration,
+      }, expect.any(AbortSignal))
+    })
+  })
+
+  it('uses the retained candidate and configuration for active restore', async () => {
+    const fixture = managementFixture()
+    const [, next] = CAPABILITY_RESOLVER_CANDIDATES
+    const retainedConfiguration = {
+      freshCacheMs: 5_000,
+      staleCacheMs: 30_000,
+      fetchTimeoutMs: 10_000,
+      maxCatalogBytes: 1_048_576,
+      maxCatalogEntries: 2_000,
+      maxTaskChars: 4_000,
+      maxResults: 5,
+      maxCurrentMatches: 10,
+      maxMatchedTerms: 10,
+      maxDescriptionChars: 500,
+    }
+    fixture.inventory.mockResolvedValue(inventoryResponse(
+      hostCapabilities,
+      next.candidateRef,
+      { status: 'none' },
+      {
+        status: 'available',
+        candidateRef: plugin.candidateRef,
+        revision: plugin.artifact.version,
+        integrity: plugin.artifact.integrity,
+      },
+    ))
+    fixture.configurationOptions.mockResolvedValue({
+      protocolVersion: 1,
+      options: [],
+      currentConfiguration: retainedConfiguration,
+    })
+    fixture.preview.mockRejectedValue(new Error('stop after exact restore request'))
+    renderCenter(fixture.client)
+    const dialog = openStore()
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Installed' }))
+    const installed = within(dialog).getByRole('tabpanel', { name: 'Installed' })
+    const card = (await within(installed).findByRole('heading', { name: plugin.name })).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: 'Restore' }))
+
+    await waitFor(() => {
+      expect(fixture.configurationOptions).toHaveBeenCalledWith({
+        candidateRef: plugin.candidateRef,
+        operationKind: 'restore',
+        targetKey: pluginTargetKey,
+        scopeKey: 'profile:web',
+        profileId: 'web',
+      }, expect.any(AbortSignal))
+      expect(fixture.preview).toHaveBeenCalledWith({
+        candidateRef: plugin.candidateRef,
+        operationKind: 'restore',
+        scopeKey: 'profile:web',
+        profileId: 'web',
+        targetKey: pluginTargetKey,
+        configuration: retainedConfiguration,
+      }, expect.any(AbortSignal))
+    })
+  })
+
+  it('does not fall back to another configuration form for an unknown resolver version', async () => {
+    const fixture = managementFixture()
+    const unknown = 'plugin:dsh-capability-resolver@0.1.2'
+    fixture.inventory.mockResolvedValue(inventoryResponse(hostCapabilities, unknown))
+    fixture.configurationOptions.mockResolvedValue({
+      protocolVersion: 1,
+      options: [],
+      currentConfiguration: {},
+    })
+    renderCenter(fixture.client)
+    const dialog = openStore()
+    fireEvent.click(within(dialog).getByRole('tab', { name: 'Installed' }))
+    const installed = within(dialog).getByRole('tabpanel', { name: 'Installed' })
+    const card = (await within(installed).findByRole('heading', { name: plugin.name })).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: 'Configure' }))
+
+    expect(await within(card).findByRole('alert')).toHaveTextContent('Management unavailable')
+    expect(within(card).queryByRole('spinbutton')).toBeNull()
+    expect(within(card).queryByRole('checkbox')).toBeNull()
   })
 
   it('retries preview safely but never repeats an uncertain decision grant', async () => {

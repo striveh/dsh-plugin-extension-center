@@ -1,0 +1,65 @@
+name: Catalog discovery
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-discovery
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Collect non-executable Plugin, MCP, and Skill leads
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build catalog verifier modules
+        run: pnpm exec tsc -p tsconfig.host.json
+      - name: Discover bounded non-admitted leads
+        run: >-
+          node scripts/catalog-pipeline.mjs discover
+          --out .artifacts/catalog-discovery/leads.json
+          --now "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+          --max-mcp-pages 100
+      - name: Record exact report digest
+        working-directory: .artifacts/catalog-discovery
+        run: sha256sum leads.json > SHA256SUMS
+      - name: Re-fetch every currently signed source and artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          pnpm run test:acceptance:catalog-sources --
+          --receipt .artifacts/catalog-discovery/source-freshness.json
+      - name: Upload discovery report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: catalog-leads-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            .artifacts/catalog-discovery/leads.json
+            .artifacts/catalog-discovery/SHA256SUMS
+            .artifacts/catalog-discovery/source-freshness.json
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 30

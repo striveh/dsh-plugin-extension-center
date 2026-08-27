@@ -11,7 +11,6 @@ import {
   decodeContinuationActivationIntent,
   decodeManagedTarget,
   decodeOperationIndex,
-  decodeProfileBootAck,
   decodeProviderSnapshot,
   decodeStoredIntent,
   decodeStoredResolution,
@@ -24,7 +23,6 @@ import type {
   StoredContinuationActivationIntent,
   StoredIntent,
   StoredOperationIndex,
-  StoredProfileBootAck,
   StoredProviderSnapshot,
   StoredResolution,
   StoredTaskReceipt,
@@ -198,20 +196,6 @@ function providerSnapshot(centerRoot: string, before: ManagedTargetRecord): Stor
   }
 }
 
-function bootAck(): StoredProfileBootAck {
-  return {
-    schemaVersion: 1,
-    operationId: OPERATION_ID,
-    profileId: 'web',
-    generation: 'generation:1',
-    phase: 'candidate',
-    revision: 1,
-    treeDigest: 'tree:1',
-    consumerObserved: true,
-    acknowledgedAtMs: 10,
-  }
-}
-
 function taskReceipt(): StoredTaskReceipt {
   return {
     schemaVersion: 1,
@@ -285,7 +269,6 @@ describe('Host durable state codec faults', () => {
       { name: 'resolution', decode: () => decodeStoredResolution(withExtra(resolution())) },
       { name: 'operation index', decode: () => decodeOperationIndex(withExtra(operationIndex(target.targetKey))) },
       { name: 'provider snapshot', decode: () => decodeProviderSnapshot(withExtra(providerSnapshot(centerRoot, target)), centerRoot) },
-      { name: 'boot acknowledgement', decode: () => decodeProfileBootAck(withExtra(bootAck())) },
       { name: 'task receipt', decode: () => decodeTaskReceipt(withExtra(taskReceipt())) },
       { name: 'continuation activation', decode: () => decodeContinuationActivation(withExtra(activation())) },
       { name: 'continuation activation intent', decode: () => decodeContinuationActivationIntent(withExtra(activationIntent())) },

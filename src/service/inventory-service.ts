@@ -4,7 +4,9 @@ import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { HostOwners, ManagedTargetRecord, ManagedVersion } from '../host/index.ts'
 import { CenterStateStore, hostCapabilities } from '../host/index.ts'
 import { createInventorySnapshot, type InventoryRow, type InventorySnapshot } from '../inventory/index.ts'
+import { candidateUpdateSuccessor } from '../kind-candidates.ts'
 import type { HostCapabilityProjection, RpcJson } from './rpc-contract.ts'
+import type { ManagedPluginSnapshotPort } from './review-evidence.ts'
 import { inspectSkillArtifact } from '../providers/skill-provider.ts'
 import type { McpManagedOwnerEvidence } from '../providers/mcp-provider.ts'
 
@@ -24,20 +26,50 @@ function retained(record: ManagedTargetRecord): ManagedVersion | null {
   return record.current ?? record.removed ?? record.lastGood
 }
 
+function restoreTarget(record: ManagedTargetRecord): ManagedVersion | null {
+  return record.current === null ? record.removed : record.lastGood
+}
+
+function exactCatalogObservation(
+  catalog: VerifiedCatalog,
+  target: ManagedTargetRecord,
+  version: ManagedVersion | null,
+): InventoryRow['restoreObservation'] {
+  if (version === null) return Object.freeze({ status: 'none' })
+  const entry = catalog.envelope.entries.find(candidate => candidate.candidateRef === version.candidateRef)
+  if (entry === undefined
+    || entry.kind !== target.kind
+    || entry.name !== target.extensionId
+    || !entry.scopes.includes(target.scopeKey as never)
+    || entry.artifact.version !== version.artifactRevision
+    || entry.artifact.integrity !== version.artifactIntegrity) {
+    return Object.freeze({ status: 'unknown' })
+  }
+  return Object.freeze({
+    status: 'available',
+    candidateRef: entry.candidateRef,
+    revision: entry.artifact.version,
+    integrity: entry.artifact.integrity,
+  })
+}
+
 function updateObservation(
   catalog: VerifiedCatalog,
   target: ManagedTargetRecord,
   version: ManagedVersion | null,
 ): InventoryRow['updateObservation'] {
   if (version === null) return Object.freeze({ status: 'unknown' })
-  const candidates = catalog.envelope.entries.filter(entry => entry.kind === target.kind
-    && entry.name === target.extensionId
-    && entry.scopes.includes(target.scopeKey as never)
-    && entry.artifact.version !== version.artifactRevision
-    && entry.artifact.integrity !== version.artifactIntegrity)
-  if (candidates.length === 0) return Object.freeze({ status: 'none' })
-  if (candidates.length > 1) return Object.freeze({ status: 'unknown' })
-  const current = candidates[0]!
+  const successorRef = candidateUpdateSuccessor(version.candidateRef)
+  if (successorRef === null) return Object.freeze({ status: 'none' })
+  const current = catalog.envelope.entries.find(entry => entry.candidateRef === successorRef)
+  if (current === undefined
+    || current.kind !== target.kind
+    || current.name !== target.extensionId
+    || !current.scopes.includes(target.scopeKey as never)
+    || current.artifact.version === version.artifactRevision
+    || current.artifact.integrity === version.artifactIntegrity) {
+    return Object.freeze({ status: 'unknown' })
+  }
   return Object.freeze({
     status: 'available',
     candidateRef: current.candidateRef,
@@ -52,6 +84,7 @@ export class HostInventoryService {
     private readonly store: CenterStateStore,
     private readonly owners: HostOwners,
     private readonly catalog: () => VerifiedCatalog,
+    private readonly managedPlugins: ManagedPluginSnapshotPort,
     private readonly inspectManagedMcp: ((version: ManagedVersion) => Promise<McpManagedOwnerEvidence>) | null = null,
     private readonly capabilities: () => HostCapabilityProjection = () => hostCapabilities(owners),
   ) {}
@@ -136,6 +169,7 @@ export class HostInventoryService {
           rollback: 'unavailable', managedRevision: `external:skill:${canonicalSha256(item)}`,
           ownerRevision: `skills:${canonicalSha256(view)}`, configurationRevision: null, observedAtMs: 0,
           updateObservation: identity.candidateRef === null ? { status: 'unknown' } : { status: 'none' },
+          restoreObservation: { status: 'none' },
           evidence: {
             kind: 'skill', contentRevision: null, catalogComplete: view.complete,
             winningProvider: typeof item.provider === 'string' ? item.provider : null,
@@ -172,6 +206,7 @@ export class HostInventoryService {
           managedRevision: `external:mcp:${String(raw.revision ?? 0)}`, ownerRevision: `mcp:${String(raw.revision ?? 0)}`,
           configurationRevision: canonicalSha256(desired ?? null), observedAtMs: 0,
           updateObservation: identity.candidateRef === null ? { status: 'unknown' } : { status: 'none' },
+          restoreObservation: { status: 'none' },
           evidence: {
             kind: 'mcp', descriptorMatches: true, descriptorDigest: null, descriptorRevision: String(raw.revision ?? ''),
             transport: record(desired?.transport)?.transport === 'stdio' ? 'stdio'
@@ -195,6 +230,7 @@ export class HostInventoryService {
           rollback: 'available', managedRevision: `external:mcp-removed:${String(raw.revision ?? 0)}`,
           ownerRevision: `mcp:${String(raw.revision ?? 0)}`, configurationRevision: null, observedAtMs: 0,
           updateObservation: identity.candidateRef === null ? { status: 'unknown' } : { status: 'none' },
+          restoreObservation: { status: 'unknown' },
           evidence: { kind: 'mcp', descriptorMatches: true, descriptorDigest: null, descriptorRevision: String(raw.revision ?? ''), transport: null,
             desiredEnabled: false, observedLifecycle: 'absent', liveDetailAvailable: true,
             toolGeneration: null, qualifiedTools: [] },
@@ -202,7 +238,6 @@ export class HostInventoryService {
       }
     }
     if (this.owners.loader !== null && scopeKey === 'profile:web') {
-      await this.owners.loader.await()
       const entries = [...this.owners.loader.entries()].filter(entry => !entry.options.group)
         .sort((left, right) => left.id.localeCompare(right.id))
       for (const entry of entries) {
@@ -222,9 +257,10 @@ export class HostInventoryService {
           rollback: 'unavailable', managedRevision: `loader:${entry.id}:${String(entry.fiber?.state ?? -1)}`,
           ownerRevision: `loader:${entry.id}:${String(entry.fiber?.state ?? -1)}`, configurationRevision: null, observedAtMs: 0,
           updateObservation: identity.candidateRef === null ? { status: 'unknown' } : { status: 'none' },
-          evidence: { kind: 'plugin', profileGeneration: null,
+          restoreObservation: { status: 'none' },
+          evidence: { kind: 'plugin', restartToken: null,
             loaderPhase: active ? 'active' : entry.disabled ? 'disabled' : 'failed',
-            consumerObserved: active, externalRestartObserved: active },
+            consumerObserved: active, restartObserved: active },
         })
       }
     }
@@ -234,6 +270,7 @@ export class HostInventoryService {
   private async centerRow(value: ManagedTargetRecord): Promise<Omit<InventoryRow, 'actions'>> {
     const current = value.current
     const evidenceVersion = retained(value)
+    const catalog = this.catalog()
     const configured = current === null
       ? false
       : value.kind !== 'mcp' || kindState(current).configured === true
@@ -253,10 +290,10 @@ export class HostInventoryService {
             ? evidence.descriptorMatches && evidence.observedLifecycle === 'ready' ? 'active'
               : evidence.observedLifecycle === 'disabled' ? 'inactive'
                 : evidence.observedLifecycle === 'starting' ? 'starting' : 'degraded'
-            : evidence.consumerObserved && evidence.externalRestartObserved ? 'active'
+            : evidence.consumerObserved && evidence.restartObserved ? 'active'
               : current !== null
                 && kindState(current).consumerObserved === true
-                && kindState(current).externalRestartObserved === true ? 'degraded' : 'restart-required'
+                && kindState(current).restartObserved === true ? 'degraded' : 'restart-required'
     const visibility = evidence.kind === 'skill'
       ? current?.enabled === true
         && evidence.definitionLoaded
@@ -284,7 +321,8 @@ export class HostInventoryService {
       ownerRevision: current?.ownerRevision ?? evidenceVersion?.ownerRevision ?? 'owner:absent',
       configurationRevision: current === null || !configured ? null : canonicalSha256(current.configuration),
       observedAtMs: value.updatedAtMs,
-      updateObservation: updateObservation(this.catalog(), value, current),
+      updateObservation: updateObservation(catalog, value, current),
+      restoreObservation: exactCatalogObservation(catalog, value, restoreTarget(value)),
       evidence,
     }) as unknown as Omit<InventoryRow, 'actions'>
   }
@@ -358,23 +396,17 @@ export class HostInventoryService {
 
   private async pluginEvidence(value: ManagedTargetRecord, version: ManagedVersion | null): Promise<InventoryRow['evidence']> {
     const state = version === null ? undefined : kindState(version)
-    const generation = typeof state?.profileGeneration === 'string' ? state.profileGeneration : null
+    const generation = typeof state?.restartToken === 'string' ? state.restartToken : null
     const packageName = typeof state?.packageName === 'string' ? state.packageName : null
-    const treeDigest = typeof state?.treeDigest === 'string' ? state.treeDigest : null
-    if (generation === null || packageName === null || treeDigest === null
-      || this.owners.profileTransactions === null || this.owners.loader === null) {
+    if (generation === null || packageName === null || this.owners.loader === null) {
       return {
-        kind: 'plugin', profileGeneration: generation, loaderPhase: null,
-        consumerObserved: false, externalRestartObserved: false,
+        kind: 'plugin', restartToken: generation, loaderPhase: null,
+        consumerObserved: false, restartObserved: false,
       }
     }
     try {
-      const profile = await this.owners.profileTransactions.snapshot(value.profileId)
-      const generationMatches = profile.profile === value.profileId
-        && profile.activeGeneration === generation
-        && profile.treeDigest === treeDigest
-        && profile.bootStatus === 'verified'
-      await this.owners.loader.await()
+      const snapshot = await this.managedPlugins.snapshot(value.profileId)
+      const ownerReady = snapshot.profileId === value.profileId && snapshot.bootStatus !== 'pending-restart'
       const entries = [...this.owners.loader.entries()].filter(entry => !entry.options.group
         && (entry.options.id === packageName || entry.options.name === packageName))
       const active = entries.some(entry => entry.options.id === packageName
@@ -382,18 +414,21 @@ export class HostInventoryService {
         && !entry.disabled
         && entry.fiber?.state === 2)
       const expectedPresent = value.current !== null
-      const consumerObserved = generationMatches && (expectedPresent ? active : entries.length === 0)
+      const consumerObserved = ownerReady
+        && state?.consumerObserved === true
+        && (expectedPresent ? active : entries.length === 0)
+      const restartObserved = ownerReady && state?.restartObserved === true
       return {
         kind: 'plugin',
-        profileGeneration: generation,
+        restartToken: generation,
         loaderPhase: consumerObserved ? expectedPresent ? 'active' : 'absent' : 'failed',
         consumerObserved,
-        externalRestartObserved: generationMatches,
+        restartObserved: restartObserved,
       }
     } catch {
       return {
-        kind: 'plugin', profileGeneration: generation, loaderPhase: 'failed',
-        consumerObserved: false, externalRestartObserved: false,
+        kind: 'plugin', restartToken: generation, loaderPhase: 'failed',
+        consumerObserved: false, restartObserved: false,
       }
     }
   }

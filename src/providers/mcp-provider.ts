@@ -4,6 +4,7 @@ import { lstat, open, realpath } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { ManagedTargetRecord, ManagedVersion, McpConnectionsOwner } from '../host/index.ts'
+import { filesystemMcpCandidate } from '../kind-candidates.ts'
 import type { McpReviewEvidence } from '../plans/index.ts'
 import { CenterStateStore } from '../host/index.ts'
 import type { RpcJson } from '../service/rpc-contract.ts'
@@ -131,6 +132,7 @@ interface PreparedMcp {
   readonly ownerActiveRevision: number | null
   readonly ownerRemovedRevision: number | null
   readonly ownerToolGeneration: number | null
+  readonly ownerToolNames: readonly string[]
 }
 
 /** Exact Host-owner observation for one Center-managed MCP version. */
@@ -273,6 +275,18 @@ function viewToolGeneration(value: unknown): number | null {
   return Number.isSafeInteger(generation) && (generation as number) >= 0 ? generation as number : null
 }
 
+function exactOwnerToolNames(value: unknown, connectionId: string): readonly string[] {
+  const names = viewRecord(viewRecord(value)?.tools)?.names
+  const prefix = `mcp__${connectionId}__`
+  if (!Array.isArray(names)
+    || names.length > 4_096
+    || names.some(name => typeof name !== 'string' || name.length > 256 || !name.startsWith(prefix))
+    || new Set(names).size !== names.length) {
+    throw new Error('MCP owner Tool names are invalid or outside their connection namespace')
+  }
+  return Object.freeze([...names].sort((left, right) => left.localeCompare(right)))
+}
+
 function recordTransport(value: unknown): 'stdio' | 'http' | null {
   const descriptor = viewRecord(value)
   return descriptor?.transport === 'stdio'
@@ -327,6 +341,9 @@ function admittedRuntime(value: AdmittedMcpRuntime): AdmittedMcpRuntime {
   const runtimeRef = boundedIdentifier(input.runtimeRef, /^[a-z0-9][a-z0-9._:-]{0,127}$/, 'MCP runtimeRef', 128)
   const candidateRef = boundedIdentifier(input.candidateRef, /^mcp:[A-Za-z0-9@._:/-]{1,240}$/, 'MCP candidateRef', 256)
   const version = boundedIdentifier(input.version, /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/, 'MCP runtime version', 128)
+  if (filesystemMcpCandidate(candidateRef, version) === null) {
+    throw new Error('MCP runtime candidate and version are not admitted by this build')
+  }
   if (input.transport === 'stdio') {
     if (typeof input.executablePath !== 'string' || !isAbsolute(input.executablePath)
       || resolve(input.executablePath) !== input.executablePath
@@ -404,6 +421,8 @@ type McpOwnerMutationPhase =
   | 'enable'
   | 'purge'
   | 'restore-record'
+  | 'restore-disable'
+  | 'restore-enable'
   | 'restore-update'
   | 'rollback-configure'
   | 'rollback-disable'
@@ -734,6 +753,18 @@ export class McpLifecycleProvider implements LifecycleProvider {
     if (request.plan.fences.ownerRevision !== `mcp:${String(boundOwnerRevision)}`) {
       throw new Error('MCP owner revision changed after plan approval')
     }
+    let ownerToolNames: readonly string[] = Object.freeze([])
+    if (request.plan.operationKind === 'uninstall' || request.plan.operationKind === 'purge') {
+      const expectedNames = ownerActive === undefined
+        ? Object.freeze([] as string[])
+        : exactOwnerToolNames(ownerActive, ownerConnectionId)
+      const registeredNames = this.owner.registeredToolNames(ownerConnectionId, expectedNames)
+      if (expectedNames.some(name => !registeredNames.includes(name))) {
+        throw new Error('MCP owner Tool registry changed after plan approval')
+      }
+      ownerToolNames = Object.freeze([...new Set([...expectedNames, ...registeredNames])]
+        .sort((left, right) => left.localeCompare(right)))
+    }
     const prior = before?.current ?? before?.removed
     if (prior !== null && prior !== undefined && kindState(prior).configured) {
       const priorState = kindState(prior)
@@ -764,6 +795,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
         ownerActiveRevision: ownerActive === undefined ? null : viewRevision(ownerActive),
         ownerRemovedRevision: ownerRemoved === undefined ? null : viewRevision(ownerRemoved),
         ownerToolGeneration: viewToolGeneration(ownerActive),
+        ownerToolNames,
       } satisfies PreparedMcp),
     })
   }
@@ -777,6 +809,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
       ownerActiveRevision: detail.ownerActiveRevision,
       ownerRemovedRevision: detail.ownerRemovedRevision,
       ownerToolGeneration: detail.ownerToolGeneration,
+      ownerToolNames: detail.ownerToolNames,
     }) as unknown as RpcJson
   }
 
@@ -822,8 +855,8 @@ export class McpLifecycleProvider implements LifecycleProvider {
       mutationDigest: canonicalSha256({ operationId: request.authorization.operationId, after: managedStateDigest(after) }),
       afterDigest: managedStateDigest(after),
       restartRequired: false,
-      profileGeneration: null,
-      rollbackRestart: false,
+      restartToken: null,
+      rollbackRestartRequired: false,
     })
   }
 
@@ -834,11 +867,24 @@ export class McpLifecycleProvider implements LifecycleProvider {
       const prior = operation === 'purge'
         ? applied.prepared.before?.removed ?? applied.prepared.before?.lastGood
         : applied.prepared.before?.current
-      if (prior !== null && prior !== undefined && (
-        this.owner.get(kindState(prior).connectionId) !== undefined
-        || operation === 'purge' && this.owner.getRemoved(kindState(prior).connectionId) !== undefined
-      )) {
-        throw new Error('removed MCP connection remains active')
+      if (prior !== null && prior !== undefined) {
+        const connectionId = kindState(prior).connectionId
+        if (this.owner.get(connectionId) !== undefined
+          || operation === 'purge' && this.owner.getRemoved(connectionId) !== undefined) {
+          throw new Error('removed MCP connection remains active')
+        }
+        const detail = applied.prepared.prepared as PreparedMcp | null
+        if (detail === null) throw new Error('official Tool registry cannot prove MCP teardown')
+        const residual = this.owner.registeredToolNames(connectionId, detail.ownerToolNames)
+        if (residual.length > 0) throw new Error('removed MCP connection still exposes Tool registry entries')
+        return Object.freeze({
+          digest: canonicalSha256({
+            connection: null,
+            connectionId,
+            removedToolNames: detail.ownerToolNames,
+            ownerRevision: this.owner.snapshot().revision,
+          }),
+        })
       }
       return Object.freeze({ digest: canonicalSha256({ connection: null, ownerRevision: this.owner.snapshot().revision }) })
     }
@@ -944,7 +990,10 @@ export class McpLifecycleProvider implements LifecycleProvider {
     if (point.kind !== 'mcp'
       || !Number.isSafeInteger(point.ownerActiveRevision) && point.ownerActiveRevision !== null
       || !Number.isSafeInteger(point.ownerRemovedRevision) && point.ownerRemovedRevision !== null
-      || !Number.isSafeInteger(point.ownerToolGeneration) && point.ownerToolGeneration !== null) {
+      || !Number.isSafeInteger(point.ownerToolGeneration) && point.ownerToolGeneration !== null
+      || !Array.isArray(point.ownerToolNames)
+      || point.ownerToolNames.length > 4_096
+      || point.ownerToolNames.some(name => typeof name !== 'string' || name.length > 256)) {
       throw new Error('MCP recovery point is invalid')
     }
     const config = await configuration(point.configuration as RpcJson)
@@ -967,6 +1016,11 @@ export class McpLifecycleProvider implements LifecycleProvider {
     }
     configurationForRuntime(config, runtime)
     await verifyRuntime(runtime, request.plan.candidateRef)
+    const ownerToolNames = Object.freeze((point.ownerToolNames as string[]).map(name => {
+      if (!name.startsWith(`mcp__${config.connectionId}__`)) throw new Error('MCP recovery Tool name is outside its connection namespace')
+      return name
+    }).sort((left, right) => left.localeCompare(right)))
+    if (new Set(ownerToolNames).size !== ownerToolNames.length) throw new Error('MCP recovery Tool names contain duplicates')
     const prepared: PreparedProviderOperation = {
       request,
       before: snapshot.before,
@@ -978,6 +1032,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
         ownerActiveRevision: point.ownerActiveRevision as number | null,
         ownerRemovedRevision: point.ownerRemovedRevision as number | null,
         ownerToolGeneration: point.ownerToolGeneration as number | null,
+        ownerToolNames,
       } satisfies PreparedMcp),
     }
     const current = await this.store.getManaged(request.plan.targetKey)
@@ -987,8 +1042,8 @@ export class McpLifecycleProvider implements LifecycleProvider {
         mutationDigest: canonicalSha256({ operationId: request.authorization.operationId, after: managedStateDigest(current) }),
         afterDigest: managedStateDigest(current),
         restartRequired: false,
-        profileGeneration: null,
-        rollbackRestart: false,
+        restartToken: null,
+        rollbackRestartRequired: false,
       })
     }
     if (managedStateDigest(current ?? null) !== snapshot.beforeDigest) {
@@ -1011,7 +1066,24 @@ export class McpLifecycleProvider implements LifecycleProvider {
   ): Promise<ManagedTargetRecord> {
     let current = value.current
     let receipt: unknown
-    const descriptorDigest = runtimeDescriptorDigest(detail.runtime)
+    let targetRuntime = detail.runtime
+    let targetConfiguration = detail.configuration
+    if (operation === 'restore') {
+      if (current === null) throw new Error('MCP restore has no retained target')
+      const state = kindState(current)
+      const retainedRuntime = this.runtimes.get(state.runtimeRef)
+      if (retainedRuntime === undefined) throw new Error('retained MCP runtime is no longer allowlisted')
+      const retainedConfiguration = await configuration(current.configuration)
+      configurationForRuntime(retainedConfiguration, retainedRuntime)
+      await verifyRuntime(retainedRuntime, current.candidateRef)
+      if (runtimeDescriptorDigest(retainedRuntime) !== runtimeDescriptorDigest(detail.runtime)
+        || canonicalSha256(retainedConfiguration) !== canonicalSha256(detail.configuration)) {
+        throw new Error('prepared MCP restore target does not match retained state')
+      }
+      targetRuntime = retainedRuntime
+      targetConfiguration = retainedConfiguration
+    }
+    const descriptorDigest = runtimeDescriptorDigest(targetRuntime)
     const mutationId = (phase: McpOwnerMutationPhase): string => ownerMutationId(operationId, phase, descriptorDigest)
     if (operation === 'purge') {
       const prior = before?.removed ?? before?.lastGood
@@ -1032,7 +1104,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
       const state = kindState(current)
       try {
         receipt = await this.owner.configure({
-          desired: { id: state.connectionId, enabled: false, transport: transport(detail.runtime, detail.configuration) },
+          desired: { id: state.connectionId, enabled: false, transport: transport(targetRuntime, targetConfiguration) },
           mutationId: mutationId(origin === 'task' ? 'task-configure' : 'configure-create'),
           expectedRevision: 0,
         })
@@ -1080,15 +1152,30 @@ export class McpLifecycleProvider implements LifecycleProvider {
     if (operation === 'uninstall') {
       const prior = before?.current
       if (prior === null || prior === undefined) throw new Error('MCP uninstall has no current descriptor')
+      const removed = value.removed
+      if (removed === null) throw new Error('MCP uninstall did not retain its removed descriptor')
       const state = kindState(prior)
+      let removedRevision = this.owner.snapshot().revision
       if (detail.ownerActiveRevision !== null) {
-        await this.owner.remove({
+        receipt = await this.owner.remove({
           id: state.connectionId,
           mutationId: mutationId('uninstall-remove'),
           expectedRevision: detail.ownerActiveRevision,
         })
+        const receiptRevision = viewRecord(receipt)?.revision
+        if (!Number.isSafeInteger(receiptRevision) || (receiptRevision as number) < 0) {
+          throw new Error('MCP remove receipt has no exact revision')
+        }
+        const ownerRemoved = this.owner.getRemoved(state.connectionId)
+        if (ownerRemoved === undefined || viewRevision(ownerRemoved) !== receiptRevision) {
+          throw new Error('MCP remove receipt does not match its removed owner record')
+        }
+        removedRevision = receiptRevision as number
       }
-      return value
+      return immutableJsonClone({
+        ...value,
+        removed: { ...removed, ownerRevision: `mcp:${String(removedRevision)}` },
+      }) as unknown as ManagedTargetRecord
     }
     if (current !== null) {
       const state = kindState(current)
@@ -1107,7 +1194,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
       if (operation === 'configure') {
         receipt = detail.ownerActiveRevision === null
           ? await this.owner.configure({
-            desired: { id: state.connectionId, enabled: current.enabled, transport: transport(detail.runtime, detail.configuration) },
+            desired: { id: state.connectionId, enabled: current.enabled, transport: transport(targetRuntime, targetConfiguration) },
             mutationId: mutationId('configure-create'),
             expectedRevision: 0,
           })
@@ -1115,7 +1202,7 @@ export class McpLifecycleProvider implements LifecycleProvider {
             id: state.connectionId,
             mutationId: mutationId('configure-update'),
             expectedRevision: detail.ownerActiveRevision,
-            transport: transport(detail.runtime, detail.configuration),
+            transport: transport(targetRuntime, targetConfiguration),
           })
         live = this.owner.get(state.connectionId)
       } else if (operation === 'update' || operation === 'restore') {
@@ -1124,9 +1211,27 @@ export class McpLifecycleProvider implements LifecycleProvider {
           id: state.connectionId,
           mutationId: mutationId(operation === 'restore' ? 'restore-update' : 'update'),
           expectedRevision: activeRevision,
-          transport: transport(detail.runtime, detail.configuration),
+          transport: transport(targetRuntime, targetConfiguration),
         })
         live = this.owner.get(state.connectionId)
+        if (operation === 'restore') {
+          if (live === undefined) throw new Error('MCP restore update removed its desired record')
+          const liveDesired = viewRecord(viewRecord(live)?.desired)
+          if (liveDesired?.enabled !== current.enabled) {
+            receipt = current.enabled
+              ? await this.owner.enable({
+                  id: state.connectionId,
+                  mutationId: mutationId('restore-enable'),
+                  expectedRevision: viewRevision(live),
+                })
+              : await this.owner.disable({
+                  id: state.connectionId,
+                  mutationId: mutationId('restore-disable'),
+                  expectedRevision: viewRevision(live),
+                })
+            live = this.owner.get(state.connectionId)
+          }
+        }
       }
       if (operation === 'enable' || operation === 'disable') {
         if (live === undefined || !kindState(before!.current!).configured) {

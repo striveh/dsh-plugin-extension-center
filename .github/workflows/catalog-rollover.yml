@@ -1,0 +1,98 @@
+name: Prepare signed catalog successor
+
+on:
+  workflow_dispatch:
+    inputs:
+      previous_revision:
+        description: Exact committed public catalog revision to advance
+        required: true
+        type: string
+      issued_at:
+        description: Canonical UTC issue time, for example 2026-08-28T00:00:00.000Z
+        required: true
+        type: string
+      expires_at:
+        description: Canonical UTC expiry within the packaged maximum age
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-rollover
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: Sign one entry-preserving exact successor
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: catalog-release
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build without signing material
+        run: pnpm run build
+      - name: Validate exact predecessor and requested times
+        env:
+          PREVIOUS_REVISION: ${{ inputs.previous_revision }}
+          ISSUED_AT: ${{ inputs.issued_at }}
+          EXPIRES_AT: ${{ inputs.expires_at }}
+        run: |
+          case "$PREVIOUS_REVISION" in *[!0-9]*|'') exit 1 ;; esac
+          test "$(jq -er '.envelope.revision' catalog/public/plugins.json)" = "$PREVIOUS_REVISION"
+          node -e 'for (const value of [process.env.ISSUED_AT, process.env.EXPIRES_AT]) { const time = Date.parse(value); if (!Number.isFinite(time) || new Date(time).toISOString() !== value) throw new Error("timestamp is not canonical") } if (Date.parse(process.env.ISSUED_AT) >= Date.parse(process.env.EXPIRES_AT)) throw new Error("catalog interval is invalid")'
+      - name: Sign exact entry-preserving successor
+        env:
+          CATALOG_SIGNING_PRIVATE_KEY: ${{ secrets.CATALOG_SIGNING_PRIVATE_KEY }}
+          ISSUED_AT: ${{ inputs.issued_at }}
+          EXPIRES_AT: ${{ inputs.expires_at }}
+        run: |
+          umask 077
+          signing_key="$(mktemp "$RUNNER_TEMP/dsh-extension-center-catalog-key.XXXXXX")"
+          trap 'rm -f "$signing_key"' EXIT
+          printf '%s' "$CATALOG_SIGNING_PRIVATE_KEY" > "$signing_key"
+          unset CATALOG_SIGNING_PRIVATE_KEY
+          node scripts/rollover-public-catalog.mjs \
+            --previous catalog/public/plugins.json \
+            --issued-at "$ISSUED_AT" \
+            --expires-at "$EXPIRES_AT" \
+            --key-id bootstrap-2026-08-26-8 \
+            --private-key "$signing_key" \
+            --out .artifacts/catalog-rollover/plugins.json \
+            --evidence-out .artifacts/catalog-rollover/evidence.json
+      - name: Verify exact successor coordinates
+        env:
+          PREVIOUS_REVISION: ${{ inputs.previous_revision }}
+        run: |
+          next_revision=$((PREVIOUS_REVISION + 1))
+          test "$(jq -er '.envelope.revision' .artifacts/catalog-rollover/plugins.json)" = "$next_revision"
+          test "$(jq -er '.previousRevision' .artifacts/catalog-rollover/evidence.json)" = "$PREVIOUS_REVISION"
+          test "$(jq -er '.revision' .artifacts/catalog-rollover/evidence.json)" = "$next_revision"
+          test "$(jq -er '.signingKeyIds == ["bootstrap-2026-08-26-8"]' .artifacts/catalog-rollover/evidence.json)" = true
+          sha256sum .artifacts/catalog-rollover/plugins.json .artifacts/catalog-rollover/evidence.json > .artifacts/catalog-rollover/SHA256SUMS
+      - name: Upload signed successor for review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: signed-catalog-successor-r${{ inputs.previous_revision }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/catalog-rollover
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7

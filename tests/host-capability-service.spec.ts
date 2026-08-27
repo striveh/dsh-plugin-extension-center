@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { verifyBootstrapCatalog, type VerifiedCatalog } from '../src/catalog.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
@@ -17,6 +17,27 @@ import { TEST_RECOVERY_EXECUTABLE_BINDING } from './support/recovery-binding.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
 const roots: string[] = []
+
+function managedPluginSnapshots(materialRoot = '/managed-plugins') {
+  return {
+    snapshot: async (profileId: string) => {
+      const digest = canonicalSha256({ profileId, managedPlugins: [] })
+      return {
+        profileId,
+        revision: 0,
+        digest,
+        materialRoot,
+        bootStatus: 'live' as const,
+        ownerRevision: `managed-plugin:0:${digest}`,
+      }
+    },
+  }
+}
+
+const NO_PROVIDER_PREFLIGHT = Object.freeze({
+  mcpOptions: async () => [],
+  mcpRuntime: async () => null,
+})
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -45,8 +66,11 @@ function agent(id: string, cwd: string, messageId = `message-${id}`) {
 
 class ContinuationOwner {
   readonly claims = new Map<string, any>()
+  readonly listeners = new Set<() => void>()
   reserveFailures = 0
   cancelCalls = 0
+  reconcileCalls = 0
+  reconcileHook: (() => Promise<void>) | undefined
   readonly verifiers = new Map<string, Readonly<{ id: string; verify(claim: unknown, signal: AbortSignal): Promise<unknown> }>>()
 
   async create(_agent: unknown, request: any) { return await this.reserve(request) }
@@ -63,16 +87,18 @@ class ContinuationOwner {
     }
     const claim = {
       kind: 'task-continuation',
-      version: 1,
+      version: 3,
       ...request,
       continuationId: '00000000-0000-4000-8000-000000000321',
       dispatchMessageId: '00000000-0000-4000-8000-000000000322',
       recordRevision: 1,
       state: 'pending',
+      dispatchFence: 0,
       createdAtMs: Date.now(),
       updatedAtMs: Date.now(),
     }
     this.claims.set(key, { request: structuredClone(request), claim })
+    this.notify()
     return claim
   }
   async get(id: string) { return [...this.claims.values()].find(value => value.claim.continuationId === id)?.claim }
@@ -90,9 +116,47 @@ class ContinuationOwner {
       || !['pending', 'ready', 'consumed'].includes(value.claim.state)) return false
     this.cancelCalls += 1
     value.claim = { ...value.claim, state: 'canceled', recordRevision: value.claim.recordRevision + 1 }
+    this.notify()
     return true
   }
   async supersede() { return false }
+  async reconcile() {
+    this.reconcileCalls += 1
+    await this.reconcileHook?.()
+  }
+  subscribe(listener: () => void) {
+    this.listeners.add(listener)
+    queueMicrotask(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+  setState(claim: any, state: string): void {
+    claim.state = state
+    claim.recordRevision += 1
+    claim.updatedAtMs += 1
+    if (['dispatching', 'dispatched', 'claimed', 'delivery-unknown'].includes(state)) {
+      claim.dispatchOwnerId = '00000000-0000-4000-8000-000000000323'
+      claim.dispatchFence = 1
+      claim.dispatchStartedAtMs = claim.updatedAtMs
+      if (state === 'dispatching') claim.dispatchLeaseExpiresAtMs = claim.updatedAtMs + 30_000
+      else delete claim.dispatchLeaseExpiresAtMs
+      if (state === 'delivery-unknown') claim.deliveryUnknownReason = 'owner-lease-expired'
+      else delete claim.deliveryUnknownReason
+    } else {
+      claim.dispatchFence = 0
+      delete claim.dispatchOwnerId
+      delete claim.dispatchLeaseExpiresAtMs
+      delete claim.dispatchStartedAtMs
+      delete claim.deliveryUnknownReason
+    }
+    if (state === 'superseded') claim.supersededByTaskRevision = 'task-attempt:newer'
+    else delete claim.supersededByTaskRevision
+    if (state === 'invalid') claim.invalidReason = 'verifier-echo-mismatch'
+    else delete claim.invalidReason
+    this.notify()
+  }
+  private notify(): void {
+    for (const listener of this.listeners) queueMicrotask(listener)
+  }
   registerVerifier(verifier: Readonly<{ id: string; verify(claim: unknown, signal: AbortSignal): Promise<unknown> }>) {
     this.verifiers.set(verifier.id, verifier)
     return () => { if (this.verifiers.get(verifier.id) === verifier) this.verifiers.delete(verifier.id) }
@@ -113,7 +177,7 @@ class FailOnceActivationStore extends CenterStateStore {
 
 function owners(continuations: ContinuationOwner, projectSkills: Readonly<Record<string, string>> = {}): HostOwners {
   return {
-    profileTransactions: {} as never,
+    managedPlugins: managedPluginSnapshots(),
     mcpConnections: {} as never,
     taskContinuations: continuations as never,
     skills: {
@@ -135,7 +199,7 @@ function owners(continuations: ContinuationOwner, projectSkills: Readonly<Record
     },
     tools: {
       register: () => () => {},
-      schemas: (value?: any) => [{ name: `${String(value?.id)}-tool` }],
+      schemas: () => [],
     },
     loader: {} as never,
   }
@@ -278,7 +342,7 @@ async function approvedTaskPlan(
     resolutionId,
     createdAtMs: now,
     expiresAtMs: now + 60_000,
-    needDigest: canonicalSha256({ need: root }),
+    needDigest: created.needDigest,
     decision: 'acquisition-candidate',
     candidateRefs: [entry.candidateRef],
     value: {
@@ -365,21 +429,36 @@ describe('existing-first capability scope and durable continuation activation', 
     const state = new CenterStateStore(root)
     await state.initialize()
     const continuations = new ContinuationOwner()
-    const hostOwners = owners(continuations, {
+    const base = owners(continuations, {
       [await realpath(projectA)]: 'alpha-skill',
       [await realpath(projectB)]: 'beta-skill',
     })
+    const hostOwners: HostOwners = {
+      ...base,
+      tools: {
+        register: () => () => {},
+        schemas: (value?: any) => value?.id === 'agent-a'
+          ? [{ name: 'web_search', description: 'Search the public web.' }]
+          : [{ name: 'str_replace_editor', description: 'Read and edit files.' }],
+      },
+    }
     const capability = service(
       state,
       new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING),
       new FileOperationStore(root),
       hostOwners,
     )
-    await expect(capability.resolve(need('agent-a-tool'), agent('agent-a', projectA), new AbortController().signal))
-      .resolves.toMatchObject({ next: 'use-existing', existingCapabilityId: 'tool:agent-a-tool' })
-    await expect(capability.resolve(need('alpha-skill'), agent('agent-a', projectA), new AbortController().signal))
+    await expect(capability.resolve({
+      ...need('search'), requiredDataAccess: ['network'], maximumAuthority: ['network'],
+    }, agent('agent-a', projectA), new AbortController().signal))
+      .resolves.toMatchObject({ next: 'use-existing', existingCapabilityId: 'tool:web_search' })
+    await expect(capability.resolve({
+      ...need('alpha-skill'), maximumAuthority: ['model-context', 'network'],
+    }, agent('agent-a', projectA), new AbortController().signal))
       .resolves.toMatchObject({ next: 'use-existing', existingCapabilityId: 'skill:alpha-skill' })
-    const wrongScope = await capability.resolve(need('alpha-skill'), agent('agent-b', projectB), new AbortController().signal)
+    const wrongScope = await capability.resolve({
+      ...need('alpha-skill'), maximumAuthority: ['filesystem-read', 'filesystem-write', 'model-context'],
+    }, agent('agent-b', projectB), new AbortController().signal)
     expect(wrongScope.existingCapabilityId).toBeNull()
     const attempts = await new FileTaskAttemptStore(root).list()
     expect(attempts).toHaveLength(3)
@@ -419,9 +498,48 @@ describe('existing-first capability scope and durable continuation activation', 
       next: 'use-existing', existingCapabilityId: 'tool:web_search',
     })
     await expect(capability.resolve({
-      ...need('documentation-writer'), requiredDataAccess: ['filesystem-write'], maximumAuthority: ['filesystem-write'],
+      ...need('documentation-writer'),
+      requiredDataAccess: ['filesystem-write'],
+      maximumAuthority: ['filesystem-read', 'filesystem-write', 'model-context', 'network'],
     }, agent('agent-tools', project), new AbortController().signal)).resolves.toMatchObject({
       next: 'use-existing', existingCapabilityId: 'skill:documentation-writer',
+    })
+  })
+
+  it('does not treat unknown Tool prose or a Skill with unknown Tool authority as complete', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-capability-unknown-authority-'))
+    roots.push(root)
+    const project = join(root, 'project')
+    await mkdir(project)
+    const state = new CenterStateStore(root)
+    await state.initialize()
+    const continuations = new ContinuationOwner()
+    const base = owners(continuations, { [await realpath(project)]: 'documentation-writer' })
+    const capability = service(
+      state,
+      new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING),
+      new FileOperationStore(root),
+      {
+        ...base,
+        tools: {
+          register: () => () => {},
+          schemas: () => [{
+            name: 'third_party_search',
+            description: 'Search the public web with network access.',
+          }],
+        },
+      },
+    )
+
+    await expect(capability.resolve({
+      ...need('search'), maximumAuthority: ['network'],
+    }, agent('unknown-tool-agent', project), new AbortController().signal)).resolves.not.toMatchObject({
+      next: 'use-existing',
+    })
+    await expect(capability.resolve({
+      ...need('documentation-writer'), maximumAuthority: ['model-context', 'network'],
+    }, agent('unknown-skill-agent', project), new AbortController().signal)).resolves.not.toMatchObject({
+      next: 'use-existing',
     })
   })
 
@@ -441,7 +559,7 @@ describe('existing-first capability scope and durable continuation activation', 
     const resolution = await capability.resolve({
       ...need('documentation'),
       scopeKey: 'project',
-      maximumAuthority: ['network'],
+      maximumAuthority: ['model-context', 'network'],
     }, agent('agent-project-write', project), new AbortController().signal)
 
     expect(resolution).toMatchObject({ next: 'unavailable', candidateRefs: [], continuationId: null })
@@ -489,7 +607,7 @@ describe('existing-first capability scope and durable continuation activation', 
       -1,
     )
     const resolution = await capability.resolve(
-      { ...need('documentation'), maximumAuthority: ['network'] },
+      { ...need('documentation'), maximumAuthority: ['model-context', 'network'] },
       agent('agent-expired', project),
       new AbortController().signal,
     )
@@ -599,6 +717,95 @@ describe('existing-first capability scope and durable continuation activation', 
     })
   })
 
+  it('automatically reconciles a claimed Host continuation to one continued task attempt', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-continuation-attempt-reconcile-'))
+    roots.push(root)
+    const state = new CenterStateStore(root)
+    await state.initialize()
+    const plans = new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING)
+    const continuation = new ContinuationOwner()
+    const capability = service(state, plans, new FileOperationStore(root), owners(continuation))
+    const approved = await approvedTaskPlan(root, state, plans)
+    await capability.activateApprovedPlan(approved.plan.hash)
+    const stop = capability.registerVerifier()
+    const attempts = new FileTaskAttemptStore(root)
+    await attempts.initialize()
+    let attempt = (await attempts.list()).find(candidate => candidate.result?.kind === 'acquisition-candidate')!
+    attempt = await attempts.transition(attempt.taskAttemptId, attempt.revision, 'verifying-visibility', attempt.result, Date.now())
+    attempt = await attempts.transition(attempt.taskAttemptId, attempt.revision, 'ready-to-resume', attempt.result, Date.now())
+    const claim = [...continuation.claims.values()][0]!.claim
+
+    continuation.setState(claim, 'consumed')
+    await vi.waitFor(async () => {
+      expect(await attempts.get(attempt.taskAttemptId)).toMatchObject({ phase: 'resuming', outcome: null })
+    })
+    continuation.setState(claim, 'claimed')
+    await vi.waitFor(async () => {
+      expect(await attempts.get(attempt.taskAttemptId)).toMatchObject({
+        phase: 'resuming',
+        outcome: 'continued',
+        reason: 'continuation-claimed',
+      })
+    })
+    expect(await capability.listTaskAttempts()).toContainEqual(expect.objectContaining({
+      taskAttemptId: attempt.taskAttemptId,
+      outcome: 'continued',
+      reason: 'continuation-claimed',
+    }))
+    stop()
+  })
+
+  it('wakes the pending continuation verifier after the committed task receipt and phase are durable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-continuation-committed-wake-'))
+    roots.push(root)
+    const state = new CenterStateStore(root)
+    await state.initialize()
+    const plans = new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING)
+    const continuation = new ContinuationOwner()
+    const capability = service(state, plans, new FileOperationStore(root), owners(continuation))
+    const approved = await approvedTaskPlan(root, state, plans)
+    const stop = capability.registerVerifier()
+    await capability.activateApprovedPlan(approved.plan.hash)
+    const resolution = (await state.listResolutions())[0]!
+    const activation = await state.getContinuationActivation(approved.reservationId)
+    expect(activation).toBeDefined()
+    const attempts = new FileTaskAttemptStore(root)
+    await attempts.initialize()
+    const observations: Array<Readonly<{ receiptPresent: boolean; phase: string | undefined }>> = []
+    continuation.reconcileHook = async () => {
+      observations.push(Object.freeze({
+        receiptPresent: await state.getTaskReceipt(activation!.continuationId) !== undefined,
+        phase: (await attempts.getByResolution(resolution.resolutionId))?.phase,
+      }))
+    }
+
+    await continuation.reconcile()
+    expect(observations).toEqual([{ receiptPresent: false, phase: 'acquiring' }])
+
+    const operationId = 'operation:committed-wake'
+    const operationReceiptDigest = canonicalSha256({ operationId, outcome: 'committed' })
+    await plans.consume(approved.plan.hash, operationId, approved.context, Date.now())
+    await state.putTaskReceipt({
+      schemaVersion: 1,
+      continuationId: activation!.continuationId,
+      resolutionId: resolution.resolutionId,
+      verificationPayloadDigest: activation!.verificationPayloadDigest,
+      planHash: approved.plan.hash,
+      operationId,
+      operationReceiptDigest,
+      completedAtMs: Date.now(),
+    })
+
+    await capability.recordLifecycleResult(approved.plan.hash, 'committed')
+
+    expect(continuation.reconcileCalls).toBe(2)
+    expect(observations).toEqual([
+      { receiptPresent: false, phase: 'acquiring' },
+      { receiptPresent: true, phase: 'verifying-visibility' },
+    ])
+    stop()
+  })
+
   it('re-reads exact live inventory before ready and refuses drift or cancellation after restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-continuation-live-verifier-'))
     roots.push(root)
@@ -629,7 +836,7 @@ describe('existing-first capability scope and durable continuation activation', 
         scopeKey: 'user',
         platform: process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'windows' : 'linux',
         requiredDataAccess: [],
-        maximumAuthority: [],
+        maximumAuthority: ['model-context'],
       },
       resumeAgentOptions: {},
       createdAtMs: now,
@@ -694,6 +901,7 @@ describe('existing-first capability scope and durable continuation activation', 
       completedAtMs: now + 4,
     })
     let visible = false
+    let needSatisfied = false
     const liveRow = (): InventoryRow => ({
       schemaVersion: 1,
       kind: 'skill',
@@ -713,8 +921,18 @@ describe('existing-first capability scope and durable continuation activation', 
       ownerRevision: 'owner:1',
       configurationRevision: null,
       observedAtMs: now + 4,
-      actions: {} as never,
+      actions: {
+        install: { status: 'unavailable', reason: 'already-installed' },
+        configure: { status: 'unavailable', reason: 'already-configured' },
+        update: { status: 'unavailable', reason: 'no-update' },
+        enable: { status: 'unavailable', reason: 'already-enabled' },
+        disable: { status: 'unavailable', reason: 'fixture' },
+        uninstall: { status: 'unavailable', reason: 'fixture' },
+        restore: { status: 'unavailable', reason: 'not-removed' },
+        purge: { status: 'unavailable', reason: 'not-removed' },
+      },
       updateObservation: { status: 'none' },
+      restoreObservation: { status: 'none' },
       evidence: {
         kind: 'skill', contentRevision: '0.1.0', catalogComplete: true,
         winningProvider: 'extension-center', winningPath: join(root, 'SKILL.md'), definitionLoaded: true,
@@ -736,13 +954,29 @@ describe('existing-first capability scope and durable continuation activation', 
       projection: { phase: 'committed', receipt: { digest: operationReceiptDigest } },
     }) }
     const continuation = new ContinuationOwner()
+    const baseOwners = owners(continuation)
+    const liveOwners: HostOwners = {
+      ...baseOwners,
+      skills: {
+        ...baseOwners.skills!,
+        snapshot: async () => ({
+          complete: true,
+          skills: needSatisfied ? [{
+            name: 'documentation',
+            provider: 'extension-center',
+            path: join(root, 'SKILL.md'),
+            invocation: { modelInvocable: true, userInvocable: true },
+          }] : [],
+        }),
+      },
+    }
     const createVerifierService = () => new CapabilityAcquisitionService(
       state,
       liveInventory as never,
       {} as never,
       fakePlans as never,
       fakeOperations as never,
-      owners(continuation),
+      liveOwners,
       () => catalog,
     )
     const claim = {
@@ -760,6 +994,10 @@ describe('existing-first capability scope and durable continuation activation', 
     visible = true
     const restarted = createVerifierService()
     restarted.registerVerifier()
+    await expect(continuation.verifiers.get('extension-center-acquisition')!.verify(claim, new AbortController().signal)).resolves.toEqual({ kind: 'not-ready' })
+    expect((await taskAttempts.get(created.taskAttemptId))?.phase).toBe('acquiring')
+
+    needSatisfied = true
     await expect(continuation.verifiers.get('extension-center-acquisition')!.verify(claim, new AbortController().signal)).resolves.toMatchObject({ kind: 'ready' })
     expect((await taskAttempts.get(created.taskAttemptId))?.phase).toBe('ready-to-resume')
 
@@ -779,18 +1017,7 @@ describe('existing-first capability scope and durable continuation activation', 
     const continuation = new ContinuationOwner()
     const hostOwners: HostOwners = {
       ...owners(continuation),
-      profileTransactions: {
-        snapshot: async (profile: string) => ({
-          profile,
-          revision: 1,
-          treeDigest: canonicalSha256({ profile, tree: 1 }),
-          effectivePath: project,
-          activeGeneration: 'generation:1',
-          lastGoodGeneration: 'generation:1',
-          rollbackGeneration: null,
-          bootStatus: 'verified',
-        }),
-      } as never,
+      managedPlugins: managedPluginSnapshots(project),
       mcpConnections: {
         snapshot: () => ({ revision: 1, connections: [], removed: [] }),
       } as never,
@@ -804,6 +1031,7 @@ describe('existing-first capability scope and durable continuation activation', 
       scopedInventory as never,
       hostOwners,
       () => verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+      managedPluginSnapshots(project),
       {
         mcpOptions: async candidateRef => [{ candidateRef, runtimeRef, version: '1.3.0' }],
         mcpRuntime: async (_candidateRef, configuration) => {
@@ -853,7 +1081,7 @@ describe('existing-first capability scope and durable continuation activation', 
       next: 'human-choice',
       existingCapabilityId: null,
     })
-    expect(resolution.candidateRefs).toHaveLength(1)
+    expect(resolution.candidateRefs).toEqual(['mcp:io.github.domdomegg/filesystem-mcp@1.3.0'])
     expect(resolution.continuationId).not.toBeNull()
     expect(await state.listResolutions()).toHaveLength(1)
     await expect(capability.request({
@@ -921,7 +1149,15 @@ describe('existing-first capability scope and durable continuation activation', 
     const hostOwners = owners(new ContinuationOwner())
     const scopedInventory = inventory()
     const plans = new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING)
-    const intentPlans = new IntentPlanService(state, plans, scopedInventory as never, hostOwners, () => choiceCatalog)
+    const intentPlans = new IntentPlanService(
+      state,
+      plans,
+      scopedInventory as never,
+      hostOwners,
+      () => choiceCatalog,
+      managedPluginSnapshots(project),
+      NO_PROVIDER_PREFLIGHT,
+    )
     const capability = new CapabilityAcquisitionService(
       state,
       scopedInventory as never,
@@ -934,7 +1170,7 @@ describe('existing-first capability scope and durable continuation activation', 
 
     const choice = await capability.resolve({
       ...need('documentation'),
-      maximumAuthority: ['network', 'filesystem-read', 'filesystem-write', 'subprocess'],
+      maximumAuthority: ['credentials', 'network', 'filesystem-read', 'filesystem-write', 'model-context', 'subprocess'],
     }, agent('choice-agent', project), new AbortController().signal)
     expect(choice).toMatchObject({
       decision: 'choice-required',
@@ -1018,6 +1254,7 @@ describe('existing-first capability scope and durable continuation activation', 
         purge: unavailable,
       },
       updateObservation: { status: 'none' },
+      restoreObservation: { status: 'none' },
       evidence: {
         kind: 'skill',
         contentRevision: skill.artifact.version,
@@ -1044,7 +1281,15 @@ describe('existing-first capability scope and durable continuation activation', 
     const continuations = new ContinuationOwner()
     const hostOwners = owners(continuations, visibleSkills)
     const plans = new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING)
-    const intentPlans = new IntentPlanService(state, plans, scopedInventory as never, hostOwners, () => catalog)
+    const intentPlans = new IntentPlanService(
+      state,
+      plans,
+      scopedInventory as never,
+      hostOwners,
+      () => catalog,
+      managedPluginSnapshots(project),
+      NO_PROVIDER_PREFLIGHT,
+    )
     const capability = new CapabilityAcquisitionService(
       state,
       scopedInventory as never,
@@ -1056,7 +1301,7 @@ describe('existing-first capability scope and durable continuation activation', 
     )
 
     const management = await capability.resolve(
-      need('documentation'),
+      { ...need('documentation'), maximumAuthority: ['model-context'] },
       agent('management-agent', project),
       new AbortController().signal,
     )
@@ -1107,6 +1352,8 @@ describe('existing-first capability scope and durable continuation activation', 
       scopedInventory as never,
       hostOwners,
       () => catalog,
+      managedPluginSnapshots(project),
+      NO_PROVIDER_PREFLIGHT,
     )
     const restarted = new CapabilityAcquisitionService(
       restartedState,
@@ -1141,20 +1388,17 @@ describe('existing-first capability scope and durable continuation activation', 
     })
     expect(continuations.claims.size).toBe(1)
     const retryClaim = [...continuations.claims.values()][0]!.claim
-    for (const state of ['ready', 'consumed', 'claimed', 'canceled', 'superseded', 'expired', 'invalid'] as const) {
-      retryClaim.state = state
-      retryClaim.recordRevision += 1
-      retryClaim.updatedAtMs += 1
-      if (state === 'superseded') retryClaim.supersededByTaskRevision = 'task-attempt:newer'
-      else delete retryClaim.supersededByTaskRevision
+    for (const state of [
+      'ready', 'consumed', 'dispatching', 'dispatched', 'claimed', 'delivery-unknown',
+      'canceled', 'superseded', 'expired', 'invalid',
+    ] as const) {
+      continuations.setState(retryClaim, state)
       expect((await restarted.listTaskAttempts())[1]!.retryContinuation).toEqual({
         continuationId: retryClaim.continuationId,
         state,
       })
     }
-    retryClaim.state = 'pending'
-    retryClaim.recordRevision += 1
-    retryClaim.updatedAtMs += 1
+    continuations.setState(retryClaim, 'pending')
     retryClaim.injected = true
     await expect(restarted.listTaskAttempts()).rejects.toThrow('invalid claim')
     delete retryClaim.injected
@@ -1203,12 +1447,12 @@ describe('existing-first capability scope and durable continuation activation', 
     const capability = service(state, plans, operations, hostOwners)
     const execution = agent('cancel-agent', project)
     const first = await capability.resolve(
-      { ...need('documentation'), maximumAuthority: ['network'] },
+      { ...need('documentation'), maximumAuthority: ['model-context', 'network'] },
       execution,
       new AbortController().signal,
     )
     const second = await capability.resolve(
-      { ...need('documentation'), maximumAuthority: ['network'] },
+      { ...need('documentation'), maximumAuthority: ['model-context', 'network'] },
       execution,
       new AbortController().signal,
     )

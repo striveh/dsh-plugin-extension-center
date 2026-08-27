@@ -29,7 +29,9 @@ const CACHE_SCHEMA_VERSION = 1 as const
 const MAX_CATALOG_BYTES = 512 * 1024
 const MAX_CHAIN_LENGTH = 128
 const MAX_CACHE_BYTES = MAX_CATALOG_BYTES * MAX_CHAIN_LENGTH + 64 * 1024
-const CATALOG_PATH = '/plugins.json'
+
+/** Exact public Pages resource selected by the installable Bundle. */
+export const PUBLISHED_CATALOG_URL = 'https://striveh.github.io/dsh-plugin-extension-center/plugins.json'
 
 /** One signed payload downloaded from the configured fixed catalog endpoint. */
 export interface SignedCatalogDocument {
@@ -54,7 +56,7 @@ export interface AdmittedCatalogSnapshot {
 
 /** Network and schedule configuration after Host config validation. */
 export interface CatalogRefreshConfig {
-  readonly trustedOrigin: string | null
+  readonly trustedUrl: string | null
   readonly fetchTimeoutMs: number
 }
 
@@ -290,19 +292,19 @@ function parseDocument(bytes: Uint8Array): SignedCatalogDocument {
   return decodeSignedDocument(value)
 }
 
-/** Resolve a configured origin to the one fixed catalog path. */
-export function catalogEndpoint(trustedOrigin: string): string {
+/** Accept only one credential-free canonical HTTPS resource URL. */
+export function canonicalCatalogUrl(trustedUrl: string): string {
   let url: URL
   try {
-    url = new URL(trustedOrigin)
+    url = new URL(trustedUrl)
   } catch {
-    throw new Error('catalogTrustedOrigin must be a canonical HTTPS origin')
+    throw new Error('catalogTrustedUrl must be one canonical HTTPS URL')
   }
   if (url.protocol !== 'https:' || url.username !== '' || url.password !== ''
-    || url.pathname !== '/' || url.search !== '' || url.hash !== '' || url.origin !== trustedOrigin) {
-    throw new Error('catalogTrustedOrigin must be a canonical HTTPS origin')
+    || url.search !== '' || url.hash !== '' || url.href !== trustedUrl || trustedUrl.length > 2_048) {
+    throw new Error('catalogTrustedUrl must be one canonical HTTPS URL')
   }
-  return new URL(CATALOG_PATH, url).href
+  return trustedUrl
 }
 
 /** Own the one admitted snapshot used by both Store RPC and local task retrieval. */
@@ -355,7 +357,7 @@ export class CatalogSnapshotManager {
         lastRefreshAtMs: null,
       }),
     })
-    if (this.config.trustedOrigin === null) return this.snapshot
+    if (this.config.trustedUrl === null) return this.snapshot
     return await this.refresh()
   }
 
@@ -383,17 +385,19 @@ export class CatalogSnapshotManager {
 
   private async refreshOnce(): Promise<AdmittedCatalogSnapshot> {
     if (this.snapshot === null || this.cache === null) throw new Error('catalog snapshot manager is not initialized')
-    if (this.config.trustedOrigin === null) return this.snapshot
+    if (this.config.trustedUrl === null) return this.snapshot
     const attemptedAtMs = this.dependencies.now()
     try {
-      const endpoint = catalogEndpoint(this.config.trustedOrigin)
+      const endpoint = canonicalCatalogUrl(this.config.trustedUrl)
       const response = await this.dependencies.fetch(endpoint, {
         method: 'GET',
         headers: { accept: 'application/json' },
         redirect: 'error',
         signal: AbortSignal.timeout(this.config.fetchTimeoutMs),
       })
-      if (response.url !== '' && response.url !== endpoint) throw new Error('catalog endpoint redirected outside its fixed URL')
+      if (response.redirected || response.url !== endpoint) {
+        throw new Error('catalog endpoint redirected outside its fixed URL')
+      }
       const document = parseDocument(await responseBytes(response))
       const fetched = verifyCatalogAdvance(
         BOOTSTRAP_CATALOG_ROOT,

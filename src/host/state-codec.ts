@@ -13,6 +13,7 @@ import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { AcquisitionIntent, AcquisitionIntentCore } from '../policy/index.ts'
 import type { DesiredState, ManagedExtensionKind, OperationKind } from '../plans/index.ts'
 import type { OperationPhase } from '../operations/index.ts'
+import { decodeProfileMetadataCacheBinding } from '../recovery/profile-metadata-cache.ts'
 import type { RpcJson } from '../service/rpc-contract.ts'
 import { storageKey } from './files.ts'
 import type {
@@ -23,7 +24,6 @@ import type {
   StoredContinuationActivationIntent,
   StoredIntent,
   StoredOperationIndex,
-  StoredProfileBootAck,
   StoredProviderSnapshot,
   StoredResolution,
   StoredTaskReceipt,
@@ -330,18 +330,23 @@ function versionKindState(
       transport: 'streamable-http',
     })
   }
-  const baseFields = ['consumerObserved', 'externalRestartObserved', 'loaderPhase', 'packageName', 'profileGeneration', 'treeDigest']
+  const baseFields = ['consumerObserved', 'restartObserved', 'loaderPhase', 'packageName', 'restartToken', 'treeDigest']
   const raw = value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Readonly<Record<string, unknown>>
     : undefined
   const hasEvidence = raw !== undefined && Object.prototype.hasOwnProperty.call(raw, 'runtimeEvidence')
-  const record = readStrictRecord(value, hasEvidence ? [...baseFields, 'runtimeEvidence'] : baseFields, path)
+  const hasRollback = raw !== undefined && Object.prototype.hasOwnProperty.call(raw, 'rollbackOperationId')
+  const record = readStrictRecord(value, [
+    ...baseFields,
+    ...(hasRollback ? ['rollbackOperationId'] : []),
+    ...(hasEvidence ? ['runtimeEvidence'] : []),
+  ], path)
   const loaderPhase = readLiteral(record.loaderPhase, ['absent', 'active', 'pending-restart'] as const, `${path}.loaderPhase`)
   const consumerObserved = boolean(record.consumerObserved, `${path}.consumerObserved`)
-  const externalRestartObserved = boolean(record.externalRestartObserved, `${path}.externalRestartObserved`)
+  const restartObserved = boolean(record.restartObserved, `${path}.restartObserved`)
   if (loaderPhase === 'pending-restart') {
-    if (consumerObserved || externalRestartObserved || hasEvidence) fail(path, 'has contradictory pending-restart evidence')
-  } else if (!consumerObserved || !externalRestartObserved || !hasEvidence) {
+    if (consumerObserved || restartObserved || hasEvidence) fail(path, 'has contradictory pending-restart evidence')
+  } else if (!consumerObserved || !restartObserved || !hasEvidence) {
     fail(path, 'has incomplete settled Loader evidence')
   }
   const evidence = hasEvidence ? runtimeEvidence(record.runtimeEvidence, `${path}.runtimeEvidence`) : undefined
@@ -350,10 +355,13 @@ function versionKindState(
   }
   return Object.freeze({
     consumerObserved,
-    externalRestartObserved,
+    restartObserved,
     loaderPhase,
     packageName: readBoundedString(record.packageName, `${path}.packageName`, 214),
-    profileGeneration: readBoundedString(record.profileGeneration, `${path}.profileGeneration`, 512),
+    restartToken: readBoundedString(record.restartToken, `${path}.restartToken`, 512),
+    ...(hasRollback
+      ? { rollbackOperationId: readBoundedString(record.rollbackOperationId, `${path}.rollbackOperationId`, 512) }
+      : {}),
     ...(evidence === undefined ? {} : { runtimeEvidence: evidence }),
     treeDigest: readBoundedString(record.treeDigest, `${path}.treeDigest`, 512),
   })
@@ -394,7 +402,7 @@ function managedVersion(
       ? mcpConfiguration(record.configuration, `${path}.configuration`)
       : rpcJson(record.configuration, `${path}.configuration`)
   const ownerRevision = readBoundedString(record.ownerRevision, `${path}.ownerRevision`, 1024)
-  const ownerPrefix = identity.kind === 'plugin' ? 'profile:' : identity.kind === 'mcp' ? 'mcp:' : 'skills:'
+  const ownerPrefix = identity.kind === 'plugin' ? 'managed-plugin:' : identity.kind === 'mcp' ? 'mcp:' : 'skills:'
   if (!ownerRevision.startsWith(ownerPrefix)) fail(`${path}.ownerRevision`, 'does not bind the extension owner')
   return immutableJsonClone({
     artifactIntegrity,
@@ -425,7 +433,7 @@ function pendingMutation(
   operationId: string,
 ): RpcJson | null {
   if (value === null) return null
-  if (kind !== 'plugin') fail(path, 'is only valid for Plugin Profile mutations')
+  if (kind !== 'plugin') fail(path, 'is only valid for managed Plugin mutations')
   const record = readStrictRecord(
     value,
     ['generation', 'operationId', 'operationKind', 'packageName', 'profileId', 'revision', 'treeDigest'],
@@ -777,7 +785,7 @@ function skillRecoveryPoint(value: unknown, path: string, root: string, operatio
 
 function mcpRecoveryPoint(value: unknown, path: string): RpcJson {
   const record = readStrictRecord(value, [
-    'configuration', 'kind', 'ownerActiveRevision', 'ownerRemovedRevision', 'ownerToolGeneration', 'runtime',
+    'configuration', 'kind', 'ownerActiveRevision', 'ownerRemovedRevision', 'ownerToolGeneration', 'ownerToolNames', 'runtime',
   ], path)
   const rawRuntime = record.runtime !== null && typeof record.runtime === 'object' && !Array.isArray(record.runtime)
     ? record.runtime as Readonly<Record<string, unknown>>
@@ -820,60 +828,50 @@ function mcpRecoveryPoint(value: unknown, path: string): RpcJson {
     ownerActiveRevision: nullableRevision(record.ownerActiveRevision, `${path}.ownerActiveRevision`),
     ownerRemovedRevision: nullableRevision(record.ownerRemovedRevision, `${path}.ownerRemovedRevision`),
     ownerToolGeneration: nullableRevision(record.ownerToolGeneration, `${path}.ownerToolGeneration`),
+    ownerToolNames: uniqueStrings(record.ownerToolNames, `${path}.ownerToolNames`, 4_096, true),
     runtime: admittedRuntime,
   })
 }
 
-function pluginConfigurationPatch(value: unknown, path: string): RpcJson {
-  const record = readStrictRecord(value, [
-    'adapterDigest', 'candidateRef', 'configuration', 'expectedDigest', 'nextDigest', 'nextUtf8', 'packageName', 'schema',
-  ], path)
-  const nextUtf8 = typeof record.nextUtf8 === 'string' && Buffer.byteLength(record.nextUtf8, 'utf8') <= 1024 * 1024
-    ? record.nextUtf8
-    : fail(`${path}.nextUtf8`, 'must be bounded UTF-8 text')
-  const nextDigest = readSha256Digest(record.nextDigest, `${path}.nextDigest`)
-  const observedDigest = `sha256:${createHash('sha256').update(nextUtf8, 'utf8').digest('hex')}`
-  if (nextDigest !== observedDigest) fail(`${path}.nextDigest`, 'does not bind nextUtf8')
-  return Object.freeze({
-    adapterDigest: readSha256Digest(record.adapterDigest, `${path}.adapterDigest`),
-    candidateRef: candidateRef(record.candidateRef, `${path}.candidateRef`, 'plugin'),
-    configuration: rpcJson(record.configuration, `${path}.configuration`),
-    expectedDigest: readSha256Digest(record.expectedDigest, `${path}.expectedDigest`),
-    nextDigest,
-    nextUtf8,
-    packageName: readBoundedString(record.packageName, `${path}.packageName`, 214),
-    schema: readBoundedString(record.schema, `${path}.schema`, 256),
-  })
-}
-
 function pluginRecoveryPoint(value: unknown, path: string, root: string, targetKey: string): RpcJson {
-  const record = readStrictRecord(value, ['artifactPath', 'configurationPatch', 'kind', 'snapshot'], path)
+  const record = readStrictRecord(value, ['artifactPath', 'kind', 'metadataCache', 'snapshot'], path)
   const snapshot = readStrictRecord(record.snapshot, [
-    'activeGeneration', 'bootStatus', 'effectivePath', 'lastGoodGeneration', 'profile', 'revision',
-    'rollbackGeneration', 'treeDigest',
+    'bootStatus', 'digest', 'materialRoot', 'ownerRevision', 'profileId', 'revision',
   ], `${path}.snapshot`)
   const targetParts = targetKey.split(':')
-  const profile = readBoundedString(snapshot.profile, `${path}.snapshot.profile`, 256)
-  if (profile !== targetParts[1]) fail(`${path}.snapshot.profile`, 'does not bind targetKey')
+  const profileId = readBoundedString(snapshot.profileId, `${path}.snapshot.profileId`, 256)
+  if (profileId !== targetParts[1]) fail(`${path}.snapshot.profileId`, 'does not bind targetKey')
+  const revision = readNonNegativeInteger(snapshot.revision, `${path}.snapshot.revision`)
+  const digest = readSha256Digest(snapshot.digest, `${path}.snapshot.digest`)
+  const materialRoot = absolutePath(snapshot.materialRoot, `${path}.snapshot.materialRoot`)
+  if (materialRoot !== join(resolve(root), 'material', 'plugins')) {
+    fail(`${path}.snapshot.materialRoot`, 'does not bind Center-owned Plugin material')
+  }
+  const ownerRevision = readBoundedString(snapshot.ownerRevision, `${path}.snapshot.ownerRevision`, 512)
+  if (ownerRevision !== `managed-plugin:${String(revision)}:${digest}`) {
+    fail(`${path}.snapshot.ownerRevision`, 'does not bind the managed Plugin snapshot')
+  }
   const artifactPath = record.artifactPath === null ? null : absolutePath(record.artifactPath, `${path}.artifactPath`)
   if (artifactPath !== null && (!below(join(resolve(root), 'artifacts'), artifactPath) || !artifactPath.endsWith('.tgz'))) {
     fail(`${path}.artifactPath`, 'must be a center-owned packed artifact')
   }
+  const metadataCache = record.metadataCache === null
+    ? null
+    : decodeProfileMetadataCacheBinding(record.metadataCache, `${path}.metadataCache`)
+  if (metadataCache !== null && metadataCache.profileId !== profileId) {
+    fail(`${path}.metadataCache.profileId`, 'does not bind the Plugin snapshot')
+  }
   return Object.freeze({
     artifactPath,
-    configurationPatch: record.configurationPatch === null
-      ? null
-      : pluginConfigurationPatch(record.configurationPatch, `${path}.configurationPatch`),
     kind: 'plugin',
+    metadataCache: immutableJsonClone(metadataCache) as unknown as RpcJson,
     snapshot: Object.freeze({
-      activeGeneration: nullableString(snapshot.activeGeneration, `${path}.snapshot.activeGeneration`),
       bootStatus: readLiteral(snapshot.bootStatus, ['live', 'pending-restart', 'verified'] as const, `${path}.snapshot.bootStatus`),
-      effectivePath: absolutePath(snapshot.effectivePath, `${path}.snapshot.effectivePath`),
-      lastGoodGeneration: nullableString(snapshot.lastGoodGeneration, `${path}.snapshot.lastGoodGeneration`),
-      profile,
-      revision: readNonNegativeInteger(snapshot.revision, `${path}.snapshot.revision`),
-      rollbackGeneration: nullableString(snapshot.rollbackGeneration, `${path}.snapshot.rollbackGeneration`),
-      treeDigest: readBoundedString(snapshot.treeDigest, `${path}.snapshot.treeDigest`, 512),
+      digest,
+      materialRoot,
+      ownerRevision,
+      profileId,
+      revision,
     }),
   })
 }
@@ -918,30 +916,6 @@ export function decodeProviderSnapshot(
     beforeDigest,
     recoveryPoint: recoveryPoint(record.recoveryPoint, `${path}.recoveryPoint`, root, operationId, targetKey, kind),
   }) as unknown as StoredProviderSnapshot
-}
-
-/** Decode one exact external Profile boot acknowledgement. */
-export function decodeProfileBootAck(value: unknown, expectedOperationId?: string): StoredProfileBootAck {
-  const path = expectedOperationId === undefined ? 'profile boot acknowledgement' : `profile boot acknowledgement ${expectedOperationId}`
-  const record = readStrictRecord(value, [
-    'acknowledgedAtMs', 'consumerObserved', 'generation', 'operationId', 'phase', 'profileId', 'revision',
-    'schemaVersion', 'treeDigest',
-  ], path)
-  schema(record, path)
-  const operationId = readBoundedString(record.operationId, `${path}.operationId`, 512)
-  if (expectedOperationId !== undefined && operationId !== expectedOperationId) fail(`${path}.operationId`, 'does not bind its storage identity')
-  if (record.consumerObserved !== true) fail(`${path}.consumerObserved`, 'must be true')
-  return Object.freeze({
-    schemaVersion: 1,
-    operationId,
-    profileId: readBoundedString(record.profileId, `${path}.profileId`, 256),
-    generation: readBoundedString(record.generation, `${path}.generation`, 512),
-    phase: readLiteral(record.phase, ['candidate', 'rollback'] as const, `${path}.phase`),
-    revision: positiveInteger(record.revision, `${path}.revision`),
-    treeDigest: readBoundedString(record.treeDigest, `${path}.treeDigest`, 512),
-    consumerObserved: true,
-    acknowledgedAtMs: readNonNegativeInteger(record.acknowledgedAtMs, `${path}.acknowledgedAtMs`),
-  })
 }
 
 /** Decode one exact lifecycle result consumed by a continuation verifier. */

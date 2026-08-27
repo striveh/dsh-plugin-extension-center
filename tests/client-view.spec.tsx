@@ -65,11 +65,12 @@ import type { ExtensionCatalogClient } from '../src/client/catalog-api.ts'
 import { en, zh, type ExtensionCenterKey } from '../src/client/locales.ts'
 import { createExtensionCenterStore } from '../src/client/store.ts'
 import { catalogListResponse, verifyBootstrapCatalog } from '../src/catalog.ts'
+import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 
 afterEach(() => { cleanup() })
 
 /** Mount both slot occupants over one real rc.2 store engine instance. */
-const verifiedCatalog = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-25T10:15:00.000Z')))
+const verifiedCatalog = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-27T00:00:01.000Z')))
 
 function renderCenter(
   dictionary: Record<ExtensionCenterKey, string> = en,
@@ -145,18 +146,23 @@ describe('rc.2 signed read-only Extension Store', () => {
       .getByRole('tab', { name: 'Store' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('searches, filters, compares, and discloses three signed candidate kinds locally', async () => {
+  it('searches, filters, compares, and discloses seven signed candidates across three kinds locally', async () => {
     renderCenter()
     fireEvent.click(screen.getByRole('button', { name: 'Extensions' }))
     const dialog = screen.getByRole('dialog', { name: 'Extension Store' })
     const storePanel = within(dialog).getByRole('tabpanel', { name: 'Store' })
-    expect(within(dialog).getByText('Read-only catalog preview')).toBeVisible()
+    expect(within(dialog).getByText('Trusted extension catalog')).toBeVisible()
     expect(await within(storePanel).findByText('Signed catalog verified')).toBeVisible()
     expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver 0.1.1' })).toBeVisible()
     expect(within(storePanel).getByRole('heading', { name: 'Filesystem MCP' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'Filesystem MCP 1.2.2' })).toBeVisible()
     expect(within(storePanel).getByRole('heading', { name: 'Documentation Writer' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'Wiki Page Writer (6142f8e)' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'Wiki Page Writer (67ae723)' })).toBeVisible()
     expect(within(storePanel).getAllByRole('heading', { level: 4 }).map(heading => heading.textContent)).toEqual([
-      'Documentation Writer', 'DSH Capability Resolver', 'Filesystem MCP',
+      'Documentation Writer', 'DSH Capability Resolver', 'DSH Capability Resolver 0.1.1', 'Filesystem MCP',
+      'Filesystem MCP 1.2.2', 'Wiki Page Writer (6142f8e)', 'Wiki Page Writer (67ae723)',
     ])
 
     const search = within(storePanel).getByRole('searchbox', { name: 'Search extensions' })
@@ -165,6 +171,7 @@ describe('rc.2 signed read-only Extension Store', () => {
     expect(within(storePanel).getByRole('heading', { name: 'Documentation Writer' })).toBeVisible()
     fireEvent.change(search, { target: { value: 'striveh' } })
     expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver 0.1.1' })).toBeVisible()
     expect(within(storePanel).queryByRole('heading', { name: 'Documentation Writer' })).toBeNull()
     fireEvent.change(search, { target: { value: 'user-selected roots' } })
     expect(within(storePanel).getByRole('heading', { name: 'Filesystem MCP' })).toBeVisible()
@@ -189,23 +196,27 @@ describe('rc.2 signed read-only Extension Store', () => {
     fireEvent.change(authority, { target: { value: 'model-context' } })
     expect(within(storePanel).getByRole('heading', { name: 'Documentation Writer' })).toBeVisible()
     expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver' })).toBeVisible()
+    expect(within(storePanel).getByRole('heading', { name: 'DSH Capability Resolver 0.1.1' })).toBeVisible()
     expect(within(storePanel).queryByRole('heading', { name: 'Filesystem MCP' })).toBeNull()
     fireEvent.change(authority, { target: { value: 'all' } })
     const lifecycle = within(storePanel).getByRole('combobox', { name: 'Lifecycle' })
     fireEvent.change(lifecycle, { target: { value: 'complete' } })
     expect(within(storePanel).getByRole('heading', { name: 'No admitted candidate matches' })).toBeVisible()
     fireEvent.change(lifecycle, { target: { value: 'blocked' } })
-    expect(within(storePanel).getAllByRole('heading', { level: 4 })).toHaveLength(3)
+    expect(within(storePanel).getAllByRole('heading', { level: 4 })).toHaveLength(7)
     fireEvent.change(lifecycle, { target: { value: 'all' } })
 
-    const addButtons = within(storePanel).getAllByRole('button', { name: 'Add to compare' })
-    addButtons.forEach(button => { fireEvent.click(button) })
+    for (const name of ['Documentation Writer', 'DSH Capability Resolver 0.1.1', 'Filesystem MCP']) {
+      const card = within(storePanel).getByRole('heading', { name }).closest('article')
+      if (card === null) throw new Error(`${name} card missing`)
+      fireEvent.click(within(card).getByRole('button', { name: 'Add to compare' }))
+    }
     const comparisonTrigger = within(storePanel).getByRole('button', { name: 'Compare selected (3/3)' })
     fireEvent.click(comparisonTrigger)
     const comparison = within(storePanel).getByRole('heading', { name: 'Candidate comparison' }).closest('section')
     if (comparison === null) throw new Error('comparison section missing')
     expect(comparison).toHaveFocus()
-    expect(within(comparison).getByRole('columnheader', { name: 'DSH Capability Resolver' })).toBeVisible()
+    expect(within(comparison).getByRole('columnheader', { name: 'DSH Capability Resolver 0.1.1' })).toBeVisible()
     expect(within(comparison).getByRole('columnheader', { name: 'Filesystem MCP' })).toBeVisible()
     expect(within(comparison).getByRole('columnheader', { name: 'Documentation Writer' })).toBeVisible()
     expect(within(comparison).getByRole('rowheader', { name: 'Acquisition authority' })).toBeVisible()
@@ -260,7 +271,7 @@ describe('rc.2 signed read-only Extension Store', () => {
     ]) expect(within(resolverDetails).getByText(field)).toBeVisible()
     fireEvent.click(within(resolverDetails).getByRole('button', { name: 'Close details' }))
 
-    expect(within(storePanel).getAllByRole('button', { name: 'Acquire unavailable' })).toHaveLength(3)
+    expect(within(storePanel).getAllByRole('button', { name: 'Acquire unavailable' })).toHaveLength(7)
     expect(within(storePanel).getByText('unavailable(host-capability)')).toBeVisible()
     for (const label of ['Install', 'Configure', 'Update', 'Uninstall', 'Restore']) {
       const action = within(dialog).getByRole('button', { name: label })
@@ -274,8 +285,23 @@ describe('rc.2 signed read-only Extension Store', () => {
     fireEvent.click(screen.getByRole('button', { name: '扩展' }))
     const dialog = screen.getByRole('dialog', { name: '扩展商店' })
     expect(within(dialog).getByRole('tab', { name: '商店' })).toHaveAttribute('aria-selected', 'true')
-    expect(within(dialog).getByText('只读目录预览')).toBeVisible()
+    expect(within(dialog).getByText('受信扩展目录')).toBeVisible()
     expect(await within(dialog).findByText('签名目录已验证')).toBeVisible()
     expect(within(dialog).getByRole('heading', { name: '文件系统 MCP' })).toBeVisible()
+  })
+
+  it('shows typed resolver details for the exact 0.1.1 candidate', async () => {
+    const [, next] = CAPABILITY_RESOLVER_CANDIDATES
+    const nextResolver = verifiedCatalog.entries.find(entry => entry.candidateRef === next.candidateRef)
+    expect(nextResolver).toBeDefined()
+    renderCenter()
+    fireEvent.click(screen.getByRole('button', { name: 'Extensions' }))
+    const store = within(screen.getByRole('dialog', { name: 'Extension Store' }))
+      .getByRole('tabpanel', { name: 'Store' })
+    const card = (await within(store).findByRole('heading', { name: 'DSH Capability Resolver 0.1.1' })).closest('article')!
+    fireEvent.click(within(card).getByRole('button', { name: 'View details' }))
+    const details = within(store).getByRole('heading', { level: 3, name: 'DSH Capability Resolver 0.1.1' }).closest('section')!
+    expect(within(details).getByText('dsh-capability-resolver@0.1.1 · 92419 bytes')).toBeVisible()
+    expect(within(details).getByRole('heading', { name: 'Typed Configure fields' })).toBeVisible()
   })
 })

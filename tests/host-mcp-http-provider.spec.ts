@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
+import { verifyBootstrapCatalog } from '../src/catalog.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
-import { CenterStateStore } from '../src/host/index.ts'
+import { CenterStateStore, type HostOwners } from '../src/host/index.ts'
 import {
   createOperationJournal,
   issueOperationReceipt,
@@ -18,7 +19,10 @@ import {
   type AppliedProviderOperation,
   type ProviderOperationRequest,
 } from '../src/providers/index.ts'
+import { HostInventoryService } from '../src/service/inventory-service.ts'
+import { IntentPlanService } from '../src/service/intent-plan-service.ts'
 import type { RpcJson } from '../src/service/rpc-contract.ts'
+import { FilePlanStore } from '../src/storage/index.ts'
 import { TEST_RECOVERY_EXECUTABLE_BINDING } from './support/recovery-binding.ts'
 
 const roots: string[] = []
@@ -49,6 +53,11 @@ class HttpOwner {
   snapshot() { return { revision: this.revision, connections: [...this.active.values()], removed: [...this.removed.values()] } }
   get(id: string) { return this.active.get(id) }
   getRemoved(id: string) { return this.removed.get(id) }
+  registeredToolNames(id: string, exactNames: readonly string[] = []) {
+    const prefix = `mcp__${id}__`
+    return [...new Set([...(this.active.get(id)?.tools.names ?? []), ...exactNames.filter(name =>
+      this.active.get(id)?.tools.names.includes(name) === true)])].filter(name => name.startsWith(prefix)).sort()
+  }
 
   async configure(request: any) {
     this.recordMutation('configure', request)
@@ -140,7 +149,7 @@ class HttpOwner {
       tools: {
         generation: this.toolGeneration,
         digest: canonicalSha256({ id, revision, enabled, transport }),
-        names: enabled ? [`${id}/query`] : [],
+        names: enabled ? [`mcp__${id}__query`] : [],
       },
     }
   }
@@ -162,11 +171,13 @@ function expectedOwnerMutationId(
 }
 
 function httpRuntime(candidateRef: string, suffix = 'v1'): AdmittedMcpHttpRuntime {
+  const version = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.candidateRef === candidateRef)?.artifact.version
+  if (version === undefined) throw new Error('fixture MCP candidate is absent from the bootstrap catalog')
   return {
     transport: 'streamable-http',
     runtimeRef: `runtime:https:${suffix}`,
     candidateRef,
-    version: `1.0.0-${suffix}`,
+    version,
     origin: 'https://mcp.example.test',
     endpoint: `https://mcp.example.test/mcp/${suffix}`,
     authentication: 'none',
@@ -295,7 +306,6 @@ function request(input: Readonly<{
         profileRevision: 'profile:0:fixture',
       },
     },
-    entry,
     payload: {
       configuration: input.configuration,
       continuationId: null,
@@ -314,6 +324,39 @@ async function execute(provider: McpLifecycleProvider, operation: ProviderOperat
   const applied = await provider.apply(prepared)
   await expect(provider.verify(applied)).resolves.toMatchObject({ digest: expect.stringMatching(/^sha256:/) })
   return applied
+}
+
+function mcpPlanningOwners(root: string, owner: HttpOwner): Readonly<{
+  owners: HostOwners
+  managedPlugins: NonNullable<HostOwners['managedPlugins']>
+}> {
+  const managedPlugins = {
+    snapshot: async (profileId: string) => {
+      const digest = canonicalSha256({ profileId, managedPlugins: [] })
+      return {
+        profileId,
+        revision: 0,
+        digest,
+        materialRoot: join(root, 'managed-plugins'),
+        bootStatus: 'live' as const,
+        ownerRevision: `managed-plugin:0:${digest}`,
+      }
+    },
+  }
+  return {
+    managedPlugins,
+    owners: {
+      managedPlugins,
+      mcpConnections: owner as never,
+      taskContinuations: {} as never,
+      skills: {} as never,
+      tools: {} as never,
+      loader: {
+        await: async () => {},
+        entries: () => [],
+      } as never,
+    },
+  }
 }
 
 describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
@@ -475,7 +518,7 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
       descriptorDigest: firstDigest,
       transport: 'http',
       observedLifecycle: 'ready',
-      qualifiedTools: ['remote/query'],
+      qualifiedTools: ['mcp__remote__query'],
     })
 
     const exact = structuredClone(owner.get('remote')!)
@@ -521,6 +564,102 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
     expect(owner.removeCalls).toBeGreaterThan(0)
     expect(owner.purgeCalls).toBeGreaterThan(0)
     expect(owner.mutations.every(mutation => /^mcp:[0-9a-f]{64}$/.test(mutation.mutationId))).toBe(true)
+  })
+
+  it('carries the removed owner revision through inventory and IntentPlan into restore preparation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-mcp-http-planned-restore-'))
+    roots.push(root)
+    const store = new CenterStateStore(root)
+    await store.initialize()
+    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const entry = catalog.envelope.entries.find(candidate => candidate.kind === 'mcp')!
+    const runtime = httpRuntime(entry.candidateRef)
+    const owner = new HttpOwner()
+    const provider = new McpLifecycleProvider(store, owner as never, [runtime])
+    const configuration = config(runtime)
+    const bindingDigest = (await provider.preflight(entry.candidateRef, configuration))!.descriptorDigest
+    const operation = (
+      id: string,
+      operationKind: ProviderOperationRequest['plan']['operationKind'],
+      desiredState: 'enabled' | 'disabled' | 'removed',
+    ) => request({
+      runtime,
+      configuration,
+      bindingDigest,
+      owner,
+      operationId: `operation:http-planned-${id}`,
+      operationKind,
+      desiredState,
+    })
+
+    await execute(provider, operation('install', 'install', 'disabled'))
+    await execute(provider, operation('uninstall', 'uninstall', 'removed'))
+    const removed = owner.getRemoved('remote')
+    if (removed === undefined) throw new Error('MCP owner retained no removed record')
+
+    const planning = mcpPlanningOwners(root, owner)
+    const inventory = new HostInventoryService(
+      store,
+      planning.owners,
+      () => catalog,
+      planning.managedPlugins,
+      version => provider.inspect(version),
+    )
+    const intentPlans = new IntentPlanService(
+      store,
+      new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING),
+      inventory,
+      planning.owners,
+      () => catalog,
+      planning.managedPlugins,
+      {
+        mcpRuntime: (candidateRef, value) => provider.preflight(candidateRef, value),
+        mcpOptions: candidateRef => provider.options(candidateRef),
+      },
+    )
+    const preview = await intentPlans.preview({
+      protocolVersion: 1,
+      origin: 'store',
+      candidateRef: entry.candidateRef,
+      operationKind: 'restore',
+      scopeKey: 'profile:web',
+      profileId: 'web',
+      continuationId: null,
+      targetKey: operation('target', 'restore', 'disabled').plan.targetKey,
+      configuration: {},
+    }, 'loopback-browser')
+    expect(preview.plan.content.fences.ownerRevision).toBe(`mcp:${String(removed.revision)}`)
+
+    const storedIntent = await store.getIntent(preview.intentId)
+    if (storedIntent === undefined) throw new Error('planned restore has no durable intent')
+    expect(storedIntent.payload.configuration).toEqual(configuration)
+    const wrongEntry = catalog.envelope.entries.find(candidate => candidate.kind === 'mcp'
+      && candidate.candidateRef !== entry.candidateRef)!
+    await expect(intentPlans.preview({
+      protocolVersion: 1,
+      origin: 'store',
+      candidateRef: wrongEntry.candidateRef,
+      operationKind: 'restore',
+      scopeKey: 'profile:web',
+      profileId: 'web',
+      continuationId: null,
+      targetKey: operation('wrong-target', 'restore', 'disabled').plan.targetKey,
+      configuration: {},
+    }, 'loopback-browser')).rejects.toThrow('exact retained restore target is unavailable')
+    const fixture = operation('restore', 'restore', 'disabled')
+    const plannedRestore = {
+      ...fixture,
+      authorization: {
+        ...fixture.authorization,
+        planId: preview.plan.content.planId,
+        planHash: preview.plan.hash,
+      },
+      plan: preview.plan.content,
+      payload: storedIntent.payload,
+    } as ProviderOperationRequest
+    await expect(provider.prepare(plannedRestore)).resolves.toMatchObject({
+      before: { removed: { ownerRevision: `mcp:${String(removed.revision)}` } },
+    })
   })
 
   it('fails task composition atomically when HTTP activation does not publish qualified tools', async () => {
@@ -683,6 +822,8 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
       { ...base, authentication: 'bearer' },
       { ...base, headers: { Authorization: 'Bearer secret' } },
       { ...base, env: { TOKEN: 'secret' } },
+      { ...base, candidateRef: 'mcp:io.github.domdomegg/filesystem-mcp@9.9.9' },
+      { ...base, version: '9.9.9' },
     ]
     for (const runtime of invalid) {
       expect(() => new McpLifecycleProvider(store, new HttpOwner() as never, [runtime as never])).toThrow()

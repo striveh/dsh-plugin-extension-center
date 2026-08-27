@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,19 +11,48 @@ import {
   BOOTSTRAP_CATALOG_ROOT,
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from '../src/catalog-data.ts'
-import { canonicalSha256, catalogListResponse, verifyBootstrapCatalog, verifyCatalog } from '../src/catalog.ts'
+import {
+  canonicalSha256,
+  catalogListResponse,
+  catalogReviewEvidenceSupport,
+  verifyBootstrapCatalog,
+  verifyCatalog,
+} from '../src/catalog.ts'
 import { EXTENSION_CENTER_RPC_CHANNEL } from '../src/catalog-contract.ts'
 import { apply } from '../src/index.ts'
+import { candidateUpdateSuccessor, FILESYSTEM_MCP_CANDIDATES, SKILL_CANDIDATES } from '../src/kind-candidates.ts'
+import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 
-const VALID_NOW = Date.parse('2026-08-25T10:15:00.000Z')
+const VALID_NOW = Date.parse('2026-08-26T18:00:01.000Z')
 
 describe('signed bootstrap catalog', () => {
-  it('verifies the threshold signature and projects all three extension kinds without write capabilities', () => {
+  it('verifies revision 8 and projects exact update candidates across all three extension kinds', () => {
     const catalog = verifyBootstrapCatalog(VALID_NOW)
     const response = catalogListResponse(catalog)
-    expect(catalog.keyIds).toEqual(['bootstrap-2026-08-25-6'])
-    expect(response.catalog).toMatchObject({ revision: 6, signatureStatus: 'verified' })
-    expect(response.entries.map(entry => entry.kind).sort()).toEqual(['mcp', 'plugin', 'skill'])
+    expect(catalog.keyIds).toEqual(['bootstrap-2026-08-26-8'])
+    expect(response.catalog).toMatchObject({ revision: 8, signatureStatus: 'verified' })
+    expect(response.entries.map(entry => entry.kind).sort()).toEqual([
+      'mcp', 'mcp', 'plugin', 'plugin', 'skill', 'skill', 'skill',
+    ])
+    expect(response.entries.filter(entry => entry.kind === 'plugin').map(entry => entry.candidateRef)).toEqual([
+      'plugin:dsh-capability-resolver@0.1.0',
+      'plugin:dsh-capability-resolver@0.1.1',
+    ])
+    expect(response.entries.filter(entry => entry.kind === 'mcp').map(entry => entry.artifact.version)).toEqual(['1.2.2', '1.3.0'])
+    expect(response.entries.filter(entry => entry.name === 'wiki-page-writer').map(entry => entry.artifact.version)).toEqual([
+      '6142f8e60ac58372845c0fcdd2dbf043cd1bb698',
+      '67ae723a23ba880e3e5c8a3e5e2320092024476e',
+    ])
+    expect(response.entries.find(entry => entry.name === 'wiki-page-writer')?.permissions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'runtime', kind: 'model-context', access: 'send' }),
+      expect.objectContaining({ phase: 'runtime', kind: 'filesystem', access: 'read' }),
+      expect.objectContaining({ phase: 'runtime', kind: 'subprocess', access: 'execute' }),
+    ]))
+    expect(candidateUpdateSuccessor(FILESYSTEM_MCP_CANDIDATES[0].candidateRef)).toBe(FILESYSTEM_MCP_CANDIDATES[1].candidateRef)
+    expect(candidateUpdateSuccessor(FILESYSTEM_MCP_CANDIDATES[1].candidateRef)).toBeNull()
+    expect(candidateUpdateSuccessor(SKILL_CANDIDATES[1].candidateRef)).toBe(SKILL_CANDIDATES[2].candidateRef)
+    expect(candidateUpdateSuccessor(SKILL_CANDIDATES[2].candidateRef)).toBeNull()
+    expect(candidateUpdateSuccessor('skill:microsoft-skills/wiki-page-writer@unknown')).toBeNull()
     expect(response.entries[0]?.configuration).toMatchObject({ required: false, credentials: 'none' })
     expect(response.entries[0]?.configuration.fields).toHaveLength(10)
     expect(response.entries[0]?.permissions).toEqual(expect.arrayContaining([
@@ -35,42 +66,42 @@ describe('signed bootstrap catalog', () => {
       expect.objectContaining({ phase: 'runtime', kind: 'credentials', access: 'read' }),
     ]))
     expect(response.hostCapabilities).toEqual({
-      profileTransaction: false,
+      managedPluginLifecycle: false,
       dynamicMcpConnection: false,
       durableContinuation: false,
       skillRegistry: false,
       toolRegistry: false,
-      loaderObservation: false,
+      loaderMutation: false,
       acquisition: false,
       reason: 'host-capability',
     })
     expect(() => catalogListResponse(catalog, {
-      profileTransaction: true,
+      managedPluginLifecycle: true,
       dynamicMcpConnection: true,
       durableContinuation: true,
       skillRegistry: false,
       toolRegistry: false,
-      loaderObservation: false,
+      loaderMutation: false,
       acquisition: true,
       reason: null,
     })).toThrow('Host acquisition claim')
     expect(catalogListResponse(catalog, {
-      profileTransaction: true,
+      managedPluginLifecycle: true,
       dynamicMcpConnection: true,
       durableContinuation: true,
       skillRegistry: true,
       toolRegistry: true,
-      loaderObservation: true,
+      loaderMutation: true,
       acquisition: true,
       reason: null,
     }).hostCapabilities.acquisition).toBe(true)
     expect(catalogListResponse(catalog, {
-      profileTransaction: true,
+      managedPluginLifecycle: true,
       dynamicMcpConnection: true,
       durableContinuation: true,
       skillRegistry: true,
       toolRegistry: true,
-      loaderObservation: true,
+      loaderMutation: true,
       acquisition: false,
       reason: 'host-capability',
     }).hostCapabilities.acquisition).toBe(false)
@@ -122,7 +153,46 @@ describe('signed bootstrap catalog', () => {
       BOOTSTRAP_CATALOG_SIGNATURES,
       VALID_NOW,
     )).toThrow('valid previous revision digest')
-    expect(() => verifyBootstrapCatalog(Date.parse('2027-08-25T10:15:00.000Z'))).toThrow('expired')
+    expect(() => verifyBootstrapCatalog(Date.parse('2027-08-26T18:00:00.000Z'))).toThrow('expired')
+  })
+
+  it('admits review support only for exact package-known Plugin, MCP, and Skill artifacts', () => {
+    const resolver = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(entry => entry.kind === 'plugin')!
+    const [, next] = CAPABILITY_RESOLVER_CANDIDATES
+    const nextEntry = {
+      ...resolver,
+      candidateRef: next.candidateRef,
+      artifact: {
+        ...resolver.artifact,
+        version: next.version,
+        integrity: next.integrity,
+        sizeBytes: next.sizeBytes,
+      },
+    }
+    expect(catalogReviewEvidenceSupport(resolver)).toBe('package-pinned')
+    expect(catalogReviewEvidenceSupport(nextEntry)).toBe('package-pinned')
+    expect(catalogReviewEvidenceSupport({
+      ...nextEntry,
+      candidateRef: 'plugin:dsh-capability-resolver@0.1.2',
+      artifact: { ...nextEntry.artifact, version: '0.1.2' },
+    })).toBe('unavailable')
+    const mcp = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.kind === 'mcp')!
+    expect(catalogReviewEvidenceSupport(mcp)).toBe('runtime-bound')
+    expect(catalogReviewEvidenceSupport({
+      ...mcp,
+      candidateRef: 'mcp:io.github.domdomegg/filesystem-mcp@9.9.9',
+      artifact: { ...mcp.artifact, version: '9.9.9' },
+    })).toBe('unavailable')
+    const wiki = BOOTSTRAP_CATALOG_ENVELOPE.entries.find(candidate => candidate.name === 'wiki-page-writer')!
+    expect(catalogReviewEvidenceSupport(wiki)).toBe('package-pinned')
+    expect(catalogReviewEvidenceSupport({
+      ...wiki,
+      artifact: { ...wiki.artifact, sizeBytes: wiki.artifact.sizeBytes + 1 },
+    })).toBe('unavailable')
+    expect(catalogReviewEvidenceSupport({
+      ...nextEntry,
+      artifact: { ...nextEntry.artifact, sizeBytes: next.sizeBytes + 1 },
+    })).toBe('unavailable')
   })
 })
 
@@ -142,6 +212,7 @@ describe('loopback catalog RPC', () => {
       await apply({
         connection: { rpc: { handle } },
         get: () => undefined,
+        plugin: async () => {},
         inject: () => ({ dispose: async () => {} }),
         effect: (effect: () => unknown) => effect(),
       } as unknown as Context, { root })
@@ -152,7 +223,10 @@ describe('loopback catalog RPC', () => {
         ok: true,
         value: {
           catalog: { source: 'bootstrap', freshness: 'bootstrap', degraded: false },
-          entries: [{ kind: 'plugin' }, { kind: 'mcp' }, { kind: 'skill' }],
+          entries: [
+            { kind: 'plugin' }, { kind: 'plugin' }, { kind: 'mcp' }, { kind: 'mcp' },
+            { kind: 'skill' }, { kind: 'skill' }, { kind: 'skill' },
+          ],
         },
       })
       await expect(handler('catalog/refresh', { protocolVersion: 1 }, signal)).resolves.toMatchObject({
@@ -173,7 +247,7 @@ describe('loopback catalog RPC', () => {
         ok: false,
         error: { code: 'cancelled' },
       })
-      vi.setSystemTime(Date.parse('2027-08-25T10:15:00.000Z'))
+      vi.setSystemTime(Date.parse('2027-08-26T18:00:00.000Z'))
       await expect(handler('catalog/list', { protocolVersion: 1 }, signal)).resolves.toMatchObject({
         ok: false,
         error: { code: 'bad-request' },

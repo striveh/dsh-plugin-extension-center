@@ -3,9 +3,6 @@ import type { RpcJson } from '../service/rpc-contract.ts'
 import type { ExtensionCenterKey } from './locales.ts'
 import css from './ExtensionCenter.module.css'
 
-/** Exact admitted candidate with a typed resolver configuration adapter. */
-export const RESOLVER_CANDIDATE_REF = 'plugin:dsh-capability-resolver@0.1.0'
-
 type Translate = (key: ExtensionCenterKey) => string
 
 const FIELDS = [

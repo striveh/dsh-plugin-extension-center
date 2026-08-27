@@ -33,7 +33,43 @@ function input(root: string, createdAtMs = 1_000) {
   }
 }
 
+async function readyAcquisition(store: FileTaskAttemptStore, root: string, createdAtMs = 1_000) {
+  const created = await store.create(input(root, createdAtMs))
+  const resolving = await store.transition(created.taskAttemptId, created.revision, 'resolving', null, createdAtMs + 1)
+  const awaiting = await store.transition(resolving.taskAttemptId, resolving.revision, 'awaiting-approval', {
+    kind: 'acquisition-candidate',
+    resolutionId: 'resolution:00000000-0000-4000-8000-000000000201',
+    candidateRef: 'skill:documentation',
+    continuationId: '00000000-0000-4000-8000-000000000202',
+    verificationPayloadDigest: canonicalSha256({ continuation: root }),
+  }, createdAtMs + 2)
+  const acquiring = await store.transition(awaiting.taskAttemptId, awaiting.revision, 'acquiring', awaiting.result, createdAtMs + 3)
+  const verifying = await store.transition(acquiring.taskAttemptId, acquiring.revision, 'verifying-visibility', acquiring.result, createdAtMs + 4)
+  return store.transition(verifying.taskAttemptId, verifying.revision, 'ready-to-resume', verifying.result, createdAtMs + 5)
+}
+
 describe('durable task-attempt owner', () => {
+  it('persists the complete catalog authority domain and rejects unknown authority values', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-task-authority-'))
+    roots.push(root)
+    const store = new FileTaskAttemptStore(root)
+    await store.initialize()
+    const authority = [
+      'credentials', 'filesystem-read', 'filesystem-write', 'model-context', 'network', 'subprocess',
+    ] as const
+    const created = await store.create({
+      ...input(root),
+      need: { ...input(root).need, maximumAuthority: authority },
+    })
+    await expect(new FileTaskAttemptStore(root).get(created.taskAttemptId)).resolves.toMatchObject({
+      need: { maximumAuthority: authority },
+    })
+    await expect(store.create({
+      ...input(root, 2_000),
+      need: { ...input(root).need, maximumAuthority: ['future-authority'] as never },
+    })).rejects.toThrow('maximumAuthority[0] is invalid')
+  })
+
   it('assigns a terminal outcome once and preserves it across restart', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-task-attempt-'))
     roots.push(root)
@@ -60,6 +96,75 @@ describe('durable task-attempt owner', () => {
     )).rejects.toThrow('already terminal')
     await expect(new FileTaskAttemptStore(root).initialize()).resolves.toBeUndefined()
     await expect(new FileTaskAttemptStore(root).get(closed.taskAttemptId)).resolves.toEqual(closed)
+  })
+
+  it('reconciles dispatch ownership then claimed continuation state to resuming and continued exactly once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-task-continuation-claimed-'))
+    roots.push(root)
+    const store = new FileTaskAttemptStore(root)
+    await store.initialize()
+    const ready = await readyAcquisition(store, root)
+
+    const resuming = await store.reconcileContinuation(ready.taskAttemptId, 'consumed', 1_006)
+    expect(resuming).toMatchObject({ phase: 'resuming', outcome: null })
+    await expect(store.reconcileContinuation(ready.taskAttemptId, 'dispatching', 1_007))
+      .resolves.toMatchObject({ phase: 'resuming', outcome: null })
+    await expect(store.reconcileContinuation(ready.taskAttemptId, 'dispatched', 1_008))
+      .resolves.toMatchObject({ phase: 'resuming', outcome: null })
+    const continued = await store.reconcileContinuation(ready.taskAttemptId, 'claimed', 1_009)
+    expect(continued).toMatchObject({
+      phase: 'resuming',
+      outcome: 'continued',
+      reason: 'continuation-claimed',
+    })
+    await expect(store.reconcileContinuation(ready.taskAttemptId, 'claimed', 1_010)).resolves.toEqual(continued)
+    await expect(new FileTaskAttemptStore(root).get(ready.taskAttemptId)).resolves.toEqual(continued)
+  })
+
+  it.each([
+    [
+      'invalid',
+      'resume-conflict',
+      'continuation-invalid:agent-settled-before-continuation-message',
+      'agent-settled-before-continuation-message',
+    ],
+    ['delivery-unknown', 'resume-conflict', 'continuation-delivery-unknown', undefined],
+    ['superseded', 'resume-conflict', 'continuation-superseded', undefined],
+    ['expired', 'rejected', 'continuation-expired', undefined],
+    ['canceled', 'canceled', 'continuation-canceled', undefined],
+  ] as const)('maps %s continuation state to an explicit terminal task result', async (
+    state,
+    outcome,
+    reason,
+    invalidReason,
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), `extension-task-continuation-${state}-`))
+    roots.push(root)
+    const store = new FileTaskAttemptStore(root)
+    await store.initialize()
+    const ready = await readyAcquisition(store, root)
+
+    await expect(store.reconcileContinuation(ready.taskAttemptId, state, 1_006, invalidReason)).resolves.toMatchObject({
+      outcome,
+      reason,
+    })
+  })
+
+  it('rejects a missing or misplaced invalid continuation reason', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'extension-task-continuation-invalid-reason-'))
+    roots.push(root)
+    const store = new FileTaskAttemptStore(root)
+    await store.initialize()
+    const ready = await readyAcquisition(store, root)
+
+    await expect(store.reconcileContinuation(ready.taskAttemptId, 'invalid', 1_006))
+      .rejects.toThrow('requires an exact invalid reason')
+    await expect(store.reconcileContinuation(
+      ready.taskAttemptId,
+      'consumed',
+      1_006,
+      'verifier-echo-mismatch',
+    )).rejects.toThrow('requires invalid state')
   })
 
   it('derives one new choice attempt, leaves the old attempt terminal, and rejects replay', async () => {

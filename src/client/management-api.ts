@@ -60,6 +60,7 @@ export interface ExtensionManagementClient {
   /** Read safe typed configuration selectors for one exact candidate or managed target. */
   configurationOptions(input: Readonly<{
     candidateRef: string
+    operationKind: OperationKind
     targetKey: string | null
     scopeKey: string
     profileId: string
@@ -174,6 +175,12 @@ function digest(value: unknown, subject: string): string {
   return result
 }
 
+function absolutePath(value: unknown, subject: string): string {
+  const path = string(value, subject, 4_096)
+  if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/u.test(path) && !path.startsWith('\\\\')) fail(subject)
+  return path
+}
+
 function integrity(value: unknown, subject: string): string {
   const result = string(value, subject, 180)
   if (!ARTIFACT_INTEGRITY.test(result)) fail(subject)
@@ -222,7 +229,11 @@ function reviewStringArray(value: unknown, subject: string, maximum = 512): void
   if (new Set(values).size !== values.length) fail(`${subject} duplicates`)
 }
 
-function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: string; operationKind: OperationKind }> {
+function reviewEvidence(value: unknown, subject: string): Readonly<{
+  kind: string
+  operationKind: OperationKind
+  restartRequired: boolean | null
+}> {
   const raw = value as Readonly<Record<string, unknown>>
   const kind = literal(raw?.kind, new Set(['plugin', 'mcp', 'skill'] as const), `${subject}.kind`)
   const base = [
@@ -230,16 +241,18 @@ function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: strin
     'rollbackPoint', 'rollbackLimits', 'notProven',
   ]
   const input = exactRecord(value, subject, kind === 'plugin'
-    ? [...base, 'manifest', 'dependencies', 'lockfile', 'bundles', 'scripts', 'settings']
+    ? [...base, 'manifest', 'dependencies', 'managedMaterial', 'packageMetadata', 'activation', 'scripts', 'settings']
     : kind === 'skill' ? [...base, 'files', 'body', 'invocation']
       : [...base, 'descriptor', 'runtime', 'credentials', 'dataEgress'])
   if (input.schemaVersion !== 1) fail(`${subject}.schemaVersion`)
   const operationKind = literal(input.operationKind, OPERATIONS, `${subject}.operationKind`)
+  let restartRequired: boolean | null = null
   literal(input.credentialChoice, new Set(['not-applicable', 'retain-local-record', 'delete-local-record']), `${subject}.credentialChoice`)
   const checkCodes = new Set([
     'catalog-admission', 'owner-revision', 'review-record', 'artifact-integrity', 'plugin-manifest',
-    'plugin-dependencies', 'plugin-lifecycle-scripts', 'plugin-bundle', 'plugin-settings-schema',
-    'profile-lockfile', 'isolated-profile-boot', 'loader-consumer', 'skill-file-manifest', 'skill-frontmatter',
+    'plugin-dependencies', 'plugin-lifecycle-scripts', 'plugin-package-metadata', 'plugin-settings-schema',
+    'center-plugin-material', 'official-profile-package', 'loader-consumer', 'host-restart-observation',
+    'skill-file-manifest', 'skill-frontmatter',
     'skill-body', 'skill-links', 'skill-executables', 'invocation-policy', 'merged-skill-winner',
     'mcp-runtime-integrity', 'mcp-descriptor', 'mcp-secret-absence', 'mcp-initialize', 'mcp-tools-list',
     'mcp-tool-generation', 'owner-mutation', 'owner-absence', 'quiescent-disposal',
@@ -255,7 +268,7 @@ function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: strin
     array(input[field], `${subject}.${field}`, 128).forEach((item, index) => {
       const row = exactRecord(item, `${subject}.${field}[${String(index)}]`, ['kind', 'id', 'digest'])
       literal(row.kind, new Set([
-        'profile-dependency', 'profile-lockfile', 'bundle-row', 'plugin-settings', 'skill-file',
+        'center-plugin-material', 'profile-dependency', 'loader-entry', 'plugin-settings', 'skill-file',
         'connection-row', 'credential-record', 'external-runtime', 'remote-data', 'recovery-point',
       ]), `${subject}.${field}[${String(index)}].kind`)
       string(row.id, `${subject}.${field}[${String(index)}].id`)
@@ -264,7 +277,7 @@ function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: strin
   }
   if (input.rollbackPoint !== null) {
     const point = exactRecord(input.rollbackPoint, `${subject}.rollbackPoint`, ['kind', 'id', 'digest'])
-    literal(point.kind, new Set(['absent-state', 'managed-version', 'profile-generation']), `${subject}.rollbackPoint.kind`)
+    literal(point.kind, new Set(['absent-state', 'managed-version']), `${subject}.rollbackPoint.kind`)
     string(point.id, `${subject}.rollbackPoint.id`)
     digest(point.digest, `${subject}.rollbackPoint.digest`)
   }
@@ -285,28 +298,50 @@ function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: strin
       const row = exactRecord(item, `${subject}.dependencies[${String(index)}]`, [
         'kind', 'id', 'beforeVersion', 'afterVersion', 'required',
       ])
-      literal(row.kind, new Set(['profile', 'host', 'runtime', 'extension', 'peer']), `${subject}.dependencies[${String(index)}].kind`)
+      literal(row.kind, new Set(['host', 'runtime', 'extension', 'peer']), `${subject}.dependencies[${String(index)}].kind`)
       string(row.id, `${subject}.dependencies[${String(index)}].id`)
       nullableString(row.beforeVersion, `${subject}.dependencies[${String(index)}].beforeVersion`)
       nullableString(row.afterVersion, `${subject}.dependencies[${String(index)}].afterVersion`)
       bool(row.required, `${subject}.dependencies[${String(index)}].required`)
     })
-    const lockfile = exactRecord(input.lockfile, `${subject}.lockfile`, [
-      'path', 'beforeDigest', 'packageName', 'beforeVersion', 'afterVersion', 'targetIntegrity',
+    const managedMaterial = exactRecord(input.managedMaterial, `${subject}.managedMaterial`, [
+      'owner', 'packageName', 'beforeVersion', 'afterVersion', 'targetIntegrity',
     ])
-    if (lockfile.path !== 'pnpm-lock.yaml') fail(`${subject}.lockfile.path`)
-    if (lockfile.beforeDigest !== null) digest(lockfile.beforeDigest, `${subject}.lockfile.beforeDigest`)
-    string(lockfile.packageName, `${subject}.lockfile.packageName`)
-    nullableString(lockfile.beforeVersion, `${subject}.lockfile.beforeVersion`)
-    nullableString(lockfile.afterVersion, `${subject}.lockfile.afterVersion`)
-    if (lockfile.targetIntegrity !== null) integrity(lockfile.targetIntegrity, `${subject}.lockfile.targetIntegrity`)
-    array(input.bundles, `${subject}.bundles`, 64).forEach((item, index) => {
-      const row = exactRecord(item, `${subject}.bundles[${String(index)}]`, ['id', 'action', 'patchDigest', 'patchBody'])
-      string(row.id, `${subject}.bundles[${String(index)}].id`)
-      literal(row.action, new Set(['add', 'retain', 'remove', 'restore']), `${subject}.bundles[${String(index)}].action`)
-      digest(row.patchDigest, `${subject}.bundles[${String(index)}].patchDigest`)
-      string(row.patchBody, `${subject}.bundles[${String(index)}].patchBody`, 1024 * 1024)
-    })
+    literal(managedMaterial.owner, new Set(['extension-center']), `${subject}.managedMaterial.owner`)
+    string(managedMaterial.packageName, `${subject}.managedMaterial.packageName`)
+    nullableString(managedMaterial.beforeVersion, `${subject}.managedMaterial.beforeVersion`)
+    nullableString(managedMaterial.afterVersion, `${subject}.managedMaterial.afterVersion`)
+    if (managedMaterial.targetIntegrity !== null) integrity(managedMaterial.targetIntegrity, `${subject}.managedMaterial.targetIntegrity`)
+    const packageMetadata = exactRecord(input.packageMetadata, `${subject}.packageMetadata`, ['bundlePatch'])
+    if (packageMetadata.bundlePatch !== null) {
+      const patch = exactRecord(packageMetadata.bundlePatch, `${subject}.packageMetadata.bundlePatch`, ['path', 'patchDigest', 'patchBody'])
+      if (patch.path !== 'cordis.patch.yml') fail(`${subject}.packageMetadata.bundlePatch.path`)
+      digest(patch.patchDigest, `${subject}.packageMetadata.bundlePatch.patchDigest`)
+      string(patch.patchBody, `${subject}.packageMetadata.bundlePatch.patchBody`, 1024 * 1024)
+    }
+    const activation = exactRecord(input.activation, `${subject}.activation`, [
+      'mutationOwner', 'profileDependency', 'loaderEntry', 'restartRequired', 'packageName',
+    ])
+    literal(activation.mutationOwner, new Set(['official-dsh-cli', 'official-loader']), `${subject}.activation.mutationOwner`)
+    literal(activation.profileDependency, new Set(['add', 'replace', 'remove', 'restore', 'retain']), `${subject}.activation.profileDependency`)
+    literal(activation.loaderEntry, new Set(['create', 'replace', 'remove', 'restore', 'retain']), `${subject}.activation.loaderEntry`)
+    const activationRestartRequired = bool(activation.restartRequired, `${subject}.activation.restartRequired`)
+    string(activation.packageName, `${subject}.activation.packageName`)
+    const expectedActivation = ({
+      install: { mutationOwner: 'official-dsh-cli', profileDependency: 'add', loaderEntry: 'create', restartRequired: true },
+      configure: { mutationOwner: 'official-loader', profileDependency: 'retain', loaderEntry: 'replace', restartRequired: false },
+      update: { mutationOwner: 'official-dsh-cli', profileDependency: 'replace', loaderEntry: 'replace', restartRequired: true },
+      uninstall: { mutationOwner: 'official-dsh-cli', profileDependency: 'remove', loaderEntry: 'remove', restartRequired: true },
+      restore: { mutationOwner: 'official-dsh-cli', profileDependency: 'restore', loaderEntry: 'restore', restartRequired: true },
+    } as const)[operationKind as 'install' | 'configure' | 'update' | 'uninstall' | 'restore']
+    if (expectedActivation === undefined
+      || activation.mutationOwner !== expectedActivation.mutationOwner
+      || activation.profileDependency !== expectedActivation.profileDependency
+      || activation.loaderEntry !== expectedActivation.loaderEntry
+      || activationRestartRequired !== expectedActivation.restartRequired) {
+      fail(`${subject}.activation operation binding`)
+    }
+    restartRequired = activationRestartRequired
     const scripts = exactRecord(input.scripts, `${subject}.scripts`, ['before', 'after', 'forbiddenLifecycle'])
     reviewStringArray(scripts.before, `${subject}.scripts.before`)
     reviewStringArray(scripts.after, `${subject}.scripts.after`)
@@ -386,7 +421,7 @@ function reviewEvidence(value: unknown, subject: string): Readonly<{ kind: strin
     if (runtime.action !== 'none' || input.credentials !== 'none') fail(`${subject}.runtime authority`)
     literal(input.dataEgress, new Set(['local-process', 'remote-origin']), `${subject}.dataEgress`)
   }
-  return { kind, operationKind }
+  return { kind, operationKind, restartRequired }
 }
 
 function sameRuntimeBinding(
@@ -441,23 +476,23 @@ export function configurationDigest(value: RpcJson): Promise<string> {
 
 function capabilities(value: unknown, subject: string): HostCapabilityProjection {
   const input = exactRecord(value, subject, [
-    'profileTransaction', 'dynamicMcpConnection', 'durableContinuation', 'skillRegistry', 'toolRegistry',
-    'loaderObservation', 'acquisition', 'reason',
+    'managedPluginLifecycle', 'dynamicMcpConnection', 'durableContinuation', 'skillRegistry', 'toolRegistry',
+    'loaderMutation', 'acquisition', 'reason',
   ])
-  const profileTransaction = bool(input.profileTransaction, `${subject}.profileTransaction`)
+  const managedPluginLifecycle = bool(input.managedPluginLifecycle, `${subject}.managedPluginLifecycle`)
   const dynamicMcpConnection = bool(input.dynamicMcpConnection, `${subject}.dynamicMcpConnection`)
   const durableContinuation = bool(input.durableContinuation, `${subject}.durableContinuation`)
   const skillRegistry = bool(input.skillRegistry, `${subject}.skillRegistry`)
   const toolRegistry = bool(input.toolRegistry, `${subject}.toolRegistry`)
-  const loaderObservation = bool(input.loaderObservation, `${subject}.loaderObservation`)
+  const loaderMutation = bool(input.loaderMutation, `${subject}.loaderMutation`)
   const acquisition = bool(input.acquisition, `${subject}.acquisition`)
   const reason = input.reason === null ? null : literal(input.reason, new Set(['host-capability']), `${subject}.reason`)
-  const ownersAvailable = profileTransaction
+  const ownersAvailable = managedPluginLifecycle
     && dynamicMcpConnection
     && durableContinuation
     && skillRegistry
     && toolRegistry
-    && loaderObservation
+    && loaderMutation
   if ((acquisition && !ownersAvailable) || reason !== (acquisition ? null : 'host-capability')) fail(subject)
   return input as unknown as HostCapabilityProjection
 }
@@ -476,12 +511,12 @@ function evidence(value: unknown, kind: InventoryRow['kind'], subject: string): 
   if (evidenceKind !== kind) fail(`${subject}.kind`)
   if (evidenceKind === 'plugin') {
     const input = exactRecord(value, subject, [
-      'kind', 'profileGeneration', 'loaderPhase', 'consumerObserved', 'externalRestartObserved',
+      'kind', 'restartToken', 'loaderPhase', 'consumerObserved', 'restartObserved',
     ])
-    nullableString(input.profileGeneration, `${subject}.profileGeneration`)
+    nullableString(input.restartToken, `${subject}.restartToken`)
     nullableString(input.loaderPhase, `${subject}.loaderPhase`)
     bool(input.consumerObserved, `${subject}.consumerObserved`)
-    bool(input.externalRestartObserved, `${subject}.externalRestartObserved`)
+    bool(input.restartObserved, `${subject}.restartObserved`)
     return input as unknown as InventoryRow['evidence']
   }
   if (evidenceKind === 'mcp') {
@@ -522,7 +557,7 @@ function inventoryRow(value: unknown, snapshot: { scopeKey: string; profileId: s
   const input = exactRecord(value, subject, [
     'schemaVersion', 'kind', 'extensionId', 'candidateRef', 'targetKey', 'scopeKey', 'profileId', 'ownership',
     'desired', 'materialized', 'effective', 'agentVisibility', 'verification', 'rollback', 'managedRevision',
-    'ownerRevision', 'configurationRevision', 'observedAtMs', 'actions', 'updateObservation', 'evidence',
+    'ownerRevision', 'configurationRevision', 'observedAtMs', 'actions', 'updateObservation', 'restoreObservation', 'evidence',
   ])
   if (input.schemaVersion !== 1) fail(`${subject}.schemaVersion`)
   const kind = literal(input.kind, new Set(['plugin', 'mcp', 'skill']), `${subject}.kind`)
@@ -530,7 +565,7 @@ function inventoryRow(value: unknown, snapshot: { scopeKey: string; profileId: s
   nullableString(input.candidateRef, `${subject}.candidateRef`)
   string(input.targetKey, `${subject}.targetKey`)
   if (input.scopeKey !== snapshot.scopeKey || input.profileId !== snapshot.profileId) fail(`${subject}.scope`)
-  literal(input.ownership, new Set(['center', 'external', 'system', 'parent-plugin']), `${subject}.ownership`)
+  const ownership = literal(input.ownership, new Set(['center', 'external', 'system', 'parent-plugin']), `${subject}.ownership`)
   literal(input.desired, new Set(['enabled', 'disabled', 'removed']), `${subject}.desired`)
   literal(input.materialized, new Set(['absent', 'installed', 'configured']), `${subject}.materialized`)
   literal(input.effective, new Set([
@@ -538,13 +573,16 @@ function inventoryRow(value: unknown, snapshot: { scopeKey: string; profileId: s
   ]), `${subject}.effective`)
   literal(input.agentVisibility, new Set(['visible', 'not-visible', 'unknown']), `${subject}.agentVisibility`)
   literal(input.verification, new Set(['unverified', 'structural', 'runtime', 'task']), `${subject}.verification`)
-  literal(input.rollback, new Set(['available', 'running', 'used', 'unavailable', 'failed']), `${subject}.rollback`)
+  const rollback = literal(input.rollback, new Set(['available', 'running', 'used', 'unavailable', 'failed']), `${subject}.rollback`)
   string(input.managedRevision, `${subject}.managedRevision`)
   string(input.ownerRevision, `${subject}.ownerRevision`)
   nullableString(input.configurationRevision, `${subject}.configurationRevision`)
   if (timestamp(input.observedAtMs, `${subject}.observedAtMs`) > snapshot.observedAtMs) fail(`${subject}.observedAtMs`)
   const actions = exactRecord(input.actions, `${subject}.actions`, [...OPERATIONS])
-  for (const operation of OPERATIONS) action(actions[operation], `${subject}.actions.${operation}`)
+  const parsedActions = Object.fromEntries([...OPERATIONS].map(operation => [
+    operation,
+    action(actions[operation], `${subject}.actions.${operation}`),
+  ])) as InventoryRow['actions']
   if (typeof input.updateObservation !== 'object' || input.updateObservation === null || Array.isArray(input.updateObservation)) {
     fail(`${subject}.updateObservation`)
   }
@@ -562,6 +600,29 @@ function inventoryRow(value: unknown, snapshot: { scopeKey: string; profileId: s
     string(update.candidateRef, `${subject}.updateObservation.candidateRef`)
     string(update.revision, `${subject}.updateObservation.revision`)
     integrity(update.integrity, `${subject}.updateObservation.integrity`)
+  }
+  if (typeof input.restoreObservation !== 'object' || input.restoreObservation === null || Array.isArray(input.restoreObservation)) {
+    fail(`${subject}.restoreObservation`)
+  }
+  const restoreStatus = literal(
+    (input.restoreObservation as Record<string, unknown>).status,
+    new Set(['unknown', 'none', 'available']),
+    `${subject}.restoreObservation.status`,
+  )
+  const restore = exactRecord(
+    input.restoreObservation,
+    `${subject}.restoreObservation`,
+    restoreStatus === 'available' ? ['status', 'candidateRef', 'revision', 'integrity'] : ['status'],
+  )
+  if (restoreStatus === 'available') {
+    string(restore.candidateRef, `${subject}.restoreObservation.candidateRef`)
+    string(restore.revision, `${subject}.restoreObservation.revision`)
+    integrity(restore.integrity, `${subject}.restoreObservation.integrity`)
+  }
+  if (parsedActions.update.status === 'available' && updateStatus !== 'available') fail(`${subject}.updateObservation`)
+  if (parsedActions.restore.status === 'available' && restoreStatus !== 'available') fail(`${subject}.restoreObservation`)
+  if (restoreStatus === 'available' && (ownership !== 'center' || !['available', 'used'].includes(rollback))) {
+    fail(`${subject}.restoreObservation`)
   }
   evidence(input.evidence, kind as InventoryRow['kind'], `${subject}.evidence`)
   return input as unknown as InventoryRow
@@ -640,7 +701,10 @@ function planContent(value: unknown): ImmutablePlan['content'] {
   }
   const review = reviewEvidence(input.reviewEvidence, `${subject}.reviewEvidence`)
   if (review.kind !== input.extensionKind || review.operationKind !== input.operationKind) fail(`${subject}.reviewEvidence binding`)
-  bool(input.restartRequired, `${subject}.restartRequired`)
+  const restartRequired = bool(input.restartRequired, `${subject}.restartRequired`)
+  if (review.restartRequired !== null && review.restartRequired !== restartRequired) {
+    fail(`${subject}.restartRequired binding`)
+  }
   const createdAtMs = timestamp(input.createdAtMs, `${subject}.createdAtMs`)
   const expiresAtMs = timestamp(input.expiresAtMs, `${subject}.expiresAtMs`)
   if (createdAtMs >= expiresAtMs) fail(`${subject}.expiry`)
@@ -904,7 +968,8 @@ function taskAttempt(value: unknown, subject: string): TaskAttemptListResponse['
       : string(row.continuationId, `${subject}.retryContinuation.continuationId`, 36)
     if (continuationId !== null && !UUID.test(continuationId)) fail(`${subject}.retryContinuation.continuationId`)
     const state = literal(row.state, new Set([
-      'pending', 'ready', 'consumed', 'claimed', 'canceled', 'superseded', 'expired', 'invalid',
+      'pending', 'ready', 'consumed', 'dispatching', 'dispatched', 'claimed', 'delivery-unknown',
+      'canceled', 'superseded', 'expired', 'invalid',
       'reconciling', 'unavailable',
     ] as const), `${subject}.retryContinuation.state`)
     if (continuationId === null && !['canceled', 'reconciling', 'unavailable'].includes(state)) {
@@ -1125,7 +1190,10 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
   }
   const review = reviewEvidence(input.reviewEvidence, `${subject}.reviewEvidence`)
   if (review.kind !== input.extensionKind) fail(`${subject}.reviewEvidence binding`)
-  bool(input.restartRequired, `${subject}.restartRequired`)
+  const restartRequired = bool(input.restartRequired, `${subject}.restartRequired`)
+  if (review.restartRequired !== null && review.restartRequired !== restartRequired) {
+    fail(`${subject}.restartRequired binding`)
+  }
   const fences = exactRecord(input.fences, `${subject}.fences`, [
     'catalogRevision', 'inventoryRevision', 'targetRevision', 'ownerRevision', 'scopeRevision', 'profileRevision',
   ])
@@ -1135,22 +1203,79 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
     string(fences[field], `${subject}.fences.${field}`)
   }
   const recovery = exactRecord(input.recoveryExecutable, `${subject}.recoveryExecutable`, [
-    'arch', 'executablePath', 'executableSha256', 'hostCliPath', 'hostCliSha256', 'hostHome', 'packageVersion', 'platform', 'schemaVersion',
+    'arch', 'centerRoot', 'executablePath', 'executableSha256', 'officialDsh', 'packageVersion', 'platform', 'schemaVersion',
   ])
-  if (recovery.schemaVersion !== 2) fail(`${subject}.recoveryExecutable.schemaVersion`)
+  if (recovery.schemaVersion !== 5) fail(`${subject}.recoveryExecutable.schemaVersion`)
   literal(recovery.platform, new Set(['darwin', 'linux', 'win32'] as const), `${subject}.recoveryExecutable.platform`)
-  for (const field of ['executablePath', 'hostCliPath', 'hostHome'] as const) {
-    const path = string(recovery[field], `${subject}.recoveryExecutable.${field}`, 4_096)
-    if (!path.startsWith('/') && !/^[A-Za-z]:[\\/]/u.test(path) && !path.startsWith('\\\\')) {
-      fail(`${subject}.recoveryExecutable.${field}`)
-    }
+  for (const field of ['executablePath', 'centerRoot'] as const) {
+    absolutePath(recovery[field], `${subject}.recoveryExecutable.${field}`)
   }
-  for (const field of ['executableSha256', 'hostCliSha256'] as const) {
-    digest(recovery[field], `${subject}.recoveryExecutable.${field}`)
-  }
+  digest(recovery.executableSha256, `${subject}.recoveryExecutable.executableSha256`)
   string(recovery.packageVersion, `${subject}.recoveryExecutable.packageVersion`, 128)
   if (!/^[a-z0-9][a-z0-9._-]*$/u.test(string(recovery.arch, `${subject}.recoveryExecutable.arch`, 64))) {
     fail(`${subject}.recoveryExecutable.arch`)
+  }
+  const officialDsh = exactRecord(recovery.officialDsh, `${subject}.recoveryExecutable.officialDsh`, [
+    'entrypointPath', 'entrypointSha256', 'hostHome', 'packageName', 'packageRoot', 'packageTreeSha256',
+    'packageVersion', 'pnpm', 'productionDependencies', 'schemaVersion', 'supervisorPath', 'supervisorSha256',
+    'timeoutMs', 'node',
+  ])
+  if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
+    || officialDsh.packageVersion !== '0.1.1-rc.2') {
+    fail(`${subject}.recoveryExecutable.officialDsh identity`)
+  }
+  for (const field of ['entrypointPath', 'hostHome', 'packageRoot', 'supervisorPath'] as const) {
+    absolutePath(officialDsh[field], `${subject}.recoveryExecutable.officialDsh.${field}`)
+  }
+  digest(officialDsh.entrypointSha256, `${subject}.recoveryExecutable.officialDsh.entrypointSha256`)
+  digest(officialDsh.packageTreeSha256, `${subject}.recoveryExecutable.officialDsh.packageTreeSha256`)
+  digest(officialDsh.supervisorSha256, `${subject}.recoveryExecutable.officialDsh.supervisorSha256`)
+  const recoveryTimeout = integer(officialDsh.timeoutMs, `${subject}.recoveryExecutable.officialDsh.timeoutMs`)
+  if (recoveryTimeout < 1_000 || recoveryTimeout > 600_000) {
+    fail(`${subject}.recoveryExecutable.officialDsh.timeoutMs`)
+  }
+  let previousDependency = ''
+  array(
+    officialDsh.productionDependencies,
+    `${subject}.recoveryExecutable.officialDsh.productionDependencies`,
+    1_024,
+  ).forEach((value, index) => {
+    const dependencySubject = `${subject}.recoveryExecutable.officialDsh.productionDependencies[${String(index)}]`
+    const dependency = exactRecord(value, dependencySubject, [
+      'packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion',
+    ])
+    const packageName = string(dependency.packageName, `${dependencySubject}.packageName`, 256)
+    const packageVersion = string(dependency.packageVersion, `${dependencySubject}.packageVersion`, 128)
+    const packageRoot = absolutePath(dependency.packageRoot, `${dependencySubject}.packageRoot`)
+    digest(dependency.packageTreeSha256, `${dependencySubject}.packageTreeSha256`)
+    const key = `${packageName}\0${packageVersion}\0${packageRoot}`
+    if (index > 0 && previousDependency.localeCompare(key) >= 0) fail(`${subject}.recoveryExecutable.officialDsh.productionDependencies`)
+    previousDependency = key
+  })
+  const node = exactRecord(officialDsh.node, `${subject}.recoveryExecutable.officialDsh.node`, [
+    'executablePath', 'executableSha256', 'schemaVersion', 'version',
+  ])
+  if (node.schemaVersion !== 1) fail(`${subject}.recoveryExecutable.officialDsh.node.schemaVersion`)
+  absolutePath(node.executablePath, `${subject}.recoveryExecutable.officialDsh.node.executablePath`)
+  digest(node.executableSha256, `${subject}.recoveryExecutable.officialDsh.node.executableSha256`)
+  if (!/^v\d+\.\d+\.\d+(?:[-+].*)?$/u.test(string(
+    node.version,
+    `${subject}.recoveryExecutable.officialDsh.node.version`,
+    64,
+  ))) fail(`${subject}.recoveryExecutable.officialDsh.node.version`)
+  const pnpm = exactRecord(officialDsh.pnpm, `${subject}.recoveryExecutable.officialDsh.pnpm`, [
+    'entrypointPath', 'entrypointSha256', 'packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion',
+    'registryIntegrity', 'runtimeRoot', 'schemaVersion', 'shellPath', 'shellSha256', 'shimPath', 'shimSha256',
+  ])
+  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
+    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==') {
+    fail(`${subject}.recoveryExecutable.officialDsh.pnpm identity`)
+  }
+  for (const field of ['packageRoot', 'entrypointPath', 'shimPath', 'shellPath', 'runtimeRoot'] as const) {
+    absolutePath(pnpm[field], `${subject}.recoveryExecutable.officialDsh.pnpm.${field}`)
+  }
+  for (const field of ['packageTreeSha256', 'entrypointSha256', 'shimSha256', 'shellSha256'] as const) {
+    digest(pnpm[field], `${subject}.recoveryExecutable.officialDsh.pnpm.${field}`)
   }
   return input as unknown as OperationReceipt['body']['planEvidence']
 }
@@ -1354,9 +1479,11 @@ export function createExtensionManagementClient(rpc: ClientConnectionRpc): Exten
     },
     async configurationOptions(input, signal) {
       if (input.targetKey !== null) string(input.targetKey, 'configuration options request.targetKey')
+      literal(input.operationKind, new Set(OPERATIONS), 'configuration options request.operationKind')
       const response = parseConfigurationOptionsResponse(await call(rpc, 'configuration/options', {
         protocolVersion: PROTOCOL_VERSION,
         candidateRef: input.candidateRef,
+        operationKind: input.operationKind,
         targetKey: input.targetKey,
         scopeKey: input.scopeKey,
         profileId: input.profileId,

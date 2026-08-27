@@ -32,7 +32,8 @@ const TRIGGERS = ['model', 'choice-selection', 'retry-original'] as const
 const DERIVATIONS = ['choice-selection', 'retry-original'] as const
 const ACTIONS = ['configure', 'enable', 'restore', 'update'] as const
 const MODALITIES = ['audio', 'file', 'image', 'structured-data', 'text', 'video'] as const
-const ACCESS = ['filesystem-read', 'filesystem-write', 'network', 'subprocess'] as const
+const DATA_ACCESS = ['filesystem-read', 'filesystem-write', 'network', 'subprocess'] as const
+const AUTHORITY = ['credentials', 'filesystem-read', 'filesystem-write', 'model-context', 'network', 'subprocess'] as const
 const SCOPES = ['profile:web', 'project', 'user'] as const
 const PLATFORMS = ['darwin', 'linux', 'windows'] as const
 const TAG = /^[a-z0-9]+(?:[./-][a-z0-9]+)*$/
@@ -94,8 +95,8 @@ function need(value: unknown, path: string): TaskAttemptNeed {
     outputModalities,
     scopeKey: readLiteral(record.scopeKey, SCOPES, `${path}.scopeKey`),
     platform: readLiteral(record.platform, PLATFORMS, `${path}.platform`),
-    requiredDataAccess: sortedUnique(record.requiredDataAccess, `${path}.requiredDataAccess`, 4, ACCESS),
-    maximumAuthority: sortedUnique(record.maximumAuthority, `${path}.maximumAuthority`, 4, ACCESS),
+    requiredDataAccess: sortedUnique(record.requiredDataAccess, `${path}.requiredDataAccess`, 4, DATA_ACCESS),
+    maximumAuthority: sortedUnique(record.maximumAuthority, `${path}.maximumAuthority`, 6, AUTHORITY),
   })
 }
 

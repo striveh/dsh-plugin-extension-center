@@ -6,9 +6,8 @@ import type { ExtensionCenterKey } from './locales.ts'
 import { MutationFlow } from './ManagementPanels.tsx'
 import { HostCapabilityStatus } from './HostCapabilityStatus.tsx'
 import type { ExtensionManagementClient, ExtensionManagementContext } from './management-api.ts'
-import {
-  RESOLVER_CANDIDATE_REF, ResolverConfigDisclosure,
-} from './ResolverConfigDraft.tsx'
+import { isCapabilityResolverCandidate } from '../resolver-candidates.ts'
+import { ResolverConfigDisclosure } from './ResolverConfigDraft.tsx'
 import { McpConfigurationDraft, SkillConfigurationDraft } from './TypedConfigurationDrafts.tsx'
 import css from './ExtensionCenter.module.css'
 
@@ -273,6 +272,7 @@ export function StorePanel({ catalog, management, context, t }: StorePanelProps)
       if (scopeKey === undefined) continue
       void management.configurationOptions({
         candidateRef: entry.candidateRef,
+        operationKind: 'install',
         targetKey: null,
         scopeKey,
         profileId: context.profileId,
@@ -355,6 +355,7 @@ export function StorePanel({ catalog, management, context, t }: StorePanelProps)
     })
     management.configurationOptions({
       candidateRef: entry.candidateRef,
+      operationKind,
       targetKey: null,
       scopeKey: selectedScope,
       profileId: context.profileId,
@@ -796,7 +797,7 @@ function CandidateDetail({ entry, language, writable, unavailableReason, selecte
           </li>
         ))}</ul>
       </section>
-      {entry.candidateRef === RESOLVER_CANDIDATE_REF ? <ResolverConfigDisclosure t={t} /> : null}
+      {isCapabilityResolverCandidate(entry.candidateRef) ? <ResolverConfigDisclosure t={t} /> : null}
       <section className={css.disclosure}>
         <h4>{t('field.permissions')}</h4>
         <ul>{entry.permissions.map((permission, index) => (

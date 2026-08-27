@@ -1,4 +1,3 @@
-import type { VerifiedCatalog } from '../catalog.ts';
 import type { CenterStateStore } from '../host/index.ts';
 import { ArtifactFetcher, FileTargetLock } from '../host/index.ts';
 import type { LifecycleProvider } from '../providers/index.ts';
@@ -16,8 +15,8 @@ export declare class OperationRunner {
     private readonly fetcher;
     private readonly intentPlans;
     private readonly providers;
-    private readonly catalog;
-    constructor(state: CenterStateStore, plans: FilePlanStore, operations: FileOperationStore, locks: FileTargetLock, fetcher: ArtifactFetcher, intentPlans: IntentPlanService, providers: LifecycleProviders, catalog: () => VerifiedCatalog);
+    private readonly explicitRecoveryFlights;
+    constructor(state: CenterStateStore, plans: FilePlanStore, operations: FileOperationStore, locks: FileTargetLock, fetcher: ArtifactFetcher, intentPlans: IntentPlanService, providers: LifecycleProviders);
     /** Consume one approved plan once, then perform its provider operation. */
     run(planHashValue: unknown, signal: AbortSignal): Promise<LifecycleResponse>;
     /** Read one verified operation. */
@@ -28,15 +27,21 @@ export declare class OperationRunner {
     listReceipts(): Promise<readonly StoredReceipt[]>;
     /** Retry an exact fenced rollback while retaining the target lock until owner state is reconciled. */
     recoverOperation(operationId: string, signal: AbortSignal): Promise<LifecycleResponse>;
-    /** Reconcile a Profile operation only from Host-owned boot and Loader evidence. */
-    acknowledgeProfileBoot(input: Readonly<{
-        operationId: string;
-        profileId: string;
-        generation: string;
-    }>, signal: AbortSignal): Promise<LifecycleResponse>;
+    /** Reconcile a managed Plugin only from this process's startup and Loader evidence. */
+    private settleManagedPluginRestart;
+    /** Reject provider restart evidence that does not match the consumed plan. */
+    private assertForwardRestartBinding;
+    /** Reject Plugin rollback evidence that invents or omits the approved restart class. */
+    private assertRollbackRestartBinding;
+    /** Finish a restored Plugin state either in this Host or after the required package restart. */
+    private settleManagedPluginRollback;
+    /** Restore one Plugin operation and then consume the exact rollback evidence it publishes. */
+    private rollbackManagedPlugin;
     /** Repair interrupted journals without replaying a consumed plan or a committed mutation. */
     recover(signal: AbortSignal): Promise<void>;
     private recoverLoaded;
+    /** Retry task bookkeeping without making an already terminal target depend on its intent payload. */
+    private recoverTaskReceipt;
     private recoverRollback;
     private execute;
     private needsArtifact;
@@ -49,6 +54,7 @@ export declare class OperationRunner {
     private finishTerminal;
     private persistTaskReceipt;
     private toRecoveryRequired;
+    private claimExactRecoveryLease;
     private release;
     private response;
 }

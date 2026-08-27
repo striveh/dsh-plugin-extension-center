@@ -12,8 +12,9 @@ const OPERATION_PHASES = Object.freeze([
 const TERMINAL_PHASES = Object.freeze(['committed', 'rolled-back', 'failed'])
 const CHECK_CODES = Object.freeze([
   'catalog-admission', 'owner-revision', 'review-record', 'artifact-integrity', 'plugin-manifest',
-  'plugin-dependencies', 'plugin-lifecycle-scripts', 'plugin-bundle', 'plugin-settings-schema',
-  'profile-lockfile', 'isolated-profile-boot', 'loader-consumer', 'skill-file-manifest',
+  'plugin-dependencies', 'plugin-lifecycle-scripts', 'plugin-package-metadata', 'plugin-settings-schema',
+  'center-plugin-material', 'official-profile-package', 'loader-consumer', 'host-restart-observation',
+  'skill-file-manifest',
   'skill-frontmatter', 'skill-body', 'skill-links', 'skill-executables', 'invocation-policy',
   'merged-skill-winner', 'mcp-runtime-integrity', 'mcp-descriptor', 'mcp-secret-absence',
   'mcp-initialize', 'mcp-tools-list', 'mcp-tool-generation', 'owner-mutation', 'owner-absence',
@@ -21,7 +22,7 @@ const CHECK_CODES = Object.freeze([
 ])
 const CHECK_PHASES = Object.freeze(['planning', 'prepare', 'apply', 'verify', 'external-restart'])
 const MATERIAL_KINDS = Object.freeze([
-  'profile-dependency', 'profile-lockfile', 'bundle-row', 'plugin-settings', 'skill-file',
+  'center-plugin-material', 'profile-dependency', 'loader-entry', 'plugin-settings', 'skill-file',
   'connection-row', 'credential-record', 'external-runtime', 'remote-data', 'recovery-point',
 ])
 const ROLLBACK_LIMITS = Object.freeze([
@@ -30,8 +31,7 @@ const ROLLBACK_LIMITS = Object.freeze([
   'restart-required-before-runtime-proof',
 ])
 const REVIEW_NOT_PROVEN = Object.freeze([
-  'catalog-admission-is-not-security-audit', 'target-lockfile-bytes-before-staging',
-  'third-party-code-side-effects', 'remote-side-effects', 'external-runtime-state',
+  'catalog-admission-is-not-security-audit', 'third-party-code-side-effects', 'remote-side-effects', 'external-runtime-state',
   'post-restart-consumer', 'user-task-outcome',
 ])
 const RECEIPT_NOT_PROVEN = Object.freeze(['mutation', 'verification', 'rollback', 'restart', 'recovery'])
@@ -353,7 +353,7 @@ function reviewRollbackPoint(value, label) {
   if (value === null) return null
   const candidate = record(value, label)
   exactKeys(candidate, ['digest', 'id', 'kind'], label)
-  literal(candidate.kind, ['absent-state', 'managed-version', 'profile-generation'], `${label}.kind`)
+  literal(candidate.kind, ['absent-state', 'managed-version'], `${label}.kind`)
   boundedString(candidate.id, `${label}.id`)
   digest(candidate.digest, `${label}.digest`)
   return candidate
@@ -374,7 +374,9 @@ function validateCommonReview(candidate, label) {
 }
 
 function validatePluginReview(candidate, label, baseKeys) {
-  exactKeys(candidate, [...baseKeys, 'manifest', 'dependencies', 'lockfile', 'bundles', 'scripts', 'settings'], label)
+  exactKeys(candidate, [
+    ...baseKeys, 'manifest', 'dependencies', 'managedMaterial', 'packageMetadata', 'activation', 'scripts', 'settings',
+  ], label)
   validateCommonReview(candidate, label)
   const manifest = record(candidate.manifest, `${label}.manifest`)
   exactKeys(manifest, [
@@ -392,7 +394,7 @@ function validatePluginReview(candidate, label, baseKeys) {
     const at = `${label}.dependencies[${String(index)}]`
     const dependency = record(entry, at)
     exactKeys(dependency, ['afterVersion', 'beforeVersion', 'id', 'kind', 'required'], at)
-    literal(dependency.kind, ['profile', 'host', 'runtime', 'extension', 'peer'], `${at}.kind`)
+    literal(dependency.kind, ['host', 'runtime', 'extension', 'peer'], `${at}.kind`)
     boundedString(dependency.id, `${at}.id`, 256)
     nullableString(dependency.beforeVersion, `${at}.beforeVersion`, 256)
     nullableString(dependency.afterVersion, `${at}.afterVersion`, 256)
@@ -403,28 +405,55 @@ function validatePluginReview(candidate, label, baseKeys) {
     fail(`${label}.dependencies contains duplicates`)
   }
 
-  const lockfile = record(candidate.lockfile, `${label}.lockfile`)
-  exactKeys(lockfile, [
-    'afterVersion', 'beforeDigest', 'beforeVersion', 'packageName', 'path', 'targetIntegrity',
-  ], `${label}.lockfile`)
-  if (lockfile.path !== 'pnpm-lock.yaml') fail(`${label}.lockfile.path is unsupported`)
-  digest(lockfile.beforeDigest, `${label}.lockfile.beforeDigest`, true)
-  boundedString(lockfile.packageName, `${label}.lockfile.packageName`, 256)
-  nullableString(lockfile.beforeVersion, `${label}.lockfile.beforeVersion`, 256)
-  nullableString(lockfile.afterVersion, `${label}.lockfile.afterVersion`, 256)
-  artifactIntegrity(lockfile.targetIntegrity, `${label}.lockfile.targetIntegrity`, true)
+  const managedMaterial = record(candidate.managedMaterial, `${label}.managedMaterial`)
+  exactKeys(managedMaterial, [
+    'afterVersion', 'beforeVersion', 'owner', 'packageName', 'targetIntegrity',
+  ], `${label}.managedMaterial`)
+  literal(managedMaterial.owner, ['extension-center'], `${label}.managedMaterial.owner`)
+  boundedString(managedMaterial.packageName, `${label}.managedMaterial.packageName`, 256)
+  nullableString(managedMaterial.beforeVersion, `${label}.managedMaterial.beforeVersion`, 256)
+  nullableString(managedMaterial.afterVersion, `${label}.managedMaterial.afterVersion`, 256)
+  artifactIntegrity(managedMaterial.targetIntegrity, `${label}.managedMaterial.targetIntegrity`, true)
 
-  const bundles = array(candidate.bundles, `${label}.bundles`, 64).map((entry, index) => {
-    const at = `${label}.bundles[${String(index)}]`
-    const bundle = record(entry, at)
-    exactKeys(bundle, ['action', 'id', 'patchBody', 'patchDigest'], at)
-    boundedString(bundle.id, `${at}.id`, 256)
-    literal(bundle.action, ['add', 'retain', 'remove', 'restore'], `${at}.action`)
-    digest(bundle.patchDigest, `${at}.patchDigest`)
-    if (exactText(bundle.patchBody, `${at}.patchBody`) === null) fail(`${at}.patchBody cannot be null`)
-    return bundle
-  })
-  if (new Set(bundles.map(entry => entry.id)).size !== bundles.length) fail(`${label}.bundles contains duplicates`)
+  const packageMetadata = record(candidate.packageMetadata, `${label}.packageMetadata`)
+  exactKeys(packageMetadata, ['bundlePatch'], `${label}.packageMetadata`)
+  if (packageMetadata.bundlePatch !== null) {
+    const bundlePatch = record(packageMetadata.bundlePatch, `${label}.packageMetadata.bundlePatch`)
+    exactKeys(bundlePatch, ['patchBody', 'patchDigest', 'path'], `${label}.packageMetadata.bundlePatch`)
+    if (bundlePatch.path !== 'cordis.patch.yml') fail(`${label}.packageMetadata.bundlePatch.path is unsupported`)
+    digest(bundlePatch.patchDigest, `${label}.packageMetadata.bundlePatch.patchDigest`)
+    if (exactText(bundlePatch.patchBody, `${label}.packageMetadata.bundlePatch.patchBody`) === null) {
+      fail(`${label}.packageMetadata.bundlePatch.patchBody cannot be null`)
+    }
+  }
+  const activation = record(candidate.activation, `${label}.activation`)
+  exactKeys(activation, [
+    'loaderEntry', 'mutationOwner', 'packageName', 'profileDependency', 'restartRequired',
+  ], `${label}.activation`)
+  literal(activation.mutationOwner, ['official-dsh-cli', 'official-loader'], `${label}.activation.mutationOwner`)
+  literal(activation.profileDependency, ['add', 'replace', 'remove', 'restore', 'retain'], `${label}.activation.profileDependency`)
+  literal(activation.loaderEntry, ['create', 'replace', 'remove', 'restore', 'retain'], `${label}.activation.loaderEntry`)
+  boundedString(activation.packageName, `${label}.activation.packageName`, 256)
+  boolean(activation.restartRequired, `${label}.activation.restartRequired`)
+  const expectedActivation = ({
+    install: { mutationOwner: 'official-dsh-cli', profileDependency: 'add', loaderEntry: 'create', restartRequired: true },
+    configure: { mutationOwner: 'official-loader', profileDependency: 'retain', loaderEntry: 'replace', restartRequired: false },
+    update: { mutationOwner: 'official-dsh-cli', profileDependency: 'replace', loaderEntry: 'replace', restartRequired: true },
+    uninstall: { mutationOwner: 'official-dsh-cli', profileDependency: 'remove', loaderEntry: 'remove', restartRequired: true },
+    restore: { mutationOwner: 'official-dsh-cli', profileDependency: 'restore', loaderEntry: 'restore', restartRequired: true },
+  })[candidate.operationKind]
+  if (expectedActivation === undefined
+    || activation.mutationOwner !== expectedActivation.mutationOwner
+    || activation.profileDependency !== expectedActivation.profileDependency
+    || activation.loaderEntry !== expectedActivation.loaderEntry
+    || activation.restartRequired !== expectedActivation.restartRequired) {
+    fail(`${label}.activation does not match operationKind`)
+  }
+  if (manifest.packageName !== managedMaterial.packageName || manifest.packageName !== activation.packageName
+    || manifest.beforeVersion !== managedMaterial.beforeVersion || manifest.afterVersion !== managedMaterial.afterVersion
+    || (managedMaterial.afterVersion === null) !== (managedMaterial.targetIntegrity === null)) {
+    fail(`${label} Plugin package identity fields are inconsistent`)
+  }
 
   const scripts = record(candidate.scripts, `${label}.scripts`)
   exactKeys(scripts, ['after', 'before', 'forbiddenLifecycle'], `${label}.scripts`)
@@ -655,6 +684,10 @@ function immutablePlanContent(value, label) {
     || ((extensionKind === 'mcp') !== (managedObject === 'connection'))) {
     fail(`${label} review evidence and managed object do not match the operation`)
   }
+  if (reviewEvidence.kind === 'plugin'
+    && reviewEvidence.activation.restartRequired !== candidate.restartRequired) {
+    fail(`${label} restart requirement does not match Plugin activation evidence`)
+  }
   return candidate
 }
 
@@ -683,26 +716,91 @@ function planEvidence(value, label) {
   ]) {
     digest(candidate[field], `${label}.${field}`)
   }
-  planReviewEvidence(candidate.reviewEvidence, `${label}.reviewEvidence`)
-  boolean(candidate.restartRequired, `${label}.restartRequired`)
+  const reviewEvidence = planReviewEvidence(candidate.reviewEvidence, `${label}.reviewEvidence`)
+  const restartRequired = boolean(candidate.restartRequired, `${label}.restartRequired`)
+  if (reviewEvidence.kind === 'plugin'
+    && reviewEvidence.activation.restartRequired !== restartRequired) {
+    fail(`${label}.restartRequired does not match Plugin activation evidence`)
+  }
   revisionFences(candidate.fences, `${label}.fences`)
   const recovery = record(candidate.recoveryExecutable, `${label}.recoveryExecutable`)
   exactKeys(recovery, [
-    'arch', 'executablePath', 'executableSha256', 'hostCliPath', 'hostCliSha256',
-    'hostHome', 'packageVersion', 'platform', 'schemaVersion',
+    'arch', 'centerRoot', 'executablePath', 'executableSha256', 'officialDsh', 'packageVersion', 'platform', 'schemaVersion',
   ], `${label}.recoveryExecutable`)
   const executablePath = boundedString(recovery.executablePath, `${label}.recoveryExecutable.executablePath`, 4_096)
-  const hostCliPath = boundedString(recovery.hostCliPath, `${label}.recoveryExecutable.hostCliPath`, 4_096)
-  const hostHome = boundedString(recovery.hostHome, `${label}.recoveryExecutable.hostHome`, 4_096)
+  const centerRoot = boundedString(recovery.centerRoot, `${label}.recoveryExecutable.centerRoot`, 4_096)
   const arch = boundedString(recovery.arch, `${label}.recoveryExecutable.arch`, 64)
-  if (recovery.schemaVersion !== 2 || !isAbsolute(executablePath) || !isAbsolute(hostCliPath)
-    || !isAbsolute(hostHome) || !/^[a-z0-9][a-z0-9._-]*$/u.test(arch)) {
+  if (recovery.schemaVersion !== 5 || !isAbsolute(executablePath)
+    || !isAbsolute(centerRoot) || !/^[a-z0-9][a-z0-9._-]*$/u.test(arch)) {
     fail(`${label}.recoveryExecutable values are invalid`)
   }
   digest(recovery.executableSha256, `${label}.recoveryExecutable.executableSha256`)
-  digest(recovery.hostCliSha256, `${label}.recoveryExecutable.hostCliSha256`)
   boundedString(recovery.packageVersion, `${label}.recoveryExecutable.packageVersion`, 128)
   literal(recovery.platform, ['darwin', 'linux', 'win32'], `${label}.recoveryExecutable.platform`)
+  const officialDsh = record(recovery.officialDsh, `${label}.recoveryExecutable.officialDsh`)
+  exactKeys(officialDsh, [
+    'entrypointPath', 'entrypointSha256', 'hostHome', 'packageName', 'packageRoot', 'packageTreeSha256',
+    'packageVersion', 'pnpm', 'productionDependencies', 'schemaVersion', 'supervisorPath', 'supervisorSha256',
+    'timeoutMs', 'node',
+  ], `${label}.recoveryExecutable.officialDsh`)
+  if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
+    || officialDsh.packageVersion !== '0.1.1-rc.2') {
+    fail(`${label}.recoveryExecutable.officialDsh identity is invalid`)
+  }
+  for (const field of ['entrypointPath', 'hostHome', 'packageRoot', 'supervisorPath']) {
+    if (!isAbsolute(boundedString(officialDsh[field], `${label}.recoveryExecutable.officialDsh.${field}`, 4_096))) {
+      fail(`${label}.recoveryExecutable.officialDsh.${field} must be absolute`)
+    }
+  }
+  digest(officialDsh.entrypointSha256, `${label}.recoveryExecutable.officialDsh.entrypointSha256`)
+  digest(officialDsh.packageTreeSha256, `${label}.recoveryExecutable.officialDsh.packageTreeSha256`)
+  digest(officialDsh.supervisorSha256, `${label}.recoveryExecutable.officialDsh.supervisorSha256`)
+  const timeoutMs = integer(officialDsh.timeoutMs, `${label}.recoveryExecutable.officialDsh.timeoutMs`)
+  if (timeoutMs < 1_000 || timeoutMs > 600_000) fail(`${label}.recoveryExecutable.officialDsh.timeoutMs is invalid`)
+  const dependencyKeys = array(
+    officialDsh.productionDependencies,
+    `${label}.recoveryExecutable.officialDsh.productionDependencies`,
+    1_024,
+  ).map((value, index) => {
+    const dependencyLabel = `${label}.recoveryExecutable.officialDsh.productionDependencies[${String(index)}]`
+    const dependency = record(value, dependencyLabel)
+    exactKeys(dependency, ['packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion'], dependencyLabel)
+    const packageName = boundedString(dependency.packageName, `${dependencyLabel}.packageName`, 256)
+    const packageVersion = boundedString(dependency.packageVersion, `${dependencyLabel}.packageVersion`, 128)
+    const packageRoot = boundedString(dependency.packageRoot, `${dependencyLabel}.packageRoot`, 4_096)
+    if (!isAbsolute(packageRoot)) fail(`${dependencyLabel}.packageRoot must be absolute`)
+    digest(dependency.packageTreeSha256, `${dependencyLabel}.packageTreeSha256`)
+    return `${packageName}\0${packageVersion}\0${packageRoot}`
+  })
+  if (new Set(dependencyKeys).size !== dependencyKeys.length
+    || dependencyKeys.some((key, index) => index > 0 && dependencyKeys[index - 1].localeCompare(key) >= 0)) {
+    fail(`${label}.recoveryExecutable.officialDsh.productionDependencies must be sorted and unique`)
+  }
+  const node = record(officialDsh.node, `${label}.recoveryExecutable.officialDsh.node`)
+  exactKeys(node, ['executablePath', 'executableSha256', 'schemaVersion', 'version'], `${label}.recoveryExecutable.officialDsh.node`)
+  if (node.schemaVersion !== 1
+    || !isAbsolute(boundedString(node.executablePath, `${label}.recoveryExecutable.officialDsh.node.executablePath`, 4_096))
+    || !/^v\d+\.\d+\.\d+(?:[-+].*)?$/u.test(boundedString(node.version, `${label}.recoveryExecutable.officialDsh.node.version`, 64))) {
+    fail(`${label}.recoveryExecutable.officialDsh.node is invalid`)
+  }
+  digest(node.executableSha256, `${label}.recoveryExecutable.officialDsh.node.executableSha256`)
+  const pnpm = record(officialDsh.pnpm, `${label}.recoveryExecutable.officialDsh.pnpm`)
+  exactKeys(pnpm, [
+    'entrypointPath', 'entrypointSha256', 'packageName', 'packageRoot', 'packageTreeSha256', 'packageVersion',
+    'registryIntegrity', 'runtimeRoot', 'schemaVersion', 'shellPath', 'shellSha256', 'shimPath', 'shimSha256',
+  ], `${label}.recoveryExecutable.officialDsh.pnpm`)
+  if (pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.7.0'
+    || pnpm.registryIntegrity !== 'sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==') {
+    fail(`${label}.recoveryExecutable.officialDsh.pnpm identity is invalid`)
+  }
+  for (const field of ['packageRoot', 'entrypointPath', 'shimPath', 'shellPath', 'runtimeRoot']) {
+    if (!isAbsolute(boundedString(pnpm[field], `${label}.recoveryExecutable.officialDsh.pnpm.${field}`, 4_096))) {
+      fail(`${label}.recoveryExecutable.officialDsh.pnpm.${field} must be absolute`)
+    }
+  }
+  for (const field of ['packageTreeSha256', 'entrypointSha256', 'shimSha256', 'shellSha256']) {
+    digest(pnpm[field], `${label}.recoveryExecutable.officialDsh.pnpm.${field}`)
+  }
   return candidate
 }
 

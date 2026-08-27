@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Dirent } from 'node:fs'
-import { lstat, readdir, rm } from 'node:fs/promises'
+import { lstat, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { canonicalJson } from '../domain/index.ts'
 import type { AcquisitionIntent } from '../policy/index.ts'
 import type { ManagedExtensionKind, OperationKind } from '../plans/index.ts'
 import type { OperationPhase } from '../operations/index.ts'
 import type { RpcJson } from '../service/rpc-contract.ts'
+import { durableUnlink } from './durable-unlink.ts'
 import {
   ensurePrivateDirectory,
   openRegularNoFollow,
@@ -21,7 +22,6 @@ import {
   decodeContinuationActivationIntent,
   decodeManagedTarget,
   decodeOperationIndex,
-  decodeProfileBootAck,
   decodeProviderSnapshot,
   decodeStoredIntent,
   decodeStoredResolution,
@@ -107,19 +107,6 @@ export interface StoredProviderSnapshot {
   readonly before: ManagedTargetRecord | null
   readonly beforeDigest: string
   readonly recoveryPoint: RpcJson
-}
-
-/** External boot acknowledgement bound to one Profile generation operation. */
-export interface StoredProfileBootAck {
-  readonly schemaVersion: 1
-  readonly operationId: string
-  readonly profileId: string
-  readonly generation: string
-  readonly phase: 'candidate' | 'rollback'
-  readonly revision: number
-  readonly treeDigest: string
-  readonly consumerObserved: true
-  readonly acknowledgedAtMs: number
 }
 
 /** Separate task-completion receipt consumed only by the continuation verifier. */
@@ -239,7 +226,7 @@ export class CenterStateStore {
     if (prior === undefined || prior.revision !== expectedRevision) {
       throw new Error(`managed target revision conflict while deleting ${targetKey}`)
     }
-    await rm(this.path('managed', targetKey))
+    await durableUnlink(this.path('managed', targetKey))
   }
 
   /** Enumerate center-owned target records deterministically. */
@@ -313,34 +300,6 @@ export class CenterStateStore {
     return value === undefined ? undefined : decodeProviderSnapshot(value, this.root, operationId)
   }
 
-  /** Persist or idempotently replace an exact external boot acknowledgement. */
-  async putBootAck(value: StoredProfileBootAck): Promise<void> {
-    const next = decodeProfileBootAck(value, value.operationId)
-    const path = this.path('boot-acks', next.operationId)
-    const prior = await readDurableOptional(path)
-    if (prior !== undefined) {
-      const decoded = decodeProfileBootAck(prior, next.operationId)
-      const same = decoded.profileId === next.profileId
-        && decoded.generation === next.generation
-        && decoded.phase === next.phase
-        && decoded.revision === next.revision
-        && decoded.treeDigest === next.treeDigest
-      const forwardRollback = decoded.profileId === next.profileId
-        && decoded.phase === 'candidate'
-        && next.phase === 'rollback'
-      if (!same && !forwardRollback) {
-        throw new Error('boot acknowledgement conflicts with its prior binding')
-      }
-    }
-    await writeCanonicalAtomic(path, next)
-  }
-
-  /** Read one external boot acknowledgement. */
-  async getBootAck(operationId: string): Promise<StoredProfileBootAck | undefined> {
-    const value = await readDurableOptional(this.path('boot-acks', operationId))
-    return value === undefined ? undefined : decodeProfileBootAck(value, operationId)
-  }
-
   /** Persist the single verified lifecycle result that may release one parked task. */
   async putTaskReceipt(value: StoredTaskReceipt): Promise<void> {
     const decoded = decodeTaskReceipt(value, value.continuationId)
@@ -410,7 +369,6 @@ export class CenterStateStore {
       entries = []
     }
     const groups = new Set([
-      'boot-acks',
       'continuation-activation-intents',
       'continuation-activations',
       'intents',
@@ -438,10 +396,6 @@ export class CenterStateStore {
     await this.listDirectory('provider-snapshots', (value, name) => {
       const decoded = decodeProviderSnapshot(value, this.root)
       assertStateFileIdentity(name, decoded.operationId, 'provider snapshot')
-    })
-    await this.listDirectory('boot-acks', (value, name) => {
-      const decoded = decodeProfileBootAck(value)
-      assertStateFileIdentity(name, decoded.operationId, 'profile boot acknowledgement')
     })
     await this.listDirectory('task-receipts', (value, name) => {
       const decoded = decodeTaskReceipt(value)

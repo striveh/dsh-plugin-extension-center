@@ -1,4 +1,5 @@
-import type { TaskAttempt, TaskAttemptAgentRoute, TaskAttemptNeed, TaskAttemptOutcome, TaskAttemptPhase, TaskAttemptResult, TaskRetryContinuation } from './types.ts';
+import { type TaskContinuationInvalidReason } from '../internal/continuation/types.ts';
+import type { TaskAttempt, TaskAttemptAgentRoute, TaskAttemptNeed, TaskAttemptOutcome, TaskAttemptPhase, TaskAttemptResult, TaskRetryContinuationState, TaskRetryContinuation } from './types.ts';
 /** Strict file-backed owner for terminal-once original-task attempts. */
 export declare class FileTaskAttemptStore {
     private readonly root;
@@ -37,6 +38,8 @@ export declare class FileTaskAttemptStore {
     bindRetryContinuation(taskAttemptId: string, continuationId: string): Promise<TaskRetryContinuation>;
     /** Persist a cancellation intent before reconciling it with the Host continuation owner. */
     cancelRetryContinuation(taskAttemptId: string, nowMs: number): Promise<TaskRetryContinuation>;
+    /** Fold one exact Host continuation state into its acquisition task attempt. */
+    reconcileContinuation(taskAttemptId: string, state: TaskRetryContinuationState, nowMs: number, invalidReason?: TaskContinuationInvalidReason): Promise<TaskAttempt>;
     /** List every task attempt deterministically. */
     list(): Promise<readonly TaskAttempt[]>;
     /** Advance a mutable task phase with an optional non-authorizing result. */

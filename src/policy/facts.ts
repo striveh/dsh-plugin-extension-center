@@ -15,9 +15,15 @@ const REQUIRED_PERMISSION_ROWS: Readonly<Record<CatalogEntry['kind'], readonly P
 }
 
 const ACTIVE_VERIFICATION_STEPS: Readonly<Record<CatalogEntry['kind'], readonly string[]>> = {
-  plugin: ['profile-generation', 'external-boot-ack', 'loader-consumer', 'active-generation'],
+  plugin: ['center-plugin-material', 'managed-owner-revision', 'loader-consumer'],
   mcp: ['runtime-binding', 'desired-observed-state', 'mcp-handshake', 'qualified-tool-generation'],
   skill: ['artifact-rehash', 'complete-scope-snapshot', 'winning-provider', 'winning-path-and-invocation'],
+}
+
+const PLUGIN_RESTART_OPERATIONS: readonly OperationKind[] = ['install', 'update', 'restore', 'uninstall']
+
+function isPluginRestartOperation(operationKind: OperationKind): boolean {
+  return PLUGIN_RESTART_OPERATIONS.includes(operationKind)
 }
 
 /** Platform key used by both Store and task admission. */
@@ -49,14 +55,22 @@ export function candidateAdmissionFacts(entry: CatalogEntry, operationKind: Oper
   })
 }
 
+/** Derive whether this exact operation needs a later Host boot before verification can finish. */
+export function operationRestartRequired(entry: CatalogEntry, operationKind: OperationKind): boolean {
+  return entry.kind === 'plugin' && entry.restart.required && isPluginRestartOperation(operationKind)
+}
+
 /** Digest of the owner-specific observation recipe enforced by the selected provider implementation. */
 export function verificationRecipeDigest(
   kind: CatalogEntry['kind'],
   operationKind: OperationKind,
   desiredState: DesiredState,
 ): Sha256Digest {
-  const steps = desiredState === 'removed'
+  const baseSteps = desiredState === 'removed'
     ? [`${kind}-owner-absence`, 'center-inventory-absence']
     : ACTIVE_VERIFICATION_STEPS[kind]
-  return canonicalSha256({ recipeRevision: 1, kind, operationKind, desiredState, steps })
+  const steps = kind === 'plugin' && isPluginRestartOperation(operationKind)
+    ? [...baseSteps, 'host-restart-observation']
+    : baseSteps
+  return canonicalSha256({ recipeRevision: 2, kind, operationKind, desiredState, steps })
 }

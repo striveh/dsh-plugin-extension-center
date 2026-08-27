@@ -9,6 +9,27 @@ function denied(code: PolicyDenialCode, reason: string): CandidatePolicyResult {
 }
 
 /**
+ * Bind one raw authority delta to the exact admitted operation and scope.
+ * @param input Candidate, authority-delta, operation, desired-state, and scope coordinates.
+ * @returns Canonical authority digest embedded in the immutable plan and authorization.
+ */
+export function admittedAuthorityDigest(input: Readonly<{
+  candidateRef: string
+  authorityDeltaDigest: CandidatePolicyInput['authorityDigest']
+  operationKind: CandidatePolicyInput['operationKind']
+  desiredState: CandidatePolicyInput['desiredState']
+  selectedScope: string
+}>): CandidatePolicyInput['authorityDigest'] {
+  return canonicalSha256({
+    candidateRef: input.candidateRef,
+    authorityDigest: input.authorityDeltaDigest,
+    operationKind: input.operationKind,
+    desiredState: input.desiredState,
+    selectedScope: input.selectedScope,
+  })
+}
+
+/**
  * Apply deterministic admission before Store selection or model ranking.
  * @param input Host-resolved catalog, owner, authority, and task constraints.
  * @returns Eligible result with authority digest, or the first stable denial.
@@ -66,9 +87,9 @@ export function evaluateCandidatePolicy(input: CandidatePolicyInput): CandidateP
   return Object.freeze({
     status: 'eligible',
     policyRevision: POLICY_REVISION,
-    authorityDigest: canonicalSha256({
+    authorityDigest: admittedAuthorityDigest({
       candidateRef: input.entry.candidateRef,
-      authorityDigest: input.authorityDigest,
+      authorityDeltaDigest: input.authorityDigest,
       operationKind: input.operationKind,
       desiredState: input.desiredState,
       selectedScope: input.selectedScope,

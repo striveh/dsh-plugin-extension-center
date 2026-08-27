@@ -35,7 +35,9 @@ export interface TaskAttemptNeed {
   readonly scopeKey: 'profile:web' | 'project' | 'user'
   readonly platform: 'darwin' | 'linux' | 'windows'
   readonly requiredDataAccess: readonly ('filesystem-read' | 'filesystem-write' | 'network' | 'subprocess')[]
-  readonly maximumAuthority: readonly ('filesystem-read' | 'filesystem-write' | 'network' | 'subprocess')[]
+  readonly maximumAuthority: readonly (
+    'credentials' | 'filesystem-read' | 'filesystem-write' | 'model-context' | 'network' | 'subprocess'
+  )[]
 }
 
 /** Bounded Agent route retained for a new attempt and eventual continuation. */
@@ -120,7 +122,10 @@ export type TaskRetryContinuationState =
   | 'pending'
   | 'ready'
   | 'consumed'
+  | 'dispatching'
+  | 'dispatched'
   | 'claimed'
+  | 'delivery-unknown'
   | 'canceled'
   | 'superseded'
   | 'expired'

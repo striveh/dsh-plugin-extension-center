@@ -1,6 +1,5 @@
 import type { OperationAuthorization } from '../plans/index.ts';
 import type { ImmutablePlan } from '../plans/index.ts';
-import type { VerifiedCatalog } from '../catalog.ts';
 /** Exact signed-catalog artifact coordinates re-bound after plan consumption. */
 export interface ArtifactFetchSpec {
     readonly candidateRef: string;
@@ -10,11 +9,10 @@ export interface ArtifactFetchSpec {
     readonly integrity: `sha256:${string}` | `sha512:${string}`;
     readonly fileSuffix: '.md' | '.tgz';
 }
-/** Four-way binding required before acquisition may touch the network. */
+/** Consumed authorization and immutable plan required before acquisition may touch the network. */
 export interface ArtifactFetchBinding {
     readonly authorization: OperationAuthorization;
     readonly plan: ImmutablePlan;
-    readonly catalog: VerifiedCatalog;
 }
 /** Explicit redirect policy for integrity-pinned downloads. */
 export interface ArtifactRedirectPolicy {

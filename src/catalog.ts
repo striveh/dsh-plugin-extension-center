@@ -14,30 +14,46 @@ import {
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from './catalog-data.ts'
 import type { CatalogAdmissionStatus } from './catalog-refresh.ts'
+import { FILESYSTEM_MCP_CANDIDATES, SKILL_CANDIDATES } from './kind-candidates.ts'
+import { CAPABILITY_RESOLVER_CANDIDATES } from './resolver-candidates.ts'
 
 const PACKAGE_PINNED_REVIEW_IDENTITIES = Object.freeze([
-  Object.freeze({
+  ...CAPABILITY_RESOLVER_CANDIDATES.map(candidate => Object.freeze({
     kind: 'plugin',
-    candidateRef: 'plugin:dsh-capability-resolver@0.1.0',
+    candidateRef: candidate.candidateRef,
     name: 'dsh-capability-resolver',
     artifact: Object.freeze({
       id: 'dsh-capability-resolver',
-      version: '0.1.0',
-      integrity: 'sha256:895e1e44ee9edaff0c4982c671379bbc3122e2c0189250e9870ee70102f2c27e',
-      sizeBytes: 92_128,
+      version: candidate.version,
+      integrity: candidate.integrity,
+      sizeBytes: candidate.sizeBytes,
     }),
-  }),
-  Object.freeze({
+  })),
+  ...SKILL_CANDIDATES.map(candidate => Object.freeze({
     kind: 'skill',
-    candidateRef: 'skill:github-awesome-copilot/documentation-writer@d0d9d9f014abb27bf0d8321851867500a3a46bba',
-    name: 'documentation-writer',
+    candidateRef: candidate.candidateRef,
+    name: candidate.name,
     artifact: Object.freeze({
-      id: 'skills/documentation-writer/SKILL.md',
-      version: 'd0d9d9f014abb27bf0d8321851867500a3a46bba',
-      integrity: 'sha256:7e8244988c9f4eb63bf8c0edf160578544621eb96e5e51e2d848f1401c5de8f1',
-      sizeBytes: 2_748,
+      id: candidate.artifactId,
+      version: candidate.version,
+      integrity: candidate.integrity,
+      sizeBytes: candidate.sizeBytes,
     }),
-  }),
+  })),
+])
+
+const RUNTIME_BOUND_REVIEW_IDENTITIES = Object.freeze([
+  ...FILESYSTEM_MCP_CANDIDATES.map(candidate => Object.freeze({
+    kind: 'mcp',
+    candidateRef: candidate.candidateRef,
+    name: candidate.name,
+    artifact: Object.freeze({
+      id: candidate.artifactId,
+      version: candidate.version,
+      integrity: candidate.integrity,
+      sizeBytes: candidate.sizeBytes,
+    }),
+  })),
 ])
 
 /** How the Host can construct candidate-bound review evidence before authorization. */
@@ -45,7 +61,6 @@ export type CatalogReviewEvidenceSupport = 'package-pinned' | 'runtime-bound' | 
 
 /** Reject signed eligibility that has no exact review record understood by this package build. */
 export function catalogReviewEvidenceSupport(entry: CatalogEntry): CatalogReviewEvidenceSupport {
-  if (entry.kind === 'mcp') return 'runtime-bound'
   const identity = {
     kind: entry.kind,
     candidateRef: entry.candidateRef,
@@ -57,8 +72,11 @@ export function catalogReviewEvidenceSupport(entry: CatalogEntry): CatalogReview
       sizeBytes: entry.artifact.sizeBytes,
     },
   }
-  return PACKAGE_PINNED_REVIEW_IDENTITIES.some(candidate => canonicalJson(candidate) === canonicalJson(identity))
-    ? 'package-pinned'
+  if (PACKAGE_PINNED_REVIEW_IDENTITIES.some(candidate => canonicalJson(candidate) === canonicalJson(identity))) {
+    return 'package-pinned'
+  }
+  return RUNTIME_BOUND_REVIEW_IDENTITIES.some(candidate => canonicalJson(candidate) === canonicalJson(identity))
+    ? 'runtime-bound'
     : 'unavailable'
 }
 
@@ -178,12 +196,12 @@ export function verifyBootstrapCatalog(now = Date.now()): VerifiedCatalog {
 export function catalogListResponse(
   catalog: VerifiedCatalog,
   hostCapabilities: CatalogHostCapabilities = {
-    profileTransaction: false,
+    managedPluginLifecycle: false,
     dynamicMcpConnection: false,
     durableContinuation: false,
     skillRegistry: false,
     toolRegistry: false,
-    loaderObservation: false,
+    loaderMutation: false,
     acquisition: false,
     reason: 'host-capability',
   },
@@ -196,12 +214,12 @@ export function catalogListResponse(
   },
 ): CatalogListResponse {
   const { envelope } = catalog
-  const ownersAvailable = hostCapabilities.profileTransaction
+  const ownersAvailable = hostCapabilities.managedPluginLifecycle
     && hostCapabilities.dynamicMcpConnection
     && hostCapabilities.durableContinuation
     && hostCapabilities.skillRegistry
     && hostCapabilities.toolRegistry
-    && hostCapabilities.loaderObservation
+    && hostCapabilities.loaderMutation
   if (
     (hostCapabilities.acquisition && !ownersAvailable)
     || hostCapabilities.reason !== (hostCapabilities.acquisition ? null : 'host-capability')

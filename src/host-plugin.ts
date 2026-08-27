@@ -1,24 +1,32 @@
-/** Independent Extension Center Host lifecycle and dynamic owner activation. */
+/** Independent Extension Center Host lifecycle assembled on official DSH services. */
 
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { symbols, type Context } from '@deepseek-ai/cordis'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { EXTENSION_CENTER_RPC_CHANNEL } from './catalog-contract.ts'
-import { CatalogSnapshotManager, catalogEndpoint } from './catalog-refresh.ts'
+import { catalogListResponse } from './catalog.ts'
+import { CatalogSnapshotManager, canonicalCatalogUrl } from './catalog-refresh.ts'
 import {
   ArtifactFetcher,
   CenterStateStore,
   FileTargetLock,
+  bindHostOwners,
   hostCapabilities,
-  loadHostOwnerDefinitions,
-  probeHostOwners,
-  type HostOwnerDefinitions,
   type HostOwners,
+  type LoaderOwner,
 } from './host/index.ts'
-import type { LifecycleProvider, PreparedProviderOperation } from './providers/index.ts'
 import {
-  LoaderPluginRuntimeProbe,
+  InternalTaskContinuationOwner,
+  createInternalTaskContinuations,
+  type ContinuationAgentPresets,
+  type ContinuationAgents,
+  type ContinuationSessionPersistence,
+  type ContinuationSessions,
+} from './internal/continuation/index.ts'
+import { CenterMcpConnections } from './internal/mcp/index.ts'
+import { isOfficialProfileAmbiguityError } from './internal/plugin/index.ts'
+import {
   McpLifecycleProvider,
   PluginLifecycleProvider,
   SkillLifecycleProvider,
@@ -34,51 +42,24 @@ import {
   type HostRpcGeneration,
   type HostRpcServices,
 } from './service/rpc-service.ts'
-import type { HostCapabilityProjection } from './service/rpc-contract.ts'
 import { FileOperationStore, FilePlanStore } from './storage/index.ts'
 
 /** Cordis identity for the independent Extension Center Host half. */
 export const name = 'extension-center'
 
-/** Connection is the only hard dependency; writable owners activate dynamically. */
+/** Connection is the carrier; internal bindings track all other official services. */
 export const inject = ['connection']
-
-const WRITABLE_OWNER_SERVICES = Object.freeze([
-  'profileTransactions',
-  'mcpConnections',
-  'taskContinuations',
-  'skills',
-  'tools',
-  'loader',
-])
-
-type HostOwner = HostOwners[keyof HostOwners]
-
-function originalOwner(owner: HostOwner): HostOwner {
-  if (owner === null) return null
-  const original = (owner as unknown as Readonly<Record<symbol, unknown>>)[symbols.original]
-  return original === undefined ? owner : original as HostOwner
-}
-
-function sameOwnerGeneration(captured: HostOwners, current: HostOwners): boolean {
-  return originalOwner(captured.profileTransactions) === originalOwner(current.profileTransactions)
-    && originalOwner(captured.mcpConnections) === originalOwner(current.mcpConnections)
-    && originalOwner(captured.taskContinuations) === originalOwner(current.taskContinuations)
-    && originalOwner(captured.skills) === originalOwner(current.skills)
-    && originalOwner(captured.tools) === originalOwner(current.tools)
-    && originalOwner(captured.loader) === originalOwner(current.loader)
-}
 
 type GenerationDisposer = () => void | Promise<void>
 
 class RetiredOwnerGenerationError extends Error {
   constructor() {
-    super('Extension Center Host owner generation retired')
+    super('Extension Center runtime retired')
     this.name = 'RetiredOwnerGenerationError'
   }
 }
 
-/** Own one writable Host generation until every request and registration is quiescent. */
+/** Drain management requests before releasing Center-owned registrations. */
 class WritableOwnerGeneration implements HostRpcGeneration {
   private readonly controller = new AbortController()
   private readonly tasks = new Set<Promise<unknown>>()
@@ -88,26 +69,12 @@ class WritableOwnerGeneration implements HostRpcGeneration {
 
   constructor(
     private readonly withdraw: () => void,
-    private readonly report: (error: unknown) => void,
+    private readonly reportFailure: (error: unknown) => void,
   ) {}
 
-  /** Signal shared by setup, recovery, and every request in this generation. */
+  /** Cancellation shared by startup recovery and management requests. */
   get signal(): AbortSignal {
     return this.controller.signal
-  }
-
-  /** Start setup without keeping the Cordis injection callback pending. */
-  start(work: (signal: AbortSignal) => Promise<void>): void {
-    const task = this.track(Promise.resolve().then(async () => {
-      this.throwIfRetired()
-      await work(this.signal)
-    }))
-    void task.catch((error: unknown) => {
-      const expectedRetirement = this.signal.aborted || error instanceof RetiredOwnerGenerationError
-      const cleanup = this.retire(error)
-      if (!expectedRetirement) this.report(error)
-      void cleanup.catch(this.report)
-    })
   }
 
   /** Keep a registration under the generation's explicitly ordered disposer. */
@@ -116,32 +83,37 @@ class WritableOwnerGeneration implements HostRpcGeneration {
     this.throwIfRetired()
   }
 
-  /** Publish the generation only after setup and durable recovery finish. */
-  activate(publish: () => void): void {
+  /** Publish only after durable recovery and every internal owner are ready. */
+  activate(): void {
     this.throwIfRetired()
     this.accepting = true
-    publish()
   }
 
-  /** Reject a stale owner identity before publishing any later setup stage. */
-  requireCurrent(current: boolean): void {
-    if (!current && !this.signal.aborted) {
-      void this.retire(new RetiredOwnerGenerationError()).catch(this.report)
-    }
-    this.throwIfRetired()
+  /** Run startup after the owning Cordis callback returns, while retaining cleanup ownership. */
+  start(startup: (signal: AbortSignal) => Promise<void>): void {
+    const task = this.track(Promise.resolve().then(async () => {
+      this.throwIfRetired()
+      await startup(this.signal)
+    }))
+    void task.catch((error: unknown) => {
+      const expectedRetirement = this.signal.aborted || error instanceof RetiredOwnerGenerationError
+      const cleanup = this.retire(error)
+      if (!expectedRetirement) this.reportFailure(error)
+      void cleanup.catch(this.reportFailure)
+    })
   }
 
-  /** Run and drain one RPC against this exact Host owner generation. */
+  /** Run and drain one RPC against this exact Center-owned runtime. */
   async run<T>(outerSignal: AbortSignal, request: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (!this.accepting) throw new RetiredOwnerGenerationError()
     this.throwIfRetired()
-    const signal = AbortSignal.any([outerSignal, this.signal])
+    const signal = AbortSignal.any([outerSignal, this.controller.signal])
     const result = await this.track(request(signal))
     this.throwIfRetired()
     return result
   }
 
-  /** Withdraw writes, abort work, await quiescence, then release registrations in reverse order. */
+  /** Withdraw writes, abort work, await quiescence, then release registrations. */
   retire(reason: unknown = new RetiredOwnerGenerationError()): Promise<void> {
     if (this.cleanup !== undefined) return this.cleanup
     this.accepting = false
@@ -159,13 +131,13 @@ class WritableOwnerGeneration implements HostRpcGeneration {
         }
       }
       if (failures.length === 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, 'Extension Center owner generation cleanup failed')
+      if (failures.length > 1) throw new AggregateError(failures, 'Extension Center runtime cleanup failed')
     })()
     return this.cleanup
   }
 
   private throwIfRetired(): void {
-    if (this.signal.aborted) throw this.signal.reason
+    if (this.controller.signal.aborted) throw this.controller.signal.reason
   }
 
   private track<T>(task: Promise<T>): Promise<T> {
@@ -176,15 +148,18 @@ class WritableOwnerGeneration implements HostRpcGeneration {
   }
 }
 
-/** Product-owned Host configuration; credentials and arbitrary commands are intentionally absent. */
+/** Product-owned Host configuration; credentials and arbitrary commands are absent. */
 export interface Config {
   readonly root?: string
   readonly maximumArtifactRedirects?: number
   readonly allowedArtifactRedirectHosts?: readonly string[]
   readonly mcpRuntimes?: readonly AdmittedMcpRuntime[]
-  readonly catalogTrustedOrigin?: string
+  readonly catalogTrustedUrl?: string
   readonly catalogFetchTimeoutMs?: number
   readonly catalogRefreshIntervalMs?: number
+  /** Absolute current `@deepseek-ai/dsh` CLI entrypoint; defaults to this Host's startup entrypoint. */
+  readonly dshCliEntrypoint?: string
+  readonly dshCliTimeoutMs?: number
 }
 
 interface ResolvedConfig {
@@ -193,9 +168,11 @@ interface ResolvedConfig {
   readonly maximumArtifactRedirects: number
   readonly allowedArtifactRedirectHosts: readonly string[]
   readonly mcpRuntimes: readonly AdmittedMcpRuntime[]
-  readonly catalogTrustedOrigin: string | null
+  readonly catalogTrustedUrl: string | null
   readonly catalogFetchTimeoutMs: number
   readonly catalogRefreshIntervalMs: number
+  readonly dshCliEntrypoint: string | undefined
+  readonly dshCliTimeoutMs: number
 }
 
 interface ConnectionContext {
@@ -213,16 +190,14 @@ interface RuntimeResources {
   readonly inventory: HostInventoryService
   readonly intentPlans: IntentPlanService
   readonly runner: OperationRunner
-  readonly skill: LifecycleProvider
-  readonly mcp: LifecycleProvider
+  readonly skill: SkillLifecycleProvider
+  readonly mcp: McpLifecycleProvider
+  readonly plugin: PluginLifecycleProvider
 }
 
-interface SharedResources {
-  readonly resolved: ResolvedConfig
-  readonly state: CenterStateStore
-  readonly operations: FileOperationStore
-  readonly locks: FileTargetLock
-  readonly getCatalog: () => ReturnType<CatalogSnapshotManager['current']>['catalog']
+function sameOrBelow(root: string, candidate: string): boolean {
+  const value = relative(resolve(root), resolve(candidate))
+  return value === '' || value !== '..' && !value.startsWith(`..${sep}`) && !isAbsolute(value)
 }
 
 function resolvedConfig(value: Config = {}): ResolvedConfig {
@@ -232,19 +207,26 @@ function resolvedConfig(value: Config = {}): ResolvedConfig {
   const root = resolve(configuredRoot && configuredRoot.length > 0
     ? configuredRoot
     : join(hostHome, 'extension-center'))
-  const maximumArtifactRedirects = value.maximumArtifactRedirects ?? 0
+  const profilesRoot = join(hostHome, 'profiles')
+  if (root === hostHome || sameOrBelow(profilesRoot, root) || sameOrBelow(root, profilesRoot)) {
+    throw new Error('Extension Center root must not overlap the official DSH home or Profile state')
+  }
+  const maximumArtifactRedirects = value.maximumArtifactRedirects ?? 1
   if (!Number.isSafeInteger(maximumArtifactRedirects) || maximumArtifactRedirects < 0 || maximumArtifactRedirects > 5) {
     throw new Error('maximumArtifactRedirects must be an integer between zero and five')
   }
-  const hosts = value.allowedArtifactRedirectHosts ?? []
+  const hosts = value.allowedArtifactRedirectHosts ?? [
+    'objects.githubusercontent.com',
+    'release-assets.githubusercontent.com',
+  ]
   if (!Array.isArray(hosts) || hosts.length > 16 || hosts.some(host => typeof host !== 'string'
     || host !== host.toLowerCase() || !/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host))) {
     throw new Error('allowedArtifactRedirectHosts must contain canonical lower-case DNS names')
   }
   const mcpRuntimes = value.mcpRuntimes ?? []
   if (!Array.isArray(mcpRuntimes) || mcpRuntimes.length > 32) throw new Error('mcpRuntimes exceeds its Host allowlist bound')
-  const catalogTrustedOrigin = value.catalogTrustedOrigin?.trim() ?? null
-  if (catalogTrustedOrigin !== null) catalogEndpoint(catalogTrustedOrigin)
+  const catalogTrustedUrl = value.catalogTrustedUrl ?? null
+  if (catalogTrustedUrl !== null) canonicalCatalogUrl(catalogTrustedUrl)
   const catalogFetchTimeoutMs = value.catalogFetchTimeoutMs ?? 10_000
   if (!Number.isSafeInteger(catalogFetchTimeoutMs) || catalogFetchTimeoutMs < 1_000 || catalogFetchTimeoutMs > 60_000) {
     throw new Error('catalogFetchTimeoutMs must be an integer between 1000 and 60000')
@@ -254,6 +236,14 @@ function resolvedConfig(value: Config = {}): ResolvedConfig {
     || catalogRefreshIntervalMs < 60_000 || catalogRefreshIntervalMs > 86_400_000) {
     throw new Error('catalogRefreshIntervalMs must be an integer between 60000 and 86400000')
   }
+  const configuredCli = value.dshCliEntrypoint?.trim()
+  if (configuredCli !== undefined && (!isAbsolute(configuredCli) || configuredCli.length === 0)) {
+    throw new Error('dshCliEntrypoint must be an absolute path')
+  }
+  const dshCliTimeoutMs = value.dshCliTimeoutMs ?? 120_000
+  if (!Number.isSafeInteger(dshCliTimeoutMs) || dshCliTimeoutMs < 1_000 || dshCliTimeoutMs > 600_000) {
+    throw new Error('dshCliTimeoutMs must be an integer between 1000 and 600000')
+  }
   return Object.freeze({
     root,
     hostHome,
@@ -262,96 +252,86 @@ function resolvedConfig(value: Config = {}): ResolvedConfig {
     mcpRuntimes: Object.freeze(mcpRuntimes.map(runtime => runtime.transport === 'stdio'
       ? Object.freeze({ ...runtime, fixedArgs: Object.freeze([...runtime.fixedArgs]) })
       : Object.freeze({ ...runtime }))),
-    catalogTrustedOrigin,
+    catalogTrustedUrl,
     catalogFetchTimeoutMs,
     catalogRefreshIntervalMs,
+    dshCliEntrypoint: configuredCli === undefined ? undefined : resolve(configuredCli),
+    dshCliTimeoutMs,
   })
 }
 
-class UnavailableProvider implements LifecycleProvider {
-  constructor(readonly kind: LifecycleProvider['kind']) {}
-  observe(): Promise<null> { return Promise.resolve(null) }
-  prepare(): Promise<PreparedProviderOperation> { return Promise.reject(new Error(`${this.kind} Host owner is unavailable`)) }
-  recoveryPoint(): null { return null }
-  apply(): Promise<never> { return Promise.reject(new Error(`${this.kind} Host owner is unavailable`)) }
-  verify(): Promise<never> { return Promise.reject(new Error(`${this.kind} Host owner is unavailable`)) }
-  rollback(): Promise<never> { return Promise.reject(new Error(`${this.kind} Host owner is unavailable`)) }
-  recover(): Promise<null> { return Promise.resolve(null) }
-  cleanup(): Promise<void> { return Promise.resolve() }
+function requiredService<T>(host: ConnectionContext, name: string, methods: readonly string[]): T {
+  const value = host.get(name)
+  if (typeof value !== 'object' || value === null
+    || methods.some(method => typeof (value as Readonly<Record<string, unknown>>)[method] !== 'function')) {
+    throw new Error(`official DSH service ${JSON.stringify(name)} is incompatible with the Extension Center`)
+  }
+  return value as T
 }
 
 function createRuntime(
-  shared: SharedResources,
+  resolved: ResolvedConfig,
+  state: CenterStateStore,
+  operations: FileOperationStore,
+  locks: FileTargetLock,
+  getCatalog: () => ReturnType<CatalogSnapshotManager['current']>['catalog'],
   owners: HostOwners,
-  recoveryExecutable: Awaited<ReturnType<typeof installPackagedRecoveryExecutable>> | null,
-  capabilities?: HostCapabilityProjection,
+  plugin: PluginLifecycleProvider,
+  recoveryExecutable: Awaited<ReturnType<typeof installPackagedRecoveryExecutable>>,
 ): RuntimeResources {
-  const plans = new FilePlanStore(shared.resolved.root, recoveryExecutable)
-  const skill = owners.skills === null
-    ? new UnavailableProvider('skill')
-    : new SkillLifecycleProvider(shared.resolved.root, shared.state, owners.skills)
-  const mcp = owners.mcpConnections === null
-    ? new UnavailableProvider('mcp')
-    : new McpLifecycleProvider(shared.state, owners.mcpConnections, shared.resolved.mcpRuntimes)
-  const plugin = owners.profileTransactions === null || owners.loader === null
-    ? new UnavailableProvider('plugin')
-    : new PluginLifecycleProvider(
-      shared.state,
-      owners.profileTransactions,
-      new LoaderPluginRuntimeProbe(owners.loader),
-    )
+  if (owners.skills === null || owners.mcpConnections === null || owners.loader === null) {
+    throw new Error('official DSH registries are incomplete for Extension Center P0')
+  }
+  const plans = new FilePlanStore(resolved.root, recoveryExecutable)
+  const skill = new SkillLifecycleProvider(resolved.root, state, owners.skills)
+  const mcp = new McpLifecycleProvider(state, owners.mcpConnections, resolved.mcpRuntimes)
   const inventory = new HostInventoryService(
-    shared.state,
+    state,
     owners,
-    shared.getCatalog,
-    mcp instanceof McpLifecycleProvider ? version => mcp.inspect(version) : null,
-    capabilities === undefined ? undefined : () => capabilities,
+    getCatalog,
+    plugin,
+    version => mcp.inspect(version),
   )
   const providers: LifecycleProviders = { plugin, mcp, skill }
   const intentPlans = new IntentPlanService(
-    shared.state,
+    state,
     plans,
     inventory,
     owners,
-    shared.getCatalog,
+    getCatalog,
+    plugin,
     {
-      mcpRuntime: (candidateRef, configuration) => mcp instanceof McpLifecycleProvider
-        ? mcp.preflight(candidateRef, configuration)
-        : Promise.resolve(null),
-      mcpOptions: candidateRef => mcp instanceof McpLifecycleProvider
-        ? mcp.options(candidateRef)
-        : Promise.resolve([]),
+      mcpRuntime: (candidateRef, configuration) => mcp.preflight(candidateRef, configuration),
+      mcpOptions: candidateRef => mcp.options(candidateRef),
     },
   )
   const runner = new OperationRunner(
-    shared.state,
+    state,
     plans,
-    shared.operations,
-    shared.locks,
-    new ArtifactFetcher(shared.resolved.root, {
-      maximumRedirects: shared.resolved.maximumArtifactRedirects,
-      allowedCrossOriginHosts: shared.resolved.allowedArtifactRedirectHosts,
+    operations,
+    locks,
+    new ArtifactFetcher(resolved.root, {
+      maximumRedirects: resolved.maximumArtifactRedirects,
+      allowedCrossOriginHosts: resolved.allowedArtifactRedirectHosts,
     }),
     intentPlans,
     providers,
-    shared.getCatalog,
   )
-  return Object.freeze({ owners, plans, inventory, intentPlans, runner, skill, mcp })
+  return Object.freeze({ owners, plans, inventory, intentPlans, runner, skill, mcp, plugin })
 }
 
 function rpcServices(
   runtime: RuntimeResources,
   catalogs: CatalogSnapshotManager,
-  shared: SharedResources,
-  acquisition: CapabilityAcquisitionService | null,
-  capabilities?: HostCapabilityProjection,
-  generation?: HostRpcGeneration,
+  getCatalog: () => ReturnType<CatalogSnapshotManager['current']>['catalog'],
+  acquisition: CapabilityAcquisitionService,
+  generation: HostRpcGeneration,
 ): HostRpcServices {
   return Object.freeze({
     owners: runtime.owners,
-    ...(capabilities === undefined ? {} : { capabilities }),
-    ...(generation === undefined ? {} : { generation }),
-    catalog: shared.getCatalog,
+    capabilities: hostCapabilities(runtime.owners),
+    generation,
+    catalog: getCatalog,
     catalogStatus: () => catalogs.current().status,
     refreshCatalog: () => catalogs.refresh(),
     inventory: runtime.inventory,
@@ -362,120 +342,192 @@ function rpcServices(
   })
 }
 
-/**
- * Register the Host using an already loaded owner-Definition set.
- *
- * This internal entrypoint lets the assembled lifecycle regression provide the
- * same Definition identities as its late owner services. Package consumers use
- * {@link apply}, which loads the installed official Definitions.
- */
-export async function applyWithHostOwnerDefinitions(
-  ctx: Context,
-  config: Config,
-  definitions: HostOwnerDefinitions,
-): Promise<void> {
+/** Assemble every managed lifecycle inside one independent plugin on official DSH rc.2. */
+export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const host = ctx as unknown as ConnectionContext
   const resolved = resolvedConfig(config)
   const state = new CenterStateStore(resolved.root)
   await state.initialize()
   const catalogs = new CatalogSnapshotManager(resolved.root, {
-    trustedOrigin: resolved.catalogTrustedOrigin,
+    trustedUrl: resolved.catalogTrustedUrl,
     fetchTimeoutMs: resolved.catalogFetchTimeoutMs,
   })
   await catalogs.initialize()
   const getCatalog = () => catalogs.current().catalog
-  if (resolved.catalogTrustedOrigin !== null) {
+  if (resolved.catalogTrustedUrl !== null) {
     const timer = setInterval(() => { void catalogs.refresh() }, resolved.catalogRefreshIntervalMs)
     timer.unref()
     ctx.effect(() => () => { clearInterval(timer) }, 'extension-center: catalog refresh')
   }
-  const shared: SharedResources = Object.freeze({
-    resolved,
-    state,
-    operations: new FileOperationStore(resolved.root),
-    locks: new FileTargetLock(resolved.root),
-    getCatalog,
-  })
-  let activeRpc: HostRpcServices | null = null
-  let activeGeneration: WritableOwnerGeneration | null = null
 
-  const writableOwners = ctx.inject(WRITABLE_OWNER_SERVICES, (ownerContext: Context) => {
-    const owners = probeHostOwners(ownerContext as unknown as ConnectionContext, definitions)
-    if (!hostCapabilities(owners).acquisition) return
-    let generation!: WritableOwnerGeneration
-    generation = new WritableOwnerGeneration(
-      () => {
-        if (activeGeneration !== generation) return
-        activeGeneration = null
-        activeRpc = null
-      },
-      error => ownerContext.logger.error(error),
-    )
-    ownerContext.effect(
-      () => () => generation.retire(),
-      'extension-center: writable Host owner generation',
-    )
-    const generationIsCurrent = () => sameOwnerGeneration(
-      owners,
-      probeHostOwners(ownerContext as unknown as ConnectionContext, definitions),
-    )
-    generation.start(async (signal) => {
-      const recoveryExecutable = await installPackagedRecoveryExecutable(resolved.root, resolved.hostHome)
-      generation.requireCurrent(generationIsCurrent())
-      const runtime = createRuntime(shared, owners, recoveryExecutable)
-      const skill = runtime.skill
-      if (skill instanceof SkillLifecycleProvider) {
-        generation.addResource(skill.register())
-      }
-      await runtime.runner.recover(signal)
-      generation.requireCurrent(generationIsCurrent())
-      const acquisition = new CapabilityAcquisitionService(
-        state,
-        runtime.inventory,
-        runtime.intentPlans,
-        runtime.plans,
-        shared.operations,
-        owners,
-        getCatalog,
-      )
-      generation.addResource(acquisition.registerVerifier())
-      await acquisition.recoverApprovedPlans(signal)
-      generation.requireCurrent(generationIsCurrent())
-      for (const definition of capabilityToolDefinitions(acquisition)) {
-        generation.addResource(owners.tools!.register(definition))
-      }
-      generation.requireCurrent(generationIsCurrent())
-      const ready = rpcServices(runtime, catalogs, shared, acquisition, undefined, generation)
-      generation.activate(() => {
-        activeGeneration = generation
-        activeRpc = ready
+  const mcpFiber = ctx.plugin(CenterMcpConnections, { root: resolved.root })
+  await mcpFiber
+
+  const continuationBinding = ctx.inject(
+    ['agentPresets', 'agents', 'sessions', 'sessionPersistence'],
+    async (ownerContext: Context) => {
+      const ownerHost = ownerContext as unknown as ConnectionContext
+      const owner = await createInternalTaskContinuations({
+        root: join(resolved.root, 'continuation'),
+        agentPresets: requiredService<ContinuationAgentPresets>(ownerHost, 'agentPresets', ['mount']),
+        agents: requiredService<ContinuationAgents>(ownerHost, 'agents', ['get', 'resume']),
+        sessions: requiredService<ContinuationSessions>(ownerHost, 'sessions', ['get', 'flush']),
+        sessionPersistence: requiredService<ContinuationSessionPersistence>(ownerHost, 'sessionPersistence', ['load']),
+        observeLifecycle: requestReconciliation => {
+          const disposers = [
+            ownerContext.on('agent/created', requestReconciliation),
+            ownerContext.on('agent/status', requestReconciliation),
+            ownerContext.on('session/event', requestReconciliation),
+          ]
+          return () => { for (const dispose of disposers.reverse()) dispose() }
+        },
+        logger: { warn: message => { ownerContext.logger.warn(message) } },
       })
-    })
-  })
-  ctx.effect(() => () => writableOwners.dispose(), 'extension-center: writable owner binding')
+      ownerContext.effect(() => () => owner.dispose(), 'extension-center: continuation owner')
+      ownerContext.provide('taskContinuations', owner)
+      await owner.reconcile()
+    },
+  )
+  await continuationBinding
 
-  const handler = createHostRpcHandler(() => {
-    if (activeRpc !== null) return activeRpc
-    const observed = probeHostOwners(host, definitions)
-    const ownerCapabilities = hostCapabilities(observed)
-    const readCapabilities = ownerCapabilities.acquisition
-      ? Object.freeze({ ...ownerCapabilities, acquisition: false as const, reason: 'host-capability' as const })
-      : ownerCapabilities
-    return rpcServices(
-      createRuntime(shared, observed, null, readCapabilities),
-      catalogs,
-      shared,
-      null,
-      readCapabilities,
-    )
-  })
+  const operations = new FileOperationStore(resolved.root)
+  const locks = new FileTargetLock(resolved.root)
+  let activeRpc: HostRpcServices | null = null
+  let activeOwnerGeneration: WritableOwnerGeneration | null = null
+  const writableBinding = ctx.inject(
+    ['mcpConnections', 'taskContinuations', 'skills', 'tools', 'loader'],
+    async (ownerContext: Context) => {
+      const ownerHost = ownerContext as unknown as ConnectionContext
+      const mcpConnections = requiredService<CenterMcpConnections>(ownerHost, 'mcpConnections', [
+        'snapshot', 'get', 'getRemoved', 'configure', 'enable', 'disable', 'update', 'remove', 'restore', 'purge',
+      ])
+      if (!(mcpConnections instanceof CenterMcpConnections)) {
+        throw new Error('mcpConnections is not owned by this Extension Center')
+      }
+      const continuations = requiredService<Awaited<ReturnType<typeof createInternalTaskContinuations>>>(
+        ownerHost,
+        'taskContinuations',
+        ['create', 'reserve', 'get', 'list', 'cancel', 'supersede', 'registerVerifier', 'reconcile', 'dispose'],
+      )
+      if (!(continuations instanceof InternalTaskContinuationOwner)) {
+        throw new Error('taskContinuations is not owned by this Extension Center')
+      }
+      const loader = requiredService<LoaderOwner>(ownerHost, 'loader', ['create', 'update', 'remove', 'await', 'entries'])
+      const recoveryEntrypoint = resolved.dshCliEntrypoint ?? process.argv[1]
+      if (recoveryEntrypoint === undefined) {
+        throw new Error('official DSH CLI entrypoint is unavailable for standalone recovery')
+      }
+      const recoveryExecutable = await installPackagedRecoveryExecutable(resolved.root, {
+        entrypointPath: recoveryEntrypoint,
+        hostHome: resolved.hostHome,
+        timeoutMs: resolved.dshCliTimeoutMs,
+      })
+      const plugin = new PluginLifecycleProvider(state, loader, {
+        hostHome: resolved.hostHome,
+        centerPackageName: 'dsh-plugin-extension-center',
+        officialDsh: recoveryExecutable.officialDsh,
+      })
+      const owners = bindHostOwners(ownerHost, {
+        managedPlugins: plugin,
+        mcpConnections,
+        taskContinuations: continuations,
+      })
+      if (!hostCapabilities(owners).acquisition) {
+        throw new Error('official DSH rc.2 does not expose every Extension Center service dependency')
+      }
+      let generation!: WritableOwnerGeneration
+      generation = new WritableOwnerGeneration(
+        () => {
+          if (activeOwnerGeneration !== generation) return
+          activeOwnerGeneration = null
+          activeRpc = null
+        },
+        (error: unknown) => { ownerContext.logger.error(error) },
+      )
+      ownerContext.effect(() => () => generation.retire(), 'extension-center: runtime generation')
+      generation.start(async (signal) => {
+        try {
+          await plugin.initialize()
+        } catch (error: unknown) {
+          if (!isOfficialProfileAmbiguityError(error)) throw error
+        }
+        const runtime = createRuntime(
+          resolved,
+          state,
+          operations,
+          locks,
+          getCatalog,
+          owners,
+          plugin,
+          recoveryExecutable,
+        )
+        generation.addResource(runtime.skill.register())
+        await runtime.runner.recover(signal)
+        const acquisition = new CapabilityAcquisitionService(
+          state,
+          runtime.inventory,
+          runtime.intentPlans,
+          runtime.plans,
+          operations,
+          owners,
+          getCatalog,
+        )
+        generation.addResource(acquisition.registerVerifier())
+        await acquisition.recoverApprovedPlans(signal)
+        for (const definition of capabilityToolDefinitions(acquisition)) {
+          generation.addResource(owners.tools!.register(definition))
+        }
+        await continuations.reconcile(signal)
+        generation.activate()
+        activeOwnerGeneration = generation
+        activeRpc = rpcServices(runtime, catalogs, getCatalog, acquisition, generation)
+      })
+    },
+  )
+  await writableBinding
+
+  const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+    const services = activeRpc
+    if (services === null) {
+      if (signal.aborted) {
+        return { ok: false, error: { code: 'cancelled', message: 'request was cancelled', details: {} } }
+      }
+      if (endpoint === 'catalog/list' || endpoint === 'catalog/refresh') {
+        try {
+          if (typeof payload !== 'object' || payload === null || Array.isArray(payload)
+            || Object.keys(payload).length !== 1
+            || (payload as Readonly<Record<string, unknown>>).protocolVersion !== 1) {
+            throw new Error('request contains unexpected fields')
+          }
+          const snapshot = endpoint === 'catalog/refresh' ? await catalogs.refresh() : catalogs.current()
+          return {
+            ok: true,
+            value: catalogListResponse(snapshot.catalog, undefined, snapshot.status),
+          }
+        } catch (error: unknown) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: error instanceof Error ? error.message : 'catalog request was refused',
+              details: { issues: [] },
+            },
+          }
+        }
+      }
+      return {
+        ok: false,
+        error: {
+          code: 'bad-request',
+          message: 'Extension Center lifecycle owners are not active',
+          details: { issues: [] },
+        },
+      }
+    }
+    return await createHostRpcHandler(services)(endpoint, payload, signal)
+  }
   ctx.effect(
     () => host.connection.rpc.handle(EXTENSION_CENTER_RPC_CHANNEL, handler, { authority: 'loopback' }),
     'extension-center: loopback RPC',
   )
-}
-
-/** Register read-only Store access immediately and writable acquisition while all six owners are live. */
-export async function apply(ctx: Context, config: Config = {}): Promise<void> {
-  await applyWithHostOwnerDefinitions(ctx, config, await loadHostOwnerDefinitions())
 }

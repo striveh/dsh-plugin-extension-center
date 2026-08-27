@@ -8,6 +8,7 @@ import { type McpRuntimePreflight, type McpRuntimeOption } from '../providers/in
 import { FilePlanStore } from '../storage/index.ts';
 import type { IntentPreviewRequest, IntentPreviewResponse, RpcJson, TaskApprovalRow } from './rpc-contract.ts';
 import { HostInventoryService } from './inventory-service.ts';
+import { type ManagedPluginSnapshotPort } from './review-evidence.ts';
 /** Admission refusal that retains the exact policy result for strict RPC projection. */
 export declare class IntentPolicyDeniedError extends Error {
     readonly policy: Extract<CandidatePolicyResult, {
@@ -42,9 +43,10 @@ export declare class IntentPlanService {
     private readonly inventory;
     private readonly owners;
     private readonly catalog;
+    private readonly managedPlugins;
     private readonly preflight;
     private readonly planTtlMs;
-    constructor(store: CenterStateStore, plans: FilePlanStore, inventory: HostInventoryService, owners: HostOwners, catalog: () => VerifiedCatalog, preflight: IntentProviderPreflight, planTtlMs?: number);
+    constructor(store: CenterStateStore, plans: FilePlanStore, inventory: HostInventoryService, owners: HostOwners, catalog: () => VerifiedCatalog, managedPlugins: ManagedPluginSnapshotPort, preflight: IntentProviderPreflight, planTtlMs?: number);
     /** Mint a plan from a browser Store/Installed action or an internally verified task resolution. */
     preview(request: IntentPreviewRequest, authority: 'loopback-browser' | 'model-resolution', nowMs?: number, taskBinding?: TaskIntentBinding | null): Promise<IntentPreviewResponse>;
     /** Re-observe every fence before decision or consumption. */
@@ -54,6 +56,7 @@ export declare class IntentPlanService {
     /** Project safe selectors for an exact MCP candidate's currently usable Host runtimes. */
     configurationOptions(input: Readonly<{
         candidateRef: string;
+        operationKind: OperationKind;
         targetKey: string | null;
         scopeKey: string;
         profileId: string;

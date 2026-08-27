@@ -1,4 +1,4 @@
-import type { ManagedTargetRecord, StoredContinuationActivation, StoredContinuationActivationIntent, StoredIntent, StoredOperationIndex, StoredProfileBootAck, StoredProviderSnapshot, StoredResolution, StoredTaskReceipt } from './state-store.ts';
+import type { ManagedTargetRecord, StoredContinuationActivation, StoredContinuationActivationIntent, StoredIntent, StoredOperationIndex, StoredProviderSnapshot, StoredResolution, StoredTaskReceipt } from './state-store.ts';
 interface CenterManifest {
     readonly schemaVersion: 1;
     readonly centerId: string;
@@ -18,8 +18,6 @@ export declare function decodeStoredResolution(value: unknown, expectedResolutio
 export declare function decodeOperationIndex(value: unknown, expectedOperationId?: string): StoredOperationIndex;
 /** Decode one pre-mutation owner snapshot and recompute its before-state digest. */
 export declare function decodeProviderSnapshot(value: unknown, root: string, expectedOperationId?: string): StoredProviderSnapshot;
-/** Decode one exact external Profile boot acknowledgement. */
-export declare function decodeProfileBootAck(value: unknown, expectedOperationId?: string): StoredProfileBootAck;
 /** Decode one exact lifecycle result consumed by a continuation verifier. */
 export declare function decodeTaskReceipt(value: unknown, expectedContinuationId?: string): StoredTaskReceipt;
 /** Decode one reservation-to-continuation claim binding. */

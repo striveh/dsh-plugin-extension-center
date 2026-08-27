@@ -11,6 +11,8 @@ export declare function candidateAdmissionFacts(entry: CatalogEntry, operationKi
     reviewEvidenceAvailable: boolean;
     verificationRecipeComplete: boolean;
 }>;
+/** Derive whether this exact operation needs a later Host boot before verification can finish. */
+export declare function operationRestartRequired(entry: CatalogEntry, operationKind: OperationKind): boolean;
 /** Digest of the owner-specific observation recipe enforced by the selected provider implementation. */
 export declare function verificationRecipeDigest(kind: CatalogEntry['kind'], operationKind: OperationKind, desiredState: DesiredState): Sha256Digest;
 //# sourceMappingURL=facts.d.ts.map

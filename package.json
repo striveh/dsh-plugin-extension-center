@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-extension-center",
-  "version": "0.0.0-development",
+  "version": "0.1.0-rc.0",
   "description": "Independent DeepSeek Harness Extension Center for Plugin, MCP connection, and Skill lifecycles",
   "private": true,
   "license": "MIT",
@@ -66,13 +66,21 @@
     "clean:client-build": "node scripts/clean-client-build.mjs",
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "build": "pnpm run clean && tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsdown && pnpm run clean:client-build && node scripts/normalize-build-newlines.mjs",
-    "test": "pnpm run build && vitest run && node --test acceptance/store-only/support.test.mjs acceptance/full-p0/support.test.mjs acceptance/full-p0/build-binding.test.mjs acceptance/full-p0/receipt-binding.test.mjs",
+    "test": "pnpm run build && vitest run && node --test scripts/verify-deterministic-pack.test.mjs acceptance/store-only/support.test.mjs acceptance/full-p0/support.test.mjs acceptance/full-p0/receipt-binding.test.mjs acceptance/full-p0/agent-acquisition.test.mjs acceptance/full-p0/assert-release-ready.test.mjs acceptance/full-p0/break-glass-e2e.test.mjs acceptance/full-p0/controlled-aba.test.mjs acceptance/full-p0/fault-matrix.test.mjs acceptance/release/verify-catalog-sources.test.mjs acceptance/release/verify-github-ci.test.mjs acceptance/release/verify-public-catalog.test.mjs acceptance/release/verify-public-release.test.mjs acceptance/release/verify-runtime-release.test.mjs",
     "test:acceptance:store": "pnpm run build && node acceptance/store-only/run.mjs",
-    "test:acceptance:host-negative": "pnpm run build && node acceptance/full-p0/verify-host-negative.mjs",
-    "test:acceptance:local-head": "pnpm run build && node acceptance/full-p0/verify-local-head.mjs",
+    "test:acceptance:official-rc2": "pnpm run build && node acceptance/full-p0/verify-official-rc2.mjs",
+    "test:acceptance:runtime-release": "node acceptance/release/verify-runtime-release.mjs",
+    "test:acceptance:public-release": "node acceptance/release/verify-public-release.mjs",
+    "test:acceptance:public-catalog": "node acceptance/release/verify-public-catalog.mjs",
+    "test:acceptance:catalog-sources": "node acceptance/release/verify-catalog-sources.mjs",
+    "test:acceptance:github-ci": "node acceptance/release/verify-github-ci.mjs",
+    "test:acceptance:release": "pnpm run test:acceptance:public-release",
+    "test:release-ready": "node acceptance/full-p0/assert-release-ready.mjs",
     "catalog:discover": "pnpm run build && node scripts/catalog-pipeline.mjs discover",
     "catalog:publish": "pnpm run build && node scripts/catalog-pipeline.mjs publish",
-    "pack:preview": "pnpm run build && pnpm pack --dry-run"
+    "catalog:rollover": "pnpm run build && node scripts/rollover-public-catalog.mjs",
+    "pack:preview": "pnpm run build && pnpm pack --dry-run",
+    "verify:pack": "node scripts/verify-deterministic-pack.mjs"
   },
   "keywords": [
     "dsh-plugin",
@@ -101,18 +109,33 @@
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
-    "react": "^18.2.0",
-    "yaml": "2.9.0"
+    "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-client-connection": { "optional": true },
-    "@deepseek-ai/dsh-client-locale": { "optional": true },
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-layout": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-primitives": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-sidebar": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
-    "react": { "optional": true }
+    "@deepseek-ai/dsh-client-connection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-layout": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
@@ -137,8 +160,15 @@
     "react-dom": "^18.2.0",
     "tsdown": "0.22.2",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.8"
+  },
+  "packageManager": "pnpm@11.21.0",
+  "dependencies": {
+    "@deepseek-ai/dsh-mcp-client": "0.1.1-rc.2",
+    "pnpm": "11.7.0",
     "yaml": "2.9.0"
   },
-  "packageManager": "pnpm@11.21.0"
+  "bundledDependencies": [
+    "pnpm"
+  ]
 }

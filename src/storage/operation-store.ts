@@ -39,6 +39,27 @@ interface CurrentPointer {
   readonly headDigest: Sha256Digest
 }
 
+/** @internal Fixed persistence seam used only by deterministic fault acceptance. */
+export type OperationStoreFaultPoint =
+  | 'journal-event-before-write'
+  | 'journal-event-durable-before-current'
+
+/** @internal Exact Center-owned journal write observed by deterministic fault acceptance. */
+export interface OperationStoreFaultContext {
+  readonly operationId: string
+  readonly targetKey: string
+  readonly phase: OperationProjection['phase']
+  readonly eventSequence: number
+  readonly operationDirectory: string
+  readonly currentPath: string
+}
+
+/** @internal Optional deterministic failure callback; production Hosts do not supply one. */
+export type OperationStoreFaultInjector = (
+  point: OperationStoreFaultPoint,
+  context: OperationStoreFaultContext,
+) => void | Promise<void>
+
 /** Durable zero-mutation reservation spanning plan consumption and the first journal event. */
 export interface OperationReservation {
   readonly schemaVersion: typeof STORE_SCHEMA_VERSION
@@ -225,7 +246,10 @@ export class FileOperationStore {
    * Create a store below one center-owned data directory.
    * @param root Exact durable data directory.
    */
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly faultInjector?: OperationStoreFaultInjector,
+  ) {}
 
   /** Exact Center root passed to the pinned standalone recovery executable. */
   centerRoot(): string {
@@ -328,7 +352,16 @@ export class FileOperationStore {
       const event = journal.events.at(-1)!
       const destination = join(directory, eventFilename(event))
       const temporary = join(directory, `.event-${randomUUID()}`)
+      const faultContext: OperationStoreFaultContext = Object.freeze({
+        operationId: journal.operationId,
+        targetKey: journal.targetKey,
+        phase: verifyOperationJournal(journal).phase,
+        eventSequence: event.sequence,
+        operationDirectory: directory,
+        currentPath: join(directory, CURRENT_FILENAME),
+      })
       try {
+        await this.faultInjector?.('journal-event-before-write', faultContext)
         await writeExclusive(temporary, `${canonicalJson(event)}\n`)
         try {
           await link(temporary, destination)
@@ -341,6 +374,7 @@ export class FileOperationStore {
         }
         await unlink(temporary)
         await syncDirectory(directory)
+        await this.faultInjector?.('journal-event-durable-before-current', faultContext)
       } catch (error: unknown) {
         try {
           await unlink(temporary)

@@ -12,7 +12,7 @@ export interface TaskAttemptNeed {
     readonly scopeKey: 'profile:web' | 'project' | 'user';
     readonly platform: 'darwin' | 'linux' | 'windows';
     readonly requiredDataAccess: readonly ('filesystem-read' | 'filesystem-write' | 'network' | 'subprocess')[];
-    readonly maximumAuthority: readonly ('filesystem-read' | 'filesystem-write' | 'network' | 'subprocess')[];
+    readonly maximumAuthority: readonly ('credentials' | 'filesystem-read' | 'filesystem-write' | 'model-context' | 'network' | 'subprocess')[];
 }
 /** Bounded Agent route retained for a new attempt and eventual continuation. */
 export interface TaskAttemptAgentRoute {
@@ -88,7 +88,7 @@ export interface TaskRetryContinuation {
     readonly expiresAtMs: number;
 }
 /** Host-owned lifecycle states exposed for one durable Retry-original continuation. */
-export type TaskRetryContinuationState = 'pending' | 'ready' | 'consumed' | 'claimed' | 'canceled' | 'superseded' | 'expired' | 'invalid';
+export type TaskRetryContinuationState = 'pending' | 'ready' | 'consumed' | 'dispatching' | 'dispatched' | 'claimed' | 'delivery-unknown' | 'canceled' | 'superseded' | 'expired' | 'invalid';
 /** Activity states, including Center-to-Host reconciliation and observation failure. */
 export type TaskRetryContinuationProjectionState = TaskRetryContinuationState | 'reconciling' | 'unavailable';
 /** Public state joined from the Center binding and its exact Host continuation claim. */
