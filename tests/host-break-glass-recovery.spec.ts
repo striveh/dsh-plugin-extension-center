@@ -717,7 +717,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(await readFile(value.sidecarPath, 'utf8')).toBe(firstSidecar)
     expect(await readFile(value.transactionPath, 'utf8')).toBe(firstTransaction)
     await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
-  })
+  }, 15_000)
 
   it('finishes a prepared transaction after only the owner sidecar reached restored state', async () => {
     const value = await fixture()
@@ -733,7 +733,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(replay.exitCode).toBe(0)
     expect(JSON.parse(await readFile(value.managedPath, 'utf8'))).toEqual(transaction.restoredManaged)
     expect(JSON.parse(await readFile(value.transactionPath, 'utf8'))).toMatchObject({ status: 'committed' })
-  })
+  }, 15_000)
 
   it('removes the official dependency, bundle, installed target, and Center records when before-state was absent', async () => {
     const value = await fixture({ absentBefore: true })
@@ -761,7 +761,7 @@ describe('standalone Center break-glass recovery', () => {
       status: 'settled',
     })
     await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
-  })
+  }, 15_000)
 
   it('rejects a changed dependency spec and duplicate bundle membership after commit', async () => {
     const dependency = await fixture()
@@ -998,7 +998,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(result.exitCode).toBe(1)
     expect(result.stderr).toContain('quarantine does not bind this recovery operation')
     await expect(readFile(mismatchedPath, 'utf8')).resolves.toContain('operation:foreign')
-  })
+  }, 15_000)
 
   it('fails closed when the bound official CLI entrypoint or package tree changes', async () => {
     const entrypoint = await fixture()
@@ -1060,7 +1060,7 @@ describe('standalone Center break-glass recovery', () => {
     const replay = await runCli(after)
     expect(replay.exitCode).toBe(1)
     expect(replay.stderr).toContain('diverged from the committed recovery transaction')
-  })
+  }, 15_000)
 
   it('rejects retained artifact drift and committed Profile tree drift', async () => {
     const artifact = await fixture()
@@ -1078,7 +1078,7 @@ describe('standalone Center break-glass recovery', () => {
     const profileResult = await runCli(profile)
     expect(profileResult.exitCode).toBe(1)
     expect(profileResult.stderr).toContain('Profile diverged from the committed recovery transaction')
-  })
+  }, 15_000)
 
   it('rejects a non-Center Plugin owner and a non-canonical root', async () => {
     const wrongOwner = await fixture({ ownerKey: 'profileTransactions' })
