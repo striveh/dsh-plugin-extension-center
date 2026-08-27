@@ -1,6 +1,6 @@
 # Unified Extension Center P0 product specification
 
-Status: normative P0 product and acceptance baseline, 2026-08-27
+Status: normative P0 product and acceptance baseline, 2026-08-28
 
 English | [中文](p0-product-spec.zh.md)
 
@@ -255,13 +255,13 @@ Use pinned synthetic Plugin, MCP, and Skill fixtures with real official extensio
 3. Retain only user-approved recovery data and prove a clean reinstall can either recognize or explicitly discard it.
 4. Bind artifact SHA-256, official Host package identities, catalog revision, platform, browser journey, operation receipts, recovery evidence, continuation evidence, test commands, logs, and remaining uncertainty into one sanitized release receipt.
 5. Repeat the required artifact lane on every declared platform. A different DSH release needs a separate compatibility receipt.
-6. Download the exact public Release asset, prove official-CLI install/update/remove with the runtime receipt, fetch the fixed Pages catalog URL and prove its exact signed revision refresh, and bind passing CI jobs to the exact release commit. The CI, runtime, public-release, and composite receipts must all cross-bind the same exact `main`-push Node 22 attested tarball. Repository Release immutability and protected `v*` tags prevent later mutation but do not prove an external item; each item requires its own passing receipt. The `0.1.0-rc.0` bootstrap records previous artifact, CI, release-ready, and evidence-run inputs as `null`. Every later release must bind a distinct previous artifact and its CI receipt plus the exact successful previous post-publication run; that prior receipt's deployed catalog must equal the current packaged bootstrap, and the new public catalog must be its exact signed adjacent successor.
+6. Download the exact public Release asset, prove official-CLI install/update/remove with the runtime receipt, fetch the fixed Pages catalog URL and prove its exact signed revision refresh, and bind passing CI jobs to the exact release commit. The CI, runtime, public-release, and composite receipts must all cross-bind the same exact `main`-push Node 22 attested tarball. Repository Release immutability and protected `v*` tags prevent later mutation but do not prove an external item; each item requires its own passing receipt. The `0.1.0-rc.0` bootstrap records previous artifact, CI, release-ready, and evidence-run inputs as `null`. Every later release must bind a distinct last successful predecessor artifact and its CI receipt plus that predecessor's exact successful post-publication run; that receipt's deployed catalog must equal the current packaged bootstrap, and the new public catalog must be its exact signed adjacent successor. A published failed candidate is retained as terminal incident evidence and never substitutes for the successful predecessor.
 
 ## Focused verification
 
 Unit and integration tests must cover at least:
 
-- catalog canonicalization, signature threshold, rotation, rollback, freeze, expiry, and last-good selection;
+- catalog canonicalization, signature threshold, rotation, rollback, freeze, expiry, last-good selection, and cross-process monotonic cache commits;
 - Capability RAG retrieval, deterministic policy, ambiguity, external-only leads, and existing-first behavior;
 - plan canonicalization, authority diff, grant binding, idempotency, revision fences, and per-target serialization;
 - separate Plugin/MCP/Skill inventory projections and stale observation handling;
@@ -274,7 +274,7 @@ Unit and integration tests must cover at least:
 
 At minimum, acceptance must reject or recover from:
 
-- catalog tamper, unknown signer, insufficient threshold, rollback, expiry, refresh timeout, and poisoned cache;
+- catalog tamper, unknown signer, insufficient threshold, rollback, expiry, refresh timeout, poisoned cache, out-of-order cross-process refresh, and writer-process crash;
 - artifact hash mismatch, archive traversal, symlink escape, unexpected lifecycle script, missing dependency, and incompatible platform;
 - concurrent plans, owner revision drift, target lock loss, the controlled separately invoked official-CLI ABA sequence, crash at every journal phase, partial pointer replacement, and disk-full simulation;
 - official Plugin CLI add/update/remove failure, required restart not performed, missing declared consumer, MCP early exit or Tool drift, and Skill winner conflict;

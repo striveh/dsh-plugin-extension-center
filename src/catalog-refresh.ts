@@ -18,11 +18,11 @@ import {
   BOOTSTRAP_CATALOG_ROOT,
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from './catalog-data.ts'
+import { withCatalogCacheWriter } from './catalog-cache-reservation.ts'
 import {
   ensurePrivateDirectory,
   openRegularNoFollow,
   safeChild,
-  writeCanonicalExclusive,
 } from './host/files.ts'
 
 const CACHE_SCHEMA_VERSION = 1 as const
@@ -170,6 +170,39 @@ function bootstrapDocument(): SignedCatalogDocument {
   })
 }
 
+function sameSignedDocument(left: SignedCatalogDocument, right: SignedCatalogDocument): boolean {
+  return sameEnvelope(left.envelope, right.envelope)
+    && canonicalSha256(left.signatures) === canonicalSha256(right.signatures)
+}
+
+/** Verify a persisted historical prefix at issuance time without admitting it under the current revision floor. */
+function verifyHistoricalCache(cache: CatalogCache): VerifiedCatalog {
+  const first = cache.chain[0]
+  if (first === undefined) throw new Error('catalog last-good cache chain is empty')
+  const historicalRoot: CatalogRoot = Object.freeze({
+    ...BOOTSTRAP_CATALOG_ROOT,
+    minimumRevision: first.envelope.revision,
+  })
+  let current = verifyCatalog(
+    historicalRoot,
+    first.envelope,
+    first.signatures,
+    Date.parse(first.envelope.issuedAt) + 1,
+  )
+  for (const document of cache.chain.slice(1)) {
+    if (document.envelope.revision !== current.envelope.revision + 1) {
+      throw new Error('catalog historical cache must advance by one revision')
+    }
+    current = verifyCatalogAdvance(
+      historicalRoot,
+      current,
+      document,
+      Date.parse(document.envelope.issuedAt) + 1,
+    )
+  }
+  return current
+}
+
 function verifyCache(cache: CatalogCache, now: number): VerifiedCatalog {
   const [first, ...rest] = cache.chain
   if (first === undefined || !sameEnvelope(first.envelope, BOOTSTRAP_CATALOG_ENVELOPE)
@@ -191,6 +224,51 @@ function verifyCache(cache: CatalogCache, now: number): VerifiedCatalog {
     )
   }
   return verifyCatalog(BOOTSTRAP_CATALOG_ROOT, current.envelope, cache.chain.at(-1)!.signatures, now)
+}
+
+/** Raise a verified legacy cache to the packaged trust floor before any snapshot becomes observable. */
+function reconcileCache(cache: CatalogCache, now: number): Readonly<{
+  cache: CatalogCache
+  catalog: VerifiedCatalog
+  changed: boolean
+}> {
+  const historical = verifyHistoricalCache(cache)
+  const packaged = bootstrapDocument()
+  const anchorIndexes = cache.chain.flatMap((document, index) => (
+    sameSignedDocument(document, packaged) ? [index] : []
+  ))
+  if (anchorIndexes.length > 1) throw new Error('catalog cache repeats the packaged bootstrap')
+  const anchorIndex = anchorIndexes[0]
+  if (anchorIndex !== undefined) {
+    const changed = anchorIndex > 0
+    const reconciled = changed
+      ? Object.freeze({
+          schemaVersion: CACHE_SCHEMA_VERSION,
+          catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
+          chain: Object.freeze(cache.chain.slice(anchorIndex)),
+          acceptedAtMs: cache.acceptedAtMs,
+        })
+      : cache
+    return Object.freeze({
+      cache: reconciled,
+      catalog: verifyCache(reconciled, now),
+      changed,
+    })
+  }
+  if (historical.envelope.revision >= BOOTSTRAP_CATALOG_ENVELOPE.revision) {
+    throw new Error('catalog cache conflicts with the packaged bootstrap revision')
+  }
+  const reconciled: CatalogCache = Object.freeze({
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
+    chain: Object.freeze([packaged]),
+    acceptedAtMs: now,
+  })
+  return Object.freeze({
+    cache: reconciled,
+    catalog: verifyCache(reconciled, now),
+    changed: true,
+  })
 }
 
 async function readCache(path: string): Promise<CatalogCache | undefined> {
@@ -245,6 +323,67 @@ async function replaceCache(path: string, value: CatalogCache): Promise<void> {
     await rm(temporary, { force: true })
     throw error
   }
+}
+
+interface CommittedCatalogCache {
+  readonly cache: CatalogCache
+  readonly catalog: VerifiedCatalog
+  readonly candidateIsCurrent: boolean
+}
+
+function selectMonotonicCache(durable: CatalogCache, candidate: CatalogCache): CatalogCache {
+  const sharedLength = Math.min(durable.chain.length, candidate.chain.length)
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (!sameSignedDocument(durable.chain[index]!, candidate.chain[index]!)) {
+      throw new Error('catalog cache chains bind one revision to different signed content')
+    }
+  }
+  if (candidate.chain.length > durable.chain.length) return candidate
+  if (durable.chain.length > candidate.chain.length) return durable
+  return candidate.acceptedAtMs >= durable.acceptedAtMs ? candidate : durable
+}
+
+async function initializeCatalogCache(path: string, now: number): Promise<CommittedCatalogCache> {
+  return await withCatalogCacheWriter(dirname(path), async () => {
+    const durable = await readCache(path)
+    const candidate: CatalogCache = durable ?? Object.freeze({
+      schemaVersion: CACHE_SCHEMA_VERSION,
+      catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
+      chain: Object.freeze([bootstrapDocument()]),
+      acceptedAtMs: now,
+    })
+    const reconciled = reconcileCache(candidate, now)
+    if (durable === undefined || reconciled.changed) await replaceCache(path, reconciled.cache)
+    return Object.freeze({
+      cache: reconciled.cache,
+      catalog: reconciled.catalog,
+      candidateIsCurrent: true,
+    })
+  })
+}
+
+async function commitCatalogCache(
+  path: string,
+  candidate: CatalogCache,
+  now: number,
+): Promise<CommittedCatalogCache> {
+  return await withCatalogCacheWriter(dirname(path), async () => {
+    const candidateReconciled = reconcileCache(candidate, now)
+    const durable = await readCache(path)
+    const durableReconciled = durable === undefined ? undefined : reconcileCache(durable, now)
+    const selected = durableReconciled === undefined
+      ? candidateReconciled.cache
+      : selectMonotonicCache(durableReconciled.cache, candidateReconciled.cache)
+    const catalog = verifyCache(selected, now)
+    if (durable === undefined || canonicalJson(durable) !== canonicalJson(selected)) {
+      await replaceCache(path, selected)
+    }
+    return Object.freeze({
+      cache: selected,
+      catalog,
+      candidateIsCurrent: sameSignedDocument(selected.chain.at(-1)!, candidateReconciled.cache.chain.at(-1)!),
+    })
+  })
 }
 
 async function responseBytes(response: Response): Promise<Uint8Array> {
@@ -329,23 +468,8 @@ export class CatalogSnapshotManager {
     const directory = join(this.root, 'catalog')
     const path = join(directory, 'last-good.json')
     await ensurePrivateDirectory(directory)
-    let cache = await readCache(path)
-    if (cache === undefined) {
-      const initial: CatalogCache = Object.freeze({
-        schemaVersion: CACHE_SCHEMA_VERSION,
-        catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
-        chain: Object.freeze([bootstrapDocument()]),
-        acceptedAtMs: now,
-      })
-      try {
-        await writeCanonicalExclusive(path, initial)
-      } catch (error: unknown) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      }
-      cache = await readCache(path)
-      if (cache === undefined) throw new Error('catalog bootstrap cache disappeared during initialization')
-    }
-    const catalog = verifyCache(cache, now)
+    const committed = await initializeCatalogCache(path, now)
+    const { cache, catalog } = committed
     this.cache = cache
     this.snapshot = Object.freeze({
       catalog,
@@ -414,23 +538,41 @@ export class CatalogSnapshotManager {
         chain: Object.freeze(chain),
         acceptedAtMs: attemptedAtMs,
       })
-      await replaceCache(join(this.root, 'catalog', 'last-good.json'), cache)
-      this.cache = cache
+      const committed = await commitCatalogCache(join(this.root, 'catalog', 'last-good.json'), cache, attemptedAtMs)
+      this.cache = committed.cache
       this.snapshot = Object.freeze({
-        catalog: changed ? fetched : this.snapshot.catalog,
+        catalog: committed.catalog,
         status: Object.freeze({
-          source: 'remote',
-          freshness: 'fresh',
-          degraded: false,
-          degradedReason: null,
+          source: committed.candidateIsCurrent ? 'remote' : 'last-good',
+          freshness: committed.candidateIsCurrent ? 'fresh' : 'cached',
+          degraded: !committed.candidateIsCurrent,
+          degradedReason: committed.candidateIsCurrent
+            ? null
+            : 'catalog endpoint is older than the durable last-good revision',
           lastRefreshAtMs: attemptedAtMs,
         }),
       })
       return this.snapshot
     } catch (error: unknown) {
+      let failure = error
+      try {
+        const committed = await commitCatalogCache(
+          join(this.root, 'catalog', 'last-good.json'),
+          this.cache,
+          attemptedAtMs,
+        )
+        this.cache = committed.cache
+      } catch (synchronizationError: unknown) {
+        failure = new AggregateError(
+          [error, synchronizationError],
+          `catalog refresh failed and durable cache synchronization failed: ${
+            synchronizationError instanceof Error ? synchronizationError.message : String(synchronizationError)
+          }`,
+        )
+      }
       const catalog = verifyCache(this.cache, attemptedAtMs)
-      const reason = error instanceof Error && error.message.length > 0
-        ? error.message.slice(0, 160)
+      const reason = failure instanceof Error && failure.message.length > 0
+        ? failure.message.slice(0, 160)
         : 'catalog refresh failed'
       this.snapshot = Object.freeze({
         catalog,

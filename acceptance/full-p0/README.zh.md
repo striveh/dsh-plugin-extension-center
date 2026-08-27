@@ -28,7 +28,7 @@ Runner 必须从隔离的官方 rc.2 安装中解析 CLI 与全部 Host package�
 
 - `Lifecycle`：该完整 runner 的终态 receipt 覆盖准确未修改官方 rc.2 artifact 上的浏览器授权与变更、分类型 Plugin/MCP/Skill operation、受控外部 CLI ABA 顺序、packed break-glass recovery 与原任务续行。
 - `Bootstrap release`：rc.0 把前一 Center artifact、前一 CI receipt、前一 release-ready receipt 与前一 evidence run 明确记录为 `null`。其 package 内置签名目录 revision `rN` 仍必须从 Pages 刷新到已提交且已签名的准确相邻后继 `rN+1`，并通过公开 GitHub Release 安装、绑定准确 commit 的 Ubuntu/macOS CI 与确定性 pack attestation 验证。
-- `Update release`：此后的每个 prerelease 或 stable release 必须证明不同前一版本到当前版本的 Center artifact 更新，并绑定前一 Release 的准确成功 post-publication receipt。前一 receipt 已部署的 `rN` 必须成为当前 artifact 的 package 内置 bootstrap；当前 Pages deployment 则必须是已签名的相邻后继 `rN+1`。
+- `Update release`：此后的每个 prerelease 或 stable release 必须证明从最后一个成功版本到当前版本的不同 Center artifact 更新，并绑定该成功前序的准确 post-publication receipt。恢复候选 rc.2 因此从 rc.0 更新，并把 rc.1 单独绑定为 `not-release-ready`；stable 从成功 rc.2 更新。成功前序 receipt 已部署的 `rN` 必须成为当前 artifact 的 package 内置 bootstrap；当前 Pages deployment 则必须是已签名的相邻后继 `rN+1`。历史 rc.0 使用 release-ready schema 2；rc.2 与后续 receipt 使用 schema 3，使 rc.1 事故保持传递绑定。
 - `External`：Release、Pages 与 CI 状态只能来自绑定准确已发布 commit 和 asset 的生成 receipt。Repository setting、源码文件、已配置 workflow 与本地测试输出只是输入，不是发布证据。
 - `Advisory`：live provider compatibility smoke 不阻塞 P0，也不能替代确定性的无密钥 Agent receipt。
 
@@ -61,11 +61,11 @@ Runner 必须从隔离的官方 rc.2 安装中解析 CLI 与全部 Host package�
 这些 receipt 之间的官方 Host identity 是准确的 DSH package name 与 version、audited source commit、registry 和 registry integrity。每个 lane 都在自己的 lifecycle 前对完整 installed package tree 取指纹，结束后重新计算，并要求两者完全相同；这些 lane-local fingerprint 继续通过 input receipt digest 绑定。它们不会在不同 fresh installation 之间比较，因为 pnpm 生成的 `.bin` shim 会嵌入各自的隔离安装路径。
 
 1. 完整官方 rc.2 生命周期 receipt 绑定 packed artifact、浏览器旅程、子扩展生命周期、恢复、受控 ABA 顺序与无密钥 Agent 续行。
-2. Runtime Release receipt 证明 Host 启动、Client 启动、RPC 注册、准确官方 DSH tree 保持不变；提供前一 artifact 时，还会在同一 Profile 中证明不同前一版本到当前版本的扩展中心更新。
+2. Runtime Release receipt 证明 Host 启动、Client 启动、RPC 注册、准确官方 DSH tree 保持不变；提供前一 artifact 时，还会在同一 Profile 中保留同一个持久 Center root，证明不同前一版本到当前版本的扩展中心更新。它记录前一版本因只允许相邻 revision 而进入的目录 degraded 状态，并要求当前 artifact 迁移该 cache 后到达 fresh 公开后继。
 3. 公开 Release receipt 要求 Release asset 准确且仅为 CI tarball、`SHA256SUMS` 与 pack attestation，下载并逐一绑定三个 asset 的 byte，使用 GitHub CLI 验证显式 immutable Release 与每个 asset，再结合 runtime receipt 证明官方 CLI install、可选 update 与 remove。
 4. 公开目录 receipt 从准确已提交的 `catalog/public/plugins.json` 推导预期坐标，在固定 Pages URL 验证该 canonical byte，并证明 runtime 从 package 内置 bootstrap 刷新到其准确签名相邻后继且未进入 degraded fallback。
 5. CI receipt 把声明的 Ubuntu 与 macOS job 绑定到准确 Release commit，并下载唯一的 `main` push Node 22 Release-candidate artifact。它验证 Actions archive digest、run id 与 attempt、有界且 path-safe 的准确三 entry ZIP、每个 entry 的 digest 与 size、source commit、packed manifest、bundled pnpm tree 与 tarball byte。Downloader 只接受固定 GitHub API URL，以及随后一次准入的 GitHub Actions 或 Azure Blob storage redirect。Runtime、公开 Release 与复合 receipt 交叉绑定当前 CI artifact；更新还必须提供前一 artifact 的独立 CI receipt，bootstrap 则把它明确记录为 `null`。
-6. Post-publication verifier 始终从受保护 `main` 上 workflow dispatch 的 `github.sha` 检出并运行，记录 protected-ref assertion 以及该 post-publication run id 与 attempt，并把 verifier commit 绑定到它自己的准确成功 `main` push CI receipt；已发布 target commit 保持独立。只有 immutable `0.1.0-rc.0` bootstrap 的补录允许 verifier commit 与 target commit 不同；rc.1 与 stable 要求二者完全相同。对更新 Release，workflow 使用调用者提供的成功 run id 下载准确前一 release-ready receipt，以及它原始 target 与 verifier CI receipt byte，绑定 Actions run path、head commit、attempt 和三个 receipt digest，再验证前一 version、immutable Release、目录迁移、CI 与验收 evidence；重新生成的 CI receipt 不能替代这些前序 byte。强制序列是 rc.0 `r8→r9`，rc.1 package 内置 `r9` 并部署 `r10`，随后 stable 直接从 rc.1 晋级、package 内置 `r10` 并部署 `r11`。
+6. Post-publication verifier 始终从受保护 `main` 上 workflow dispatch 的 `github.sha` 检出并运行，记录 protected-ref assertion 以及该 post-publication run id 与 attempt，并把 verifier commit 绑定到它自己的准确成功 `main` push CI receipt；已发布 target commit 保持独立。只有 immutable `0.1.0-rc.0` bootstrap 的补录允许 verifier commit 与 target commit 不同；后续候选要求二者完全相同。对更新 Release，workflow 使用调用者提供的成功 run id 下载准确前一成功 release-ready receipt，以及它原始 target 与 verifier CI receipt byte，绑定 Actions run path、head commit、attempt 和三个 receipt digest，再验证前一 version、immutable Release、目录迁移、CI 与验收 evidence。恢复候选 rc.2 还会绑定失败 run `33103882901` 的独立 rc.1 `not-release-ready` 事故 receipt，绝不把 rc.1 当作成功前序；重新生成的 CI 或事故 receipt 不能替代既有 byte。成功序列是 rc.0 `r8→r9`、恢复候选 rc.2 package 内置 `r9` 并部署 `r10`，随后 stable 从 rc.2 晋级、package 内置 `r10` 并部署 `r11`；不可变 rc.1 保留为失败历史。
 
 公开 Release、Pages 与已完成 CI 主张必须具备各自的生成 receipt。源码文件、已配置 workflow、repository setting 或本地测试不能满足这些外部观测。
 

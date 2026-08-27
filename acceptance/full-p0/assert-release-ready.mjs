@@ -22,10 +22,18 @@ import {
   REQUIRED_CI_JOBS,
 } from '../release/verify-github-ci.mjs'
 import { assertAscendingReleaseTransition, parseReleaseVersion } from '../release/verify-public-release.mjs'
+import { validatePublicationIncidentReceipt } from '../release/assert-publication-incident.mjs'
 
 const CENTER_PACKAGE = 'dsh-plugin-extension-center'
 const POST_PUBLICATION_WORKFLOW_PATH = '.github/workflows/post-publication-evidence.yml'
 const GITHUB_MAIN_REF = `refs/heads/${GITHUB_BRANCH}`
+const RECOVERY_FAILED_COMMIT = '951c48cf7666991487eab9ef26d39f359b68cc20'
+const RECOVERY_FAILED_RUN_ID = 33103882901
+const RECOVERY_FAILED_RUN_ATTEMPT = 1
+const RECOVERY_PREVIOUS_COMMIT = '882d3c3cc59b597bb24ee55025690f8c4447abd5'
+const RECOVERY_PREVIOUS_RUN_ID = 33099069510
+const RECOVERY_PREVIOUS_RUN_ATTEMPT = 1
+const RECOVERY_INCIDENT_RUN_ATTEMPT = 1
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 const SHA256 = /^sha256:[0-9a-f]{64}$/u
 const SHA512 = /^sha512-[A-Za-z0-9+/]+={0,2}$/u
@@ -66,6 +74,9 @@ const INPUT_FLAGS = Object.freeze([
   '--previous-verifier-github-ci',
   '--previous-release-ready',
   '--previous-evidence-run-id',
+  '--publication-incident',
+  '--publication-incident-verifier-github-ci',
+  '--publication-incident-run-id',
   '--receipt',
 ])
 const REQUIRED_INPUT_FLAGS = Object.freeze([
@@ -93,6 +104,9 @@ const USAGE = `usage: node acceptance/full-p0/assert-release-ready.mjs \
   [--previous-github-ci <receipt.json>] \
   [--previous-verifier-github-ci <receipt.json> \
     --previous-release-ready <receipt.json> --previous-evidence-run-id <id>] \
+  [--publication-incident <receipt.json> \
+    --publication-incident-verifier-github-ci <receipt.json> \
+    --publication-incident-run-id <id>] \
   [--receipt <path>]\n`
 
 function fail(code, message) {
@@ -400,17 +414,23 @@ function releaseArtifact(value, label) {
 function fixedUpdateReleaseStage(previousVersion, currentVersion, code, label) {
   if (currentVersion === '0.1.0-rc.1') {
     if (previousVersion !== '0.1.0-rc.0') {
-      fail(code, `${label} must follow the fixed rc.0 to rc.1 to stable sequence`)
+      fail(code, `${label} rc.1 must update from 0.1.0-rc.0`)
     }
     return 'update-rc'
   }
+  if (currentVersion === '0.1.0-rc.2') {
+    if (previousVersion !== '0.1.0-rc.0') {
+      fail(code, `${label} recovery rc.2 must update from 0.1.0-rc.0`)
+    }
+    return 'recovery-rc'
+  }
   if (currentVersion === '0.1.0') {
-    if (previousVersion !== '0.1.0-rc.1') {
-      fail(code, `${label} stable 0.1.0 must update from 0.1.0-rc.1`)
+    if (previousVersion !== '0.1.0-rc.2') {
+      fail(code, `${label} stable 0.1.0 must update from 0.1.0-rc.2`)
     }
     return 'stable'
   }
-  fail(code, `${label} must follow the fixed rc.0 to rc.1 to stable sequence`)
+  fail(code, `${label} is outside the fixed rc.0 to rc.1, rc.0 to rc.2, and rc.2 to stable release sequence`)
 }
 
 function publicReleaseEvidence(value) {
@@ -437,7 +457,7 @@ function publicReleaseEvidence(value) {
   } else {
     if (parsedCurrent.major !== 0 || parsedCurrent.minor !== 1 || parsedCurrent.patch !== 0
       || previous === null || receipt.p0Status !== 'public-update-install-remove-proven') {
-      fail('P0-RELEASE-READY-TRANSITION', 'rc.1 and stable require a public previous-to-current update')
+      fail('P0-RELEASE-READY-TRANSITION', 'rc.1, recovery rc.2, and stable require a public previous-to-current update')
     }
     stage = fixedUpdateReleaseStage(
       previous.version,
@@ -496,6 +516,22 @@ function runtimeArtifact(value, label) {
   })
 }
 
+function runtimeCatalogObservation(observation, label) {
+  const source = bounded(observation.catalogSource, `${label} source`, 32)
+  const freshness = bounded(observation.catalogFreshness, `${label} freshness`, 32)
+  const degraded = observation.catalogDegraded
+  const degradedReason = observation.catalogDegradedReason
+  if (!['bootstrap', 'remote', 'last-good'].includes(source)
+    || !['bootstrap', 'fresh', 'cached'].includes(freshness)
+    || typeof degraded !== 'boolean'
+    || (degraded && (typeof degradedReason !== 'string' || degradedReason.length === 0
+      || degradedReason.length > 160))
+    || (!degraded && degradedReason !== null)) {
+    fail('P0-RELEASE-READY-RUNTIME', `${label} admission evidence is invalid`)
+  }
+  return Object.freeze({ source, freshness, degraded, degradedReason })
+}
+
 function runtimeReleaseEvidence(value) {
   const receipt = record(value, 'runtime Release receipt')
   passedReceipt(receipt, 2, 'P0-CENTER-HOST-CLIENT-BOOT', 'runtime Release receipt')
@@ -536,7 +572,8 @@ function runtimeReleaseEvidence(value) {
   const profile = record(observations.profile, 'runtime Profile observation')
   if (profile.profileId !== 'web' || profile.sameProfile !== true
     || profile.removalExactBaselineRestored !== true
-    || profile.officialCliUpdate !== (previous === null ? null : true)) {
+    || profile.officialCliUpdate !== (previous === null ? null : true)
+    || profile.centerRootRetained !== (previous === null ? null : true)) {
     fail('P0-RELEASE-READY-RUNTIME', 'runtime Release did not prove its exact same-Profile lifecycle')
   }
   return Object.freeze({
@@ -547,10 +584,12 @@ function runtimeReleaseEvidence(value) {
     previousCatalog: previousObservation === null ? null : Object.freeze({
       revision: positiveInteger(previousObservation.catalogRevision, 'previous runtime catalog revision'),
       entriesDigest: digest(previousObservation.catalogEntriesDigest, 'previous runtime catalog entries digest'),
+      admission: runtimeCatalogObservation(previousObservation, 'previous runtime catalog'),
     }),
     currentCatalog: Object.freeze({
       revision: positiveInteger(currentObservation.catalogRevision, 'runtime catalog revision'),
       entriesDigest: digest(currentObservation.catalogEntriesDigest, 'runtime catalog entries digest'),
+      admission: runtimeCatalogObservation(currentObservation, 'current runtime catalog'),
     }),
   })
 }
@@ -716,7 +755,99 @@ function releaseReadyEvidenceFile(value, label, acceptanceId, extraFields = []) 
   return evidence
 }
 
-function previousReleaseReadyBindings(value, bootstrap) {
+function previousPublicationIncidentBinding(value, releaseStage, schemaVersion) {
+  if (schemaVersion === 2) {
+    if (releaseStage === 'recovery-rc') {
+      fail('P0-RELEASE-READY-PREVIOUS', 'recovery rc.2 release-ready evidence must bind the rc.1 publication incident')
+    }
+    return null
+  }
+  if (schemaVersion !== 3) {
+    fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready receipt has an unsupported schema version')
+  }
+  if (releaseStage !== 'recovery-rc') {
+    if (value !== null) {
+      fail('P0-RELEASE-READY-PREVIOUS', 'non-recovery release-ready evidence injected a publication incident')
+    }
+    return null
+  }
+  const binding = releaseReadyEvidenceFile(
+    value,
+    'previous release-ready publication incident evidence',
+    'P0-EXTENSION-CENTER-PUBLICATION-INCIDENT',
+    [
+      'receiptDigest',
+      'runId',
+      'runAttempt',
+      'failedRunId',
+      'failedRunAttempt',
+      'targetCommit',
+      'targetVersion',
+      'verifierCommit',
+      'verifierGithubCiSha256',
+      'verifierGithubCiReceiptDigest',
+      'verifierGithubCiRunId',
+      'verifierGithubCiRunAttempt',
+    ],
+  )
+  const normalized = Object.freeze({
+    acceptanceId: binding.acceptanceId,
+    sha256: digest(binding.sha256, 'previous release-ready publication incident SHA-256'),
+    receiptDigest: digest(
+      binding.receiptDigest,
+      'previous release-ready publication incident receipt digest',
+    ),
+    runId: positiveInteger(binding.runId, 'previous release-ready publication incident run id'),
+    runAttempt: positiveInteger(
+      binding.runAttempt,
+      'previous release-ready publication incident run attempt',
+    ),
+    failedRunId: positiveInteger(
+      binding.failedRunId,
+      'previous release-ready publication incident failed run id',
+    ),
+    failedRunAttempt: positiveInteger(
+      binding.failedRunAttempt,
+      'previous release-ready publication incident failed run attempt',
+    ),
+    targetCommit: commit(binding.targetCommit, 'previous release-ready publication incident target commit'),
+    targetVersion: bounded(
+      binding.targetVersion,
+      'previous release-ready publication incident target version',
+      128,
+    ),
+    verifierCommit: commit(
+      binding.verifierCommit,
+      'previous release-ready publication incident verifier commit',
+    ),
+    verifierGithubCiSha256: digest(
+      binding.verifierGithubCiSha256,
+      'previous release-ready publication incident verifier CI SHA-256',
+    ),
+    verifierGithubCiReceiptDigest: digest(
+      binding.verifierGithubCiReceiptDigest,
+      'previous release-ready publication incident verifier CI receipt digest',
+    ),
+    verifierGithubCiRunId: positiveInteger(
+      binding.verifierGithubCiRunId,
+      'previous release-ready publication incident verifier CI run id',
+    ),
+    verifierGithubCiRunAttempt: positiveInteger(
+      binding.verifierGithubCiRunAttempt,
+      'previous release-ready publication incident verifier CI run attempt',
+    ),
+  })
+  if (normalized.targetCommit !== RECOVERY_FAILED_COMMIT
+    || normalized.targetVersion !== '0.1.0-rc.1'
+    || normalized.failedRunId !== RECOVERY_FAILED_RUN_ID
+    || normalized.failedRunAttempt !== RECOVERY_FAILED_RUN_ATTEMPT
+    || normalized.runAttempt !== RECOVERY_INCIDENT_RUN_ATTEMPT) {
+    fail('P0-RELEASE-READY-PREVIOUS', 'recovery rc.2 release-ready evidence changed the fixed rc.1 incident coordinates')
+  }
+  return normalized
+}
+
+function previousReleaseReadyBindings(value, bootstrap, releaseStage, schemaVersion) {
   const evidence = record(value, 'previous release-ready evidence')
   exactKeys(evidence, [
     'fullP0',
@@ -728,6 +859,7 @@ function previousReleaseReadyBindings(value, bootstrap) {
     'verifierGithubCi',
     'previousGithubCi',
     'previousReleaseReady',
+    ...(schemaVersion === 3 ? ['publicationIncident'] : []),
   ], 'previous release-ready evidence')
   const fullP0 = releaseReadyEvidenceFile(
     evidence.fullP0,
@@ -827,6 +959,11 @@ function previousReleaseReadyBindings(value, bootstrap) {
   if (bootstrap !== (previousGithubCi === null) || bootstrap !== (previousReleaseReady === null)) {
     fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready predecessor evidence disagrees with its stage')
   }
+  const publicationIncident = previousPublicationIncidentBinding(
+    evidence.publicationIncident,
+    releaseStage,
+    schemaVersion,
+  )
   return Object.freeze({
     githubCi: Object.freeze({
       sha256: githubCi.sha256,
@@ -840,12 +977,16 @@ function previousReleaseReadyBindings(value, bootstrap) {
       runId: verifierGithubCi.runId,
       runAttempt: verifierGithubCi.runAttempt,
     }),
+    publicationIncident,
   })
 }
 
 function previousReleaseReadyEvidence(value) {
   const receipt = record(value, 'previous release-ready receipt')
-  passedReceipt(receipt, 2, 'P0-EXTENSION-CENTER-RELEASE-READY', 'previous release-ready receipt')
+  if (![2, 3].includes(receipt.schemaVersion) || receipt.acceptanceId !== 'P0-EXTENSION-CENTER-RELEASE-READY'
+    || receipt.status !== 'passed') {
+    fail('P0-RELEASE-READY-CLAIM', 'previous release-ready receipt did not pass its exact acceptance schema')
+  }
   if (!['rc0-bootstrap-release-ready', 'p0-release-ready'].includes(receipt.p0Status)) {
     fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready receipt has an invalid terminal status')
   }
@@ -886,13 +1027,28 @@ function previousReleaseReadyEvidence(value) {
   if (receipt.releaseStage !== expectedStage) {
     fail('P0-RELEASE-READY-PREVIOUS', 'previous release-ready stage and artifact history disagree')
   }
-  const evidence = previousReleaseReadyBindings(receipt.evidence, bootstrap)
+  if (receipt.schemaVersion === 2 && expectedStage !== 'bootstrap-rc0') {
+    fail('P0-RELEASE-READY-PREVIOUS', 'schema-2 release-ready evidence is reserved for the historical rc.0 bootstrap')
+  }
+  const evidence = previousReleaseReadyBindings(
+    receipt.evidence,
+    bootstrap,
+    receipt.releaseStage,
+    receipt.schemaVersion,
+  )
   const verifier = verifierIdentity(
     receipt.verifier,
     current.sourceCommit,
     receipt.releaseStage,
     evidence.verifierGithubCi,
   )
+  if (evidence.publicationIncident !== null
+    && (evidence.publicationIncident.verifierCommit !== current.sourceCommit
+      || evidence.publicationIncident.runId === verifier.runId
+      || evidence.publicationIncident.verifierGithubCiRunId !== evidence.verifierGithubCi.runId
+      || evidence.publicationIncident.verifierGithubCiRunAttempt !== evidence.verifierGithubCi.runAttempt)) {
+    fail('P0-RELEASE-READY-PREVIOUS', 'recovery rc.2 publication incident is not independently bound to its protected-main verifier')
+  }
   const claims = record(receipt.claims, 'previous release-ready claims')
   for (const field of [
     'independentPluginOnly',
@@ -1197,6 +1353,32 @@ function catalogObserved(catalog, publicCatalog, label) {
   }
 }
 
+function publicationIncidentEvidence(value, verifierCiValue, inputDigest, verifierCiDigest, runId) {
+  const incident = validatePublicationIncidentReceipt(value, {
+    targetCommit: RECOVERY_FAILED_COMMIT,
+    failedRunId: RECOVERY_FAILED_RUN_ID,
+    failedRunAttempt: RECOVERY_FAILED_RUN_ATTEMPT,
+    previousCommit: RECOVERY_PREVIOUS_COMMIT,
+    previousEvidenceRunId: RECOVERY_PREVIOUS_RUN_ID,
+    previousEvidenceRunAttempt: RECOVERY_PREVIOUS_RUN_ATTEMPT,
+    verifierRunId: runId,
+    verifierRunAttempt: RECOVERY_INCIDENT_RUN_ATTEMPT,
+  })
+  const verifierCi = githubCiEvidence(verifierCiValue)
+  if (incident.verifier.commit !== verifierCi.sourceCommit
+    || incident.verifier.githubCi.fileSha256 !== verifierCiDigest
+    || incident.verifier.githubCi.receiptDigest !== verifierCi.receiptDigest
+    || incident.verifier.githubCi.runId !== verifierCi.runId
+    || incident.verifier.githubCi.runAttempt !== verifierCi.runAttempt) {
+    fail('P0-RELEASE-READY-INCIDENT', 'publication incident does not bind its exact protected-main CI receipt bytes')
+  }
+  return Object.freeze({
+    ...incident,
+    fileSha256: inputDigest,
+    verifierCi,
+  })
+}
+
 /** Aggregate independently generated receipts and reject any cross-run identity drift. */
 export function assertReleaseReady(inputValue) {
   const input = record(inputValue, 'release-ready evidence')
@@ -1249,6 +1431,50 @@ export function assertReleaseReady(inputValue) {
   const previousEvidenceRunId = input.previousEvidenceRunId === null
     ? null
     : positiveInteger(input.previousEvidenceRunId, 'previous post-publication evidence run id')
+  const incidentInput = input.publicationIncident ?? null
+  const incidentVerifierCiInput = input.publicationIncidentVerifierGithubCi ?? null
+  const incidentRunIdInput = input.publicationIncidentRunId ?? null
+  const incidentDigestInput = suppliedDigests.publicationIncident ?? null
+  const incidentVerifierCiDigestInput = suppliedDigests.publicationIncidentVerifierGithubCi ?? null
+  const incidentInputsPresent = [
+    incidentInput,
+    incidentVerifierCiInput,
+    incidentRunIdInput,
+    incidentDigestInput,
+    incidentVerifierCiDigestInput,
+  ].map(value => value !== null)
+  if (incidentInputsPresent.some(Boolean) && !incidentInputsPresent.every(Boolean)) {
+    fail('P0-RELEASE-READY-INCIDENT', 'publication incident receipt, verifier CI, digests, and run id must be supplied together')
+  }
+  const recovery = published.stage === 'recovery-rc'
+  if (recovery !== incidentInputsPresent.every(Boolean)) {
+    fail(
+      'P0-RELEASE-READY-INCIDENT',
+      recovery
+        ? 'recovery rc.2 omitted the terminal rc.1 publication incident'
+        : 'only recovery rc.2 may bind the terminal rc.1 publication incident',
+    )
+  }
+  const incident = recovery
+    ? publicationIncidentEvidence(
+      incidentInput,
+      incidentVerifierCiInput,
+      digest(incidentDigestInput, 'publication incident receipt SHA-256'),
+      digest(incidentVerifierCiDigestInput, 'publication incident verifier CI SHA-256'),
+      positiveInteger(incidentRunIdInput, 'publication incident evidence run id'),
+    )
+    : null
+  if (published.stage === 'update-rc' && published.current.sourceCommit === RECOVERY_FAILED_COMMIT) {
+    fail('P0-RELEASE-READY-INCIDENT', 'immutable rc.1 is terminal not-release-ready and cannot produce a passed composite')
+  }
+  if (incident !== null && incident.target.version !== '0.1.0-rc.1') {
+    fail('P0-RELEASE-READY-INCIDENT', 'publication incident does not bind immutable rc.1')
+  }
+  if (incident !== null
+    && (incident.verifier.githubCi.runId !== verifierCi.runId
+      || incident.verifier.githubCi.runAttempt !== verifierCi.runAttempt)) {
+    fail('P0-RELEASE-READY-INCIDENT', 'publication incident verifier did not observe the rc.2 exact-main CI run')
+  }
 
   for (const field of ['dshPackage', 'auditedSourceCommit', 'registry', 'registryIntegrity']) {
     if (full.target[field] !== runtime.target[field] || full.target[field] !== published.target[field]) {
@@ -1362,9 +1588,43 @@ export function assertReleaseReady(inputValue) {
       || runtime.previousCatalog.entriesDigest !== previousReady.catalog.bootstrap.entriesDigest) {
       fail('P0-RELEASE-READY-BINDING', 'previous runtime artifact did not retain its prior packaged bootstrap against the newer public successor')
     }
+    const previousAdmission = runtime.previousCatalog.admission
+    if (previousAdmission.source !== 'bootstrap' || previousAdmission.freshness !== 'bootstrap'
+      || previousAdmission.degraded !== true
+      || previousAdmission.degradedReason !== 'catalog revision chain contains a gap') {
+      fail('P0-RELEASE-READY-BINDING', 'previous runtime artifact did not expose the expected adjacent-only catalog degradation before update')
+    }
+    if (recovery) {
+      if (incident.failure.previous.commit !== published.previous.sourceCommit
+        || incident.failure.previous.version !== published.previous.version
+        || incident.failure.previous.fileSha256 !== previousCiDigest
+        || incident.failure.previous.receiptDigest !== previousCi.receiptDigest
+        || incident.failure.previous.runId !== previousCi.runId
+        || incident.failure.previous.runAttempt !== previousCi.runAttempt) {
+        fail('P0-RELEASE-READY-INCIDENT', 'rc.1 incident does not retain the exact successful rc.0 CI receipt')
+      }
+      if (incident.previousSuccessfulPublication.targetCommit !== published.previous.sourceCommit
+        || incident.previousSuccessfulPublication.runId !== previousEvidenceRunId
+        || incident.previousSuccessfulPublication.releaseReadyFileSha256 !== previousReadyDigest
+        || incident.previousSuccessfulPublication.releaseReadyReceiptDigest !== previousReady.receiptDigest) {
+        fail('P0-RELEASE-READY-INCIDENT', 'rc.1 incident does not retain the exact successful rc.0 release-ready receipt')
+      }
+      if (incident.verifier.commit !== published.current.sourceCommit
+        || incident.verifier.runId === verifier.runId
+        || incident.verifier.runId === incident.failure.runId
+        || incident.verifier.runId === incident.previousSuccessfulPublication.runId) {
+        fail('P0-RELEASE-READY-INCIDENT', 'rc.1 incident was not independently recorded by the rc.2 protected-main verifier')
+      }
+    }
   }
   catalogObserved(full.catalog, catalog, 'full lifecycle catalog observation')
   catalogObserved(runtime.currentCatalog, catalog, 'runtime Release catalog observation')
+  if (runtime.currentCatalog.admission.source !== 'remote'
+    || runtime.currentCatalog.admission.freshness !== 'fresh'
+    || runtime.currentCatalog.admission.degraded !== false
+    || runtime.currentCatalog.admission.degradedReason !== null) {
+    fail('P0-RELEASE-READY-BINDING', 'current runtime artifact did not refresh the same persistent Center root to the fresh public catalog')
+  }
   if (sources.catalog.revision !== catalog.deployment.revision
     || sources.catalog.entriesDigest !== catalog.deployment.entriesDigest
     || sources.catalog.documentDigest !== catalog.deployment.documentDigest
@@ -1376,7 +1636,7 @@ export function assertReleaseReady(inputValue) {
   const current = Object.freeze({ ...published.current })
   const bootstrap = published.stage === 'bootstrap-rc0'
   const body = Object.freeze({
-    schemaVersion: 2,
+    schemaVersion: 3,
     acceptanceId: 'P0-EXTENSION-CENTER-RELEASE-READY',
     status: 'passed',
     p0Status: bootstrap ? 'rc0-bootstrap-release-ready' : 'p0-release-ready',
@@ -1421,6 +1681,22 @@ export function assertReleaseReady(inputValue) {
         sha256: previousReadyDigest,
         receiptDigest: previousReady.receiptDigest,
         runId: previousEvidenceRunId,
+      }),
+      publicationIncident: incident === null ? null : Object.freeze({
+        acceptanceId: incident.acceptanceId,
+        sha256: incident.fileSha256,
+        receiptDigest: incident.receiptDigest,
+        runId: incident.verifier.runId,
+        runAttempt: incident.verifier.runAttempt,
+        failedRunId: incident.failure.runId,
+        failedRunAttempt: incident.failure.runAttempt,
+        targetCommit: incident.target.sourceCommit,
+        targetVersion: incident.target.version,
+        verifierCommit: incident.verifier.commit,
+        verifierGithubCiSha256: incident.verifier.githubCi.fileSha256,
+        verifierGithubCiReceiptDigest: incident.verifier.githubCi.receiptDigest,
+        verifierGithubCiRunId: incident.verifier.githubCi.runId,
+        verifierGithubCiRunAttempt: incident.verifier.githubCi.runAttempt,
       }),
     }),
     claims: Object.freeze({
@@ -1522,11 +1798,24 @@ export async function composeReleaseReadyReceipt(optionsValue) {
   const previousReleaseReady = options.previousReleaseReadyPath === null || options.previousReleaseReadyPath === undefined
     ? null
     : await readReceipt(resolve(options.previousReleaseReadyPath), 'previous release-ready receipt')
+  const publicationIncident = options.publicationIncidentPath === null
+    || options.publicationIncidentPath === undefined
+    ? null
+    : await readReceipt(resolve(options.publicationIncidentPath), 'publication incident receipt')
+  const publicationIncidentVerifierGithubCi = options.publicationIncidentVerifierGithubCiPath === null
+    || options.publicationIncidentVerifierGithubCiPath === undefined
+    ? null
+    : await readReceipt(
+      resolve(options.publicationIncidentVerifierGithubCiPath),
+      'publication incident verifier GitHub CI receipt',
+    )
   const inputs = [
     ...requiredInputs,
     ...(previousGithubCi === null ? [] : [previousGithubCi]),
     ...(previousVerifierGithubCi === null ? [] : [previousVerifierGithubCi]),
     ...(previousReleaseReady === null ? [] : [previousReleaseReady]),
+    ...(publicationIncident === null ? [] : [publicationIncident]),
+    ...(publicationIncidentVerifierGithubCi === null ? [] : [publicationIncidentVerifierGithubCi]),
   ]
   if (new Set(inputs.map(input => input.path)).size !== inputs.length) {
     fail('P0-RELEASE-READY-INPUT', 'release-ready inputs must be distinct receipt files')
@@ -1563,6 +1852,9 @@ export async function composeReleaseReadyReceipt(optionsValue) {
     previousVerifierGithubCi: previousVerifierGithubCi?.receipt ?? null,
     previousReleaseReady: previousReleaseReady?.receipt ?? null,
     previousEvidenceRunId: options.previousEvidenceRunId ?? null,
+    publicationIncident: publicationIncident?.receipt ?? null,
+    publicationIncidentVerifierGithubCi: publicationIncidentVerifierGithubCi?.receipt ?? null,
+    publicationIncidentRunId: options.publicationIncidentRunId ?? null,
     receiptDigests: {
       fullP0: fullP0.sha256,
       runtimeRelease: runtimeRelease.sha256,
@@ -1574,6 +1866,8 @@ export async function composeReleaseReadyReceipt(optionsValue) {
       previousGithubCi: previousGithubCi?.sha256 ?? null,
       previousVerifierGithubCi: previousVerifierGithubCi?.sha256 ?? null,
       previousReleaseReady: previousReleaseReady?.sha256 ?? null,
+      publicationIncident: publicationIncident?.sha256 ?? null,
+      publicationIncidentVerifierGithubCi: publicationIncidentVerifierGithubCi?.sha256 ?? null,
     },
     generatedAt: options.generatedAt,
   })
@@ -1604,6 +1898,13 @@ export function parseReleaseReadyArguments(arguments_) {
   ]).size !== 1) {
     fail('P0-RELEASE-READY-INPUT', 'previous verifier CI, release-ready receipt, and evidence run id must be supplied together')
   }
+  if (new Set([
+    values.has('--publication-incident'),
+    values.has('--publication-incident-verifier-github-ci'),
+    values.has('--publication-incident-run-id'),
+  ]).size !== 1) {
+    fail('P0-RELEASE-READY-INPUT', 'publication incident receipt, verifier CI, and run id must be supplied together')
+  }
   let previousEvidenceRunId = null
   if (values.has('--previous-evidence-run-id')) {
     const input = bounded(values.get('--previous-evidence-run-id'), 'previous post-publication evidence run id', 32)
@@ -1611,6 +1912,18 @@ export function parseReleaseReadyArguments(arguments_) {
       fail('P0-RELEASE-READY-INPUT', 'previous post-publication evidence run id must be a positive integer')
     }
     previousEvidenceRunId = positiveInteger(Number(input), 'previous post-publication evidence run id')
+  }
+  let publicationIncidentRunId = null
+  if (values.has('--publication-incident-run-id')) {
+    const input = bounded(
+      values.get('--publication-incident-run-id'),
+      'publication incident evidence run id',
+      32,
+    )
+    if (!/^[1-9][0-9]*$/u.test(input)) {
+      fail('P0-RELEASE-READY-INPUT', 'publication incident evidence run id must be a positive integer')
+    }
+    publicationIncidentRunId = positiveInteger(Number(input), 'publication incident evidence run id')
   }
   const verifierCommit = commit(values.get('--verifier-commit'), 'verifier commit')
   const verifierRunIdInput = bounded(values.get('--verifier-run-id'), 'verifier run id', 32)
@@ -1649,6 +1962,16 @@ export function parseReleaseReadyArguments(arguments_) {
       ? resolve(bounded(values.get('--previous-release-ready'), 'previous release-ready receipt path'))
       : null,
     previousEvidenceRunId,
+    publicationIncidentPath: values.has('--publication-incident')
+      ? resolve(bounded(values.get('--publication-incident'), 'publication incident receipt path'))
+      : null,
+    publicationIncidentVerifierGithubCiPath: values.has('--publication-incident-verifier-github-ci')
+      ? resolve(bounded(
+        values.get('--publication-incident-verifier-github-ci'),
+        'publication incident verifier GitHub CI receipt path',
+      ))
+      : null,
+    publicationIncidentRunId,
     receiptPath: resolve(values.has('--receipt')
       ? bounded(values.get('--receipt'), 'release-ready receipt path')
       : DEFAULT_RECEIPT_PATH),

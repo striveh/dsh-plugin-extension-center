@@ -1,6 +1,6 @@
 # 统一扩展中心 P0 产品规格
 
-状态：P0 产品与验收规范基线，2026-08-27
+状态：P0 产品与验收规范基线，2026-08-28
 
 [English](p0-product-spec.md) | 中文
 
@@ -255,13 +255,13 @@ Bundle 只消费已发布 rc.2 行为：
 3. 只保留用户批准的恢复数据，并证明 clean reinstall 可以识别或显式丢弃它。
 4. 把 artifact SHA-256、官方 Host package identity、catalog revision、platform、browser journey、operation receipt、recovery evidence、continuation evidence、test command、log 与剩余不确定性绑定到一份脱敏 Release receipt。
 5. 在每个声明平台重复必跑 artifact lane。另一个 DSH Release 必须取得独立 compatibility receipt。
-6. 下载准确公开 Release asset，结合 runtime receipt 证明官方 CLI install/update/remove；读取固定 Pages 目录 URL 并证明准确签名 revision refresh；把通过的 CI job 绑定到准确 Release commit。CI、runtime、公开 Release 与复合 receipt 必须交叉绑定同一个准确 `main` push Node 22 已 attested tarball。Repository Release immutability 与受保护 `v*` tag 会阻止后续修改，但不能证明外部事项；每项都要求自身通过的 receipt。`0.1.0-rc.0` bootstrap 把前一 artifact、CI、release-ready 与 evidence-run 输入记录为 `null`。后续每个 Release 都必须绑定不同前一 artifact 及其 CI receipt，以及准确成功的前一 post-publication run；该前一 receipt 的已部署目录必须等于当前 package bootstrap，而新的公开目录必须是其准确签名相邻后继。
+6. 下载准确公开 Release asset，结合 runtime receipt 证明官方 CLI install/update/remove；读取固定 Pages 目录 URL 并证明准确签名 revision refresh；把通过的 CI job 绑定到准确 Release commit。CI、runtime、公开 Release 与复合 receipt 必须交叉绑定同一个准确 `main` push Node 22 已 attested tarball。Repository Release immutability 与受保护 `v*` tag 会阻止后续修改，但不能证明外部事项；每项都要求自身通过的 receipt。`0.1.0-rc.0` bootstrap 把前一 artifact、CI、release-ready 与 evidence-run 输入记录为 `null`。后续每个 Release 都必须绑定不同的最后一个成功前序 artifact 及其 CI receipt，以及该成功前序的准确 post-publication run；该 receipt 的已部署目录必须等于当前 package bootstrap，而新的公开目录必须是其准确签名相邻后继。已发布但失败的 candidate 只保留为终态事故证据，绝不替代成功前序。
 
 ## Focused verification
 
 Unit 与 integration test 至少覆盖：
 
-- catalog canonicalization、signature threshold、rotation、rollback、freeze、expiry 与 last-good selection；
+- catalog canonicalization、signature threshold、rotation、rollback、freeze、expiry、last-good selection 与跨进程单调 cache commit；
 - Capability RAG retrieval、deterministic policy、ambiguity、external-only lead 与 existing-first behavior；
 - plan canonicalization、authority diff、grant binding、idempotency、revision fence 与逐 target serialization；
 - 独立 Plugin/MCP/Skill inventory projection 与 stale observation handling；
@@ -274,7 +274,7 @@ Unit 与 integration test 至少覆盖：
 
 验收至少必须拒绝或恢复以下情况：
 
-- catalog tamper、unknown signer、threshold 不足、rollback、expiry、refresh timeout 与 poisoned cache；
+- catalog tamper、unknown signer、threshold 不足、rollback、expiry、refresh timeout、poisoned cache、跨进程 refresh 乱序完成与 writer process crash；
 - artifact hash mismatch、archive traversal、symlink escape、unexpected lifecycle script、missing dependency 与 incompatible platform；
 - concurrent plan、owner revision drift、target lock loss、受控的其他进程官方 CLI ABA 序列、每个 journal phase crash、partial pointer replacement 与 disk-full simulation；
 - 官方 Plugin CLI add/update/remove failure、未执行必需 restart、声明 consumer 缺失、MCP early exit 或 Tool drift、Skill winner conflict；

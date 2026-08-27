@@ -6,7 +6,9 @@ Security fixes target the current prerelease and `main`. The only claimed compat
 
 | Version | Security support | DSH compatibility |
 | --- | --- | --- |
-| `0.1.0-rc.1` | Prerelease security fixes | Only the official DSH `0.1.1-rc.2` artifact bound by that version's receipts |
+| `0.1.0-rc.2` | Prerelease security fixes | Only the official DSH `0.1.1-rc.2` artifact bound by that version's receipts |
+| `0.1.0-rc.1` | No fixes; immutable failed candidate | Its post-publication update failed and produced no release-ready receipt |
+| `0.1.0-rc.0` | No fixes; immutable bootstrap | Last successful release-ready bootstrap; upgrade only after a newer version has passing receipts |
 | `main` | Development fixes | No compatibility inherited from a published version without a new exact-commit receipt |
 
 ## Report a vulnerability privately
