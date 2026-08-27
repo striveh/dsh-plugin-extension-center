@@ -257,6 +257,12 @@ test('uses one official Host and only official Plugin CLI Profile mutations', as
   assert.match(source, /'plugin', '--profile', PROFILE_ID, 'add', artifact\.source,/u)
   assert.match(source, /'plugin', '--profile', PROFILE_ID, 'remove', CENTER_PACKAGE, '--ignore-scripts'/u)
   assert.match(source, /previousInstallation = await addCenter[\s\S]+currentInstallation = await addCenter/u)
+  const installedProfileSource = source.slice(
+    source.indexOf('async function installedProfile'),
+    source.indexOf('async function addCenter'),
+  )
+  assert.match(installedProfileSource, /!dump\.stdout\.includes\('# == dsh-plugin-extension-center'\)/u)
+  assert.doesNotMatch(installedProfileSource, /(?<!\.stdout)\bdump\.includes\(/u)
   assert.doesNotMatch(source, /\bwriteFile\([^)]*(?:profileRoot|profiles|dshHome)/su)
   assert.doesNotMatch(source, /\b(?:appendFile|truncate)\b/u)
 })
