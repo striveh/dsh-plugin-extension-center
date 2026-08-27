@@ -112,14 +112,27 @@ function releaseMetadata(spec, expectedAssets = ciReleaseAssets(spec)) {
   }
 }
 
+function tagRefMetadata(spec, sourceCommit = spec.commit) {
+  const tag = `v${spec.version}`
+  return {
+    ref: `refs/tags/${tag}`,
+    url: `https://api.github.com/repos/striveh/dsh-plugin-extension-center/git/refs/tags/${tag}`,
+    object: {
+      type: 'commit',
+      sha: sourceCommit,
+      url: `https://api.github.com/repos/striveh/dsh-plugin-extension-center/git/commits/${sourceCommit}`,
+    },
+  }
+}
+
 function immutableResult(spec, expectedAssets = ciReleaseAssets(spec), releaseId = 111) {
   const statement = {
     _type: 'https://in-toto.io/Statement/v1',
-    predicateType: 'https://in-toto.io/attestation/release/v0.1',
+    predicateType: 'https://in-toto.io/attestation/release/v0.2',
     subject: [
       {
         uri: `pkg:github/striveh/dsh-plugin-extension-center@v${spec.version}`,
-        digest: { sha1: '9'.repeat(40) },
+        digest: { sha1: spec.commit },
       },
       ...expectedAssets.map(asset => ({
         name: asset.name,
@@ -127,15 +140,19 @@ function immutableResult(spec, expectedAssets = ciReleaseAssets(spec), releaseId
       })),
     ],
     predicate: {
+      databaseId: String(releaseId),
+      ownerId: '3348645',
+      packageId: '1346759550',
+      purl: `pkg:github/striveh/dsh-plugin-extension-center@v${spec.version}`,
       repository: 'striveh/dsh-plugin-extension-center',
+      repositoryId: '1346759550',
       tag: `v${spec.version}`,
-      releaseId: String(releaseId),
     },
   }
   return {
     attestation: {
-      initiator: 'github',
-      bundle_url: 'https://api.github.com/repos/striveh/dsh-plugin-extension-center/attestations/1',
+      initiator: '',
+      bundle_url: '',
       bundle: {
         mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
         dsseEnvelope: {
@@ -145,7 +162,23 @@ function immutableResult(spec, expectedAssets = ciReleaseAssets(spec), releaseId
         },
       },
     },
-    verificationResult: { verified: true },
+    verificationResult: {
+      mediaType: 'application/vnd.dev.sigstore.verificationresult+json;version=0.1',
+      signature: {
+        certificate: {
+          certificateIssuer: 'CN=Fulcio Intermediate l1,O=GitHub\\, Inc.',
+          subjectAlternativeName: 'https://dotcom.releases.github.com',
+        },
+      },
+      verifiedIdentity: {
+        subjectAlternativeName: {
+          subjectAlternativeName: '',
+          regexp: '^https://dotcom\\.releases\\.github\\.com$',
+        },
+        issuer: { issuer: '', regexp: '.*' },
+      },
+      statement,
+    },
   }
 }
 
@@ -154,6 +187,7 @@ function immutableProof(spec, expectedAssets = ciReleaseAssets(spec), releaseId 
   return {
     tag: `v${spec.version}`,
     releaseId,
+    sourceCommit: spec.commit,
     assets: expectedAssets,
     ghVersionOutput: 'gh version 2.88.1 (test)\n',
     releaseResult: result,
@@ -211,8 +245,8 @@ function apiFetch(spec, artifactHandler, expectedAssets = ciReleaseAssets(spec))
     if (parsed.hostname === 'api.github.com' && parsed.pathname.includes('/releases/tags/')) {
       return new Response(JSON.stringify(releaseMetadata(spec, expectedAssets)), { status: 200 })
     }
-    if (parsed.hostname === 'api.github.com' && parsed.pathname.includes('/commits/')) {
-      return new Response(JSON.stringify({ sha: spec.commit }), { status: 200 })
+    if (parsed.hostname === 'api.github.com' && parsed.pathname.includes('/git/ref/tags/')) {
+      return new Response(JSON.stringify(tagRefMetadata(spec)), { status: 200 })
     }
     return artifactHandler(parsed, options)
   }
@@ -362,10 +396,11 @@ test('binds public source tag and asset name to the expected version', () => {
   }
 })
 
-test('binds GitHub Release state, asset metadata, and resolved tag commit', () => {
+test('binds GitHub Release state, asset metadata, and an exact lightweight tag ref', () => {
   const spec = artifact()
   const assets = ciReleaseAssets(spec)
-  const evidence = validateGitHubReleaseMetadata(spec, releaseMetadata(spec, assets), { sha: spec.commit }, assets)
+  const tagRef = tagRefMetadata(spec)
+  const evidence = validateGitHubReleaseMetadata(spec, releaseMetadata(spec, assets), tagRef, assets)
   assert.equal(evidence.tag, 'v' + currentVersion)
   assert.equal(evidence.sourceCommit, currentCommit)
   assert.equal(evidence.prerelease, false)
@@ -374,23 +409,41 @@ test('binds GitHub Release state, asset metadata, and resolved tag commit', () =
   const draft = structuredClone(releaseMetadata(spec, assets))
   draft.draft = true
   assert.throws(
-    () => validateGitHubReleaseMetadata(spec, draft, { sha: spec.commit }, assets),
+    () => validateGitHubReleaseMetadata(spec, draft, tagRef, assets),
     acceptanceCode('P0-RELEASE-METADATA'),
   )
   const wrongDigest = structuredClone(releaseMetadata(spec, assets))
   wrongDigest.assets[0].digest = previousArtifactSha
   assert.throws(
-    () => validateGitHubReleaseMetadata(spec, wrongDigest, { sha: spec.commit }, assets),
+    () => validateGitHubReleaseMetadata(spec, wrongDigest, tagRef, assets),
     acceptanceCode('P0-RELEASE-METADATA'),
   )
-  assert.throws(
-    () => validateGitHubReleaseMetadata(spec, releaseMetadata(spec, assets), { sha: previousCommit }, assets),
-    acceptanceCode('P0-RELEASE-METADATA'),
-  )
+  const tagObjectCommit = '0'.repeat(40)
+  for (const [label, mutate] of [
+    ['ref name', candidate => { candidate.ref = `refs/tags/v${previousVersion}` }],
+    ['ref URL', candidate => { candidate.url += '-wrong' }],
+    ['object SHA', candidate => { candidate.object.sha = previousCommit }],
+    ['object URL', candidate => { candidate.object.url += '-wrong' }],
+    ['annotated tag', candidate => {
+      candidate.object.type = 'tag'
+      candidate.object.sha = tagObjectCommit
+      candidate.object.url = `https://api.github.com/repos/striveh/dsh-plugin-extension-center/git/tags/${tagObjectCommit}`
+    }],
+    ['tree object', candidate => { candidate.object.type = 'tree' }],
+    ['blob object', candidate => { candidate.object.type = 'blob' }],
+  ]) {
+    const candidate = structuredClone(tagRef)
+    mutate(candidate)
+    assert.throws(
+      () => validateGitHubReleaseMetadata(spec, releaseMetadata(spec, assets), candidate, assets),
+      acceptanceCode('P0-RELEASE-METADATA'),
+      label,
+    )
+  }
   const extra = structuredClone(releaseMetadata(spec, assets))
   extra.assets.push({ ...extra.assets[0], id: 999, name: 'unexpected.txt' })
   assert.throws(
-    () => validateGitHubReleaseMetadata(spec, extra, { sha: spec.commit }, assets),
+    () => validateGitHubReleaseMetadata(spec, extra, tagRef, assets),
     acceptanceCode('P0-RELEASE-METADATA'),
   )
 })
@@ -415,10 +468,22 @@ test('binds the concrete immutable Release and one GitHub attestation verificati
     wrongRelease.releaseResult.attestation.bundle.dsseEnvelope.payload,
     'base64',
   ).toString('utf8'))
-  payload.predicate.releaseId = '999'
+  payload.predicate.databaseId = '999'
   wrongRelease.releaseResult.attestation.bundle.dsseEnvelope.payload = Buffer.from(JSON.stringify(payload)).toString('base64')
   assert.throws(
     () => validateGitHubImmutableReleaseProof(wrongRelease),
+    acceptanceCode('P0-RELEASE-IMMUTABILITY'),
+  )
+  const wrongIdentity = structuredClone(immutableProof(spec, assets))
+  wrongIdentity.releaseResult.verificationResult.verifiedIdentity.subjectAlternativeName.regexp = '.*'
+  assert.throws(
+    () => validateGitHubImmutableReleaseProof(wrongIdentity),
+    acceptanceCode('P0-RELEASE-IMMUTABILITY'),
+  )
+  const wrongTagRef = structuredClone(immutableProof(spec, assets))
+  wrongTagRef.sourceCommit = previousCommit
+  assert.throws(
+    () => validateGitHubImmutableReleaseProof(wrongTagRef),
     acceptanceCode('P0-RELEASE-IMMUTABILITY'),
   )
 })
@@ -459,14 +524,48 @@ test('downloads through manually checked metadata and asset redirects', async ()
 
     assert.equal(network.calls.length, 8)
     assert.ok(network.calls.every(call => call.options.redirect === 'manual'))
+    assert.equal(
+      network.calls[1].url,
+      `https://api.github.com/repos/striveh/dsh-plugin-extension-center/git/ref/tags/v${currentVersion}`,
+    )
+    assert.ok(network.calls.every(call => !call.url.includes('/commits/')))
     assert.equal(evidence.sourceKind, 'github-release')
     assert.equal(evidence.finalHost, 'release-assets.githubusercontent.com')
     assert.equal(evidence.release.sourceCommit, currentCommit)
     assert.equal(evidence.sha256, digest(bytes))
     assert.equal(evidence.releasePayload.length, 3)
     assert.equal(evidence.immutableRelease.releaseId, 111)
+    assert.equal(evidence.immutableRelease.tagRefSha1, currentCommit)
     assert.match(evidence.sha512, /^sha512-/u)
     assert.deepEqual(await readFile(destination), bytes)
+  })
+})
+
+test('keeps GitHub tag-ref metadata within the fixed JSON byte bound', async () => {
+  await withTemporaryDirectory(async root => {
+    const spec = artifact()
+    const assets = ciReleaseAssets(spec)
+    const fetchImpl = async url => {
+      const parsed = new URL(url)
+      if (parsed.pathname.includes('/releases/tags/')) {
+        return new Response(JSON.stringify(releaseMetadata(spec, assets)), { status: 200 })
+      }
+      if (parsed.pathname.includes('/git/ref/tags/')) {
+        return new Response(JSON.stringify({
+          ...tagRefMetadata(spec),
+          padding: 'x'.repeat(1_048_576),
+        }), { status: 200 })
+      }
+      throw new Error(`unexpected request ${parsed.href}`)
+    }
+    await assert.rejects(
+      acquireVerifiedReleaseArtifact(spec, join(root, 'center.tgz'), {
+        fetchImpl,
+        ciReleaseAssets: assets,
+        immutableReleaseProof: immutableProof(spec, assets),
+      }),
+      acceptanceCode('P0-RELEASE-METADATA'),
+    )
   })
 })
 
