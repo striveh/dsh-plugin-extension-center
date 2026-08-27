@@ -164,6 +164,13 @@ describe('GitHub Pages signed catalog projection', () => {
     expect(workflowText).toContain('.evidence.verifierGithubCi.sha256 == $verifier_sha')
     expect(workflowText).toContain('.run.headSha == $commit')
     expect(workflowText).toContain('.receiptDigest == $receipt_digest')
+    const pnpmBindingStep = workflow.jobs['verify-publication'].steps.find(
+      (step: { name?: string }) => step.name === 'Resolve immutable pnpm binding',
+    ) as { run?: string } | undefined
+    expect(pnpmBindingStep?.run?.split('\n')[0]).toBe(
+      'node scripts/resolve-pnpm-binding.mjs node_modules/pnpm/bin/pnpm.mjs > .artifacts/pnpm-binding.json',
+    )
+    expect(pnpmBindingStep?.run).not.toContain('command -v pnpm')
     expect(workflowText).not.toMatch(/pnpm run test:[^\n]* --(?:[ \t]|$)/mu)
     expect(workflowText).not.toContain('secrets.')
     const actions = [...workflowText.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map(match => match[1])
