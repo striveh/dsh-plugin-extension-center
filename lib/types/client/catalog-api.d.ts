@@ -10,7 +10,7 @@ export declare class ExtensionCenterRpcError extends Error {
 export interface ExtensionCatalogClient {
     /** Read the current verified snapshot projection. */
     list(signal?: AbortSignal): Promise<CatalogListResponse>;
-    /** Explicitly ask the loopback Host to refresh its fixed signed catalog endpoint. */
+    /** Explicitly ask the authenticated Host to refresh its fixed signed catalog endpoint. */
     refresh?(signal?: AbortSignal): Promise<CatalogListResponse>;
 }
 /** Deeply validate a Host catalog response before rendering any field. */

@@ -5,7 +5,7 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { withCatalogCacheWriter } from '../src/catalog-cache-reservation.ts'
 import type { CatalogEnvelope, CatalogRoot } from '../src/catalog-contract.ts'
 import {
@@ -21,12 +21,31 @@ import {
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from '../src/catalog-data.ts'
 import { canonicalJson, canonicalSha256, verifyCatalog } from '../src/catalog.ts'
+import {
+  DEVELOPMENT_CATALOG_KEY_ID,
+  developmentCatalogSuccessor,
+} from './support/catalog-refresh-development.ts'
+
+vi.mock('../src/catalog-data.ts', async (importOriginal) => {
+  const production = await importOriginal<typeof import('../src/catalog-data.ts')>()
+  const { DEVELOPMENT_CATALOG_KEY } = await import('./support/catalog-refresh-development.ts')
+  return {
+    ...production,
+    BOOTSTRAP_CATALOG_ROOT: Object.freeze({
+      ...production.BOOTSTRAP_CATALOG_ROOT,
+      keys: Object.freeze([...production.BOOTSTRAP_CATALOG_ROOT.keys, DEVELOPMENT_CATALOG_KEY]),
+    }),
+  }
+})
 
 const NOW = Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000
 const CATALOG_URL = 'https://catalog.example.test/project/plugins.json'
+const PACKAGED_REVISION = BOOTSTRAP_CATALOG_ENVELOPE.revision
+const DEVELOPMENT_REVISION = PACKAGED_REVISION + 1
 const roots: string[] = []
 const children = new Set<ChildProcess>()
 const catalogWorker = resolve('tests/fixtures/catalog-refresh-worker.mts')
+const catalogWorkerRegister = resolve('tests/fixtures/catalog-refresh-development-register.mjs')
 
 interface CatalogWorkerMessage {
   readonly event: string
@@ -68,7 +87,7 @@ function startCatalogWorker(
   now: number,
 ): CatalogWorker {
   const child = fork(catalogWorker, [mode, root, String(now)], {
-    execArgv: ['--experimental-transform-types', '--no-warnings'],
+    execArgv: ['--import', catalogWorkerRegister, '--experimental-transform-types', '--no-warnings'],
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   })
   children.add(child)
@@ -206,7 +225,37 @@ function legacyR9Document(): SignedCatalogDocument {
   })
 }
 
-async function publicR11Document(): Promise<SignedCatalogDocument> {
+function legacyR10Document(): SignedCatalogDocument {
+  return Object.freeze({
+    envelope: Object.freeze({
+      catalogId: BOOTSTRAP_CATALOG_ROOT.catalogId,
+      revision: 10,
+      issuedAt: '2026-08-27T17:40:32.000Z',
+      expiresAt: '2027-08-27T17:40:32.000Z',
+      previousRevisionDigest: 'sha256:c559ca39429f6c72e82ddb08bc13636e226e39e0b27f04c8d30495ae57007e7e',
+      entriesDigest: 'sha256:da9f5a4f703462cb27de0df26e265c3461dd85a51f0b5a2deecb76ee22d9de86',
+      entries: BOOTSTRAP_CATALOG_ENTRIES,
+    }),
+    signatures: Object.freeze([{
+      keyId: 'bootstrap-2026-08-26-8',
+      algorithm: 'ed25519' as const,
+      value: '1/b2bZKc3l4k7HoSmRN2YvgJPp64blLhYuyeCC/6zh39HOwT3cKe4SqbHiL+JANIDEbQNcAZwg4NoGY4dHHMCA==',
+    }]),
+  })
+}
+
+function packagedDocument(): SignedCatalogDocument {
+  return Object.freeze({
+    envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+    signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+  })
+}
+
+function developmentSuccessor(): SignedCatalogDocument {
+  return developmentCatalogSuccessor(BOOTSTRAP_CATALOG_ENVELOPE)
+}
+
+async function publicPackagedDocument(): Promise<SignedCatalogDocument> {
   const bytes = await readFile(join(process.cwd(), 'catalog', 'public', 'plugins.json'), 'utf8')
   return JSON.parse(bytes) as SignedCatalogDocument
 }
@@ -399,18 +448,41 @@ describe('live admitted catalog snapshot', () => {
     expect(manager.current().catalog.envelope.entriesDigest).toBe(BOOTSTRAP_CATALOG_ENVELOPE.entriesDigest)
   })
 
-  it('trims the retained rc.2 cache and refreshes the same Profile to the adjacent public catalog', async () => {
-    const root = await scratch()
-    const legacy = legacyR9Document()
-    const current = Object.freeze({
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+  it('keeps the adjacent successor cryptographically valid but development-only', async () => {
+    const successor = developmentSuccessor()
+    const production = await vi.importActual<typeof import('../src/catalog-data.ts')>('../src/catalog-data.ts')
+    const productionRoot = production.BOOTSTRAP_CATALOG_ROOT
+    const now = Date.parse(successor.envelope.issuedAt) + 1_000
+    expect(productionRoot.keys.some(key => key.keyId === DEVELOPMENT_CATALOG_KEY_ID)).toBe(false)
+    expect(successor.envelope).toMatchObject({
+      revision: DEVELOPMENT_REVISION,
+      previousRevisionDigest: canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE),
     })
-    const remote = await publicR11Document()
-    const cachePath = await writeCatalogCache(root, [legacy, current])
+    expect(() => verifyCatalog(
+      productionRoot,
+      successor.envelope,
+      successor.signatures,
+      now,
+    )).toThrow('signature threshold')
+    expect(verifyCatalog(
+      BOOTSTRAP_CATALOG_ROOT,
+      successor.envelope,
+      successor.signatures,
+      now,
+    ).keyIds).toEqual([DEVELOPMENT_CATALOG_KEY_ID])
+  })
+
+  it('trims the historical r9/r10 cache into the exact packaged signed r11', async () => {
+    const root = await scratch()
+    const r9 = legacyR9Document()
+    const r10 = legacyR10Document()
+    const remote = await publicPackagedDocument()
+    const cachePath = await writeCatalogCache(root, [r9, r10])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
     let calls = 0
-    expect(canonicalSha256(legacy.envelope)).toBe(BOOTSTRAP_CATALOG_ENVELOPE.previousRevisionDigest)
+    expect(canonicalSha256(r9.envelope)).toBe(r10.envelope.previousRevisionDigest)
+    expect(canonicalSha256(r10.envelope)).toBe(BOOTSTRAP_CATALOG_ENVELOPE.previousRevisionDigest)
+    expect(remote).toEqual(packagedDocument())
     const manager = new CatalogSnapshotManager(root, {
       trustedUrl: CATALOG_URL,
       fetchTimeoutMs: 5_000,
@@ -419,7 +491,7 @@ describe('live admitted catalog snapshot', () => {
       fetch: (async () => {
         calls += 1
         expect((await readCatalogCache(cachePath)).chain
-          .map(document => document.envelope.revision)).toEqual([10])
+          .map(document => document.envelope.revision)).toEqual([PACKAGED_REVISION])
         return responseAt(CATALOG_URL, canonicalJson(remote), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -428,16 +500,13 @@ describe('live admitted catalog snapshot', () => {
     })
 
     await expect(manager.initialize()).resolves.toMatchObject({
-      catalog: { envelope: { revision: 11 } },
+      catalog: { envelope: { revision: PACKAGED_REVISION } },
       status: { source: 'remote', freshness: 'fresh', degraded: false },
     })
     expect(calls).toBe(1)
     const persisted = await readCatalogCache(cachePath)
-    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([10, 11])
-    expect(persisted.chain[0]).toEqual({
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    })
+    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([PACKAGED_REVISION])
+    expect(persisted.chain[0]).toEqual(packagedDocument())
   })
 
   it('rebases a verified rc.0-only cache directly to the stable bootstrap without network access', async () => {
@@ -449,14 +518,11 @@ describe('live admitted catalog snapshot', () => {
     })
 
     await expect(manager.initialize()).resolves.toMatchObject({
-      catalog: { envelope: { revision: 10 } },
+      catalog: { envelope: { revision: PACKAGED_REVISION } },
       status: { source: 'bootstrap', freshness: 'bootstrap', degraded: false },
     })
     const persisted = await readCatalogCache(cachePath)
-    expect(persisted.chain).toEqual([{
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    }])
+    expect(persisted.chain).toEqual([packagedDocument()])
   })
 
   it('queues same-process cache writers before a second callback can enter', async () => {
@@ -483,11 +549,8 @@ describe('live admitted catalog snapshot', () => {
 
   it('keeps the newest durable chain when two processes finish stale refreshes out of order', async () => {
     const root = await scratch()
-    const remote = await publicR11Document()
-    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    }])
+    const remote = developmentSuccessor()
+    const cachePath = await writeCatalogCache(root, [packagedDocument()])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
 
     const stale = startCatalogWorker('stale', root, now)
@@ -495,7 +558,7 @@ describe('live admitted catalog snapshot', () => {
 
     const winner = startCatalogWorker('winner', root, now)
     await expect(winner.message('done')).resolves.toMatchObject({
-      revision: 11,
+      revision: DEVELOPMENT_REVISION,
       source: 'remote',
       freshness: 'fresh',
       degraded: false,
@@ -504,11 +567,11 @@ describe('live admitted catalog snapshot', () => {
     await waitForCatalogWorker(winner)
     const winnerBytes = await readFile(cachePath, 'utf8')
     expect((JSON.parse(winnerBytes) as { chain: SignedCatalogDocument[] }).chain
-      .map(document => document.envelope.revision)).toEqual([10, 11])
+      .map(document => document.envelope.revision)).toEqual([PACKAGED_REVISION, DEVELOPMENT_REVISION])
 
     stale.child.send({ command: 'release' })
     await expect(stale.message('done')).resolves.toMatchObject({
-      revision: 11,
+      revision: DEVELOPMENT_REVISION,
       source: 'last-good',
       freshness: 'cached',
       degraded: true,
@@ -522,7 +585,7 @@ describe('live admitted catalog snapshot', () => {
       fetch: globalThis.fetch,
     })
     await expect(reopened.initialize()).resolves.toMatchObject({
-      catalog: { envelope: { revision: 11 } },
+      catalog: { envelope: { revision: DEVELOPMENT_REVISION } },
       status: { source: 'last-good', freshness: 'cached', degraded: false },
     })
     expect((await readdir(join(root, 'catalog'))).filter(name => (
@@ -532,23 +595,23 @@ describe('live admitted catalog snapshot', () => {
 
   it('adopts a newer durable chain after another process wins and this process fetch fails', async () => {
     const root = await scratch()
-    const remote = await publicR11Document()
-    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    }])
+    const remote = developmentSuccessor()
+    const cachePath = await writeCatalogCache(root, [packagedDocument()])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
 
     const offline = startCatalogWorker('stale-offline', root, now)
     await expect(offline.message('fetch-entered')).resolves.toEqual({ event: 'fetch-entered' })
     const winner = startCatalogWorker('winner', root, now)
-    await expect(winner.message('done')).resolves.toMatchObject({ revision: 11, degraded: false })
+    await expect(winner.message('done')).resolves.toMatchObject({
+      revision: DEVELOPMENT_REVISION,
+      degraded: false,
+    })
     await waitForCatalogWorker(winner)
     const winnerBytes = await readFile(cachePath, 'utf8')
 
     offline.child.send({ command: 'release' })
     await expect(offline.message('done')).resolves.toMatchObject({
-      revision: 11,
+      revision: DEVELOPMENT_REVISION,
       source: 'last-good',
       freshness: 'cached',
       degraded: true,
@@ -560,11 +623,8 @@ describe('live admitted catalog snapshot', () => {
 
   it('releases the cross-process writer reservation when its owner crashes', async () => {
     const root = await scratch()
-    const remote = await publicR11Document()
-    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    }])
+    const remote = developmentSuccessor()
+    const cachePath = await writeCatalogCache(root, [packagedDocument()])
     const now = Date.parse(remote.envelope.issuedAt) + 1_000
     const beforeCrash = await readFile(cachePath, 'utf8')
 
@@ -594,25 +654,29 @@ describe('live admitted catalog snapshot', () => {
 
     const successor = startCatalogWorker('winner', root, now)
     await expect(successor.message('done')).resolves.toMatchObject({
-      revision: 11,
+      revision: DEVELOPMENT_REVISION,
       source: 'remote',
       freshness: 'fresh',
       degraded: false,
     })
     await waitForCatalogWorker(successor)
     const persisted = await readCatalogCache(cachePath)
-    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([10, 11])
+    expect(persisted.chain.map(document => document.envelope.revision)).toEqual([
+      PACKAGED_REVISION,
+      DEVELOPMENT_REVISION,
+    ])
     expect((await readdir(join(root, 'catalog'))).filter(name => name.endsWith('-journal'))).toEqual([])
   })
 
   it('trims a verified legacy prefix while retaining the current bootstrap suffix', async () => {
-    const legacy = legacyR9Document()
-    const current = Object.freeze({
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    })
-    const remote = await publicR11Document()
-    for (const chain of [[legacy, current], [legacy, current, remote]]) {
+    const historical = [legacyR9Document(), legacyR10Document()]
+    const current = packagedDocument()
+    const remote = developmentSuccessor()
+    const chains: readonly (readonly SignedCatalogDocument[])[] = [
+      [...historical, current],
+      [...historical, current, remote],
+    ]
+    for (const chain of chains) {
       const root = await scratch()
       const cachePath = await writeCatalogCache(root, chain)
       const manager = new CatalogSnapshotManager(root, { trustedUrl: null, fetchTimeoutMs: 5_000 }, {
@@ -622,19 +686,18 @@ describe('live admitted catalog snapshot', () => {
       await manager.initialize()
       const persisted = await readCatalogCache(cachePath)
       expect(persisted.chain.map(document => document.envelope.revision)).toEqual(
-        chain.length === 2 ? [10] : [10, 11],
+        chain.length === 3
+          ? [PACKAGED_REVISION]
+          : [PACKAGED_REVISION, DEVELOPMENT_REVISION],
       )
       expect(manager.current().catalog.envelope.revision).toBe(chain.at(-1)!.envelope.revision)
     }
   })
 
   it('rejects equivocated, future, gapped, and signature-drifted rollover caches without fetching or rewriting', async () => {
-    const legacy = legacyR9Document()
-    const current = Object.freeze({
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    })
-    const remote = await publicR11Document()
+    const legacy = legacyR10Document()
+    const current = packagedDocument()
+    const remote = developmentSuccessor()
     const cases: readonly (readonly SignedCatalogDocument[])[] = [
       [{
         envelope: { ...legacy.envelope, entriesDigest: canonicalSha256([]), entries: [] },
@@ -674,10 +737,11 @@ describe('live admitted catalog snapshot', () => {
 
   it('leaves the rc.2 cache bytes intact when the durable stable rollover replacement cannot start', async () => {
     const root = await scratch()
-    const cachePath = await writeCatalogCache(root, [legacyR9Document(), {
-      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-    }])
+    const cachePath = await writeCatalogCache(root, [
+      legacyR9Document(),
+      legacyR10Document(),
+      packagedDocument(),
+    ])
     const directory = join(root, 'catalog')
     const before = await readFile(cachePath, 'utf8')
     await chmod(directory, 0o500)

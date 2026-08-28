@@ -14,7 +14,6 @@ const PLATFORM_MODULES = [
 ]
 const CLIENT_EXTERNALS: readonly string[] = [
   ...PLATFORM_MODULES,
-  '@deepseek-ai/dsh-client-runtime/client',
 ]
 const PLUGIN_ID: string = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).name
 const CSS_VIRTUAL_PREFIX = '\0dsh-extension-center-css:'

@@ -1,4 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 import { BOOTSTRAP_CATALOG_ENTRIES } from '../src/catalog-data.ts'
 import { canonicalJson, canonicalSha256, verifyCatalog } from '../src/catalog.ts'
@@ -137,7 +138,7 @@ describe('catalog discovery plane', () => {
       }],
     }, 'https://api.github.com/search/repositories?q=topic%3Aagent-skill', NOW)
     expect(report.leads[0]).toMatchObject({
-      sourceId: 'github-skill-search',
+      sourceId: 'github-agent-skill-search',
       kindHint: 'skill',
       externalId: 'example/agent-skills',
       versionHint: null,
@@ -145,6 +146,43 @@ describe('catalog discovery plane', () => {
     })
     expect(canonicalJson(report)).not.toContain('untrusted README summary')
     expect(canonicalJson(report)).not.toContain('main')
+  })
+
+  it('keeps the plural agent-skills search as a distinct provenance source', () => {
+    const report = discoverGithubSkillRepositories({
+      items: [{
+        full_name: 'microsoft/skills',
+        html_url: 'https://github.com/microsoft/skills',
+        owner: { login: 'microsoft' },
+        stargazers_count: 42,
+        topics: ['agent-skills', 'agents'],
+      }],
+    }, 'https://api.github.com/search/repositories?q=topic%3Aagent-skills', NOW, 'github-agent-skills-search')
+    expect(report.leads[0]).toMatchObject({
+      sourceId: 'github-agent-skills-search',
+      externalId: 'microsoft/skills',
+      signals: { category: 'agent-skills' },
+    })
+
+    const unrelated = discoverGithubSkillRepositories({
+      items: [{
+        full_name: 'example/agents',
+        html_url: 'https://github.com/example/agents',
+        owner: { login: 'example' },
+        stargazers_count: 1,
+        topics: ['agents'],
+      }],
+    }, 'https://api.github.com/search/repositories?q=topic%3Aagent-skills', NOW, 'github-agent-skills-search')
+    expect(unrelated.leads).toHaveLength(0)
+    expect(unrelated.rejections).toHaveLength(1)
+  })
+
+  it('keeps scheduled discovery read-only and non-admitting', async () => {
+    const workflow = await readFile('.github/workflows/catalog-discovery.yml', 'utf8')
+    expect(workflow).toContain('node scripts/catalog-pipeline.mjs discover')
+    expect(workflow).not.toContain('catalog-pipeline.mjs publish')
+    expect(workflow).not.toContain('lifecycle/request')
+    expect(workflow).not.toContain('plugin --profile')
   })
 })
 

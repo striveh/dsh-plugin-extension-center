@@ -178,7 +178,7 @@ interface ResolvedConfig {
 interface ConnectionContext {
   readonly connection: {
     readonly rpc: {
-      handle(channel: string, handler: ConnectionRpcHandler, options: { authority: 'loopback' }): () => Promise<void>
+      handle(channel: string, handler: ConnectionRpcHandler): () => Promise<void>
     }
   }
   get(name: string): unknown
@@ -342,7 +342,7 @@ function rpcServices(
   })
 }
 
-/** Assemble every managed lifecycle inside one independent plugin on official DSH rc.2. */
+/** Assemble every managed lifecycle inside one independent plugin on official DSH 0.1.2-alpha.1. */
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const host = ctx as unknown as ConnectionContext
   const resolved = resolvedConfig(config)
@@ -445,7 +445,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         taskContinuations: continuations,
       })
       if (!hostCapabilities(owners).acquisition) {
-        throw new Error('official DSH rc.2 does not expose every Extension Center service dependency')
+        throw new Error('official DSH 0.1.2-alpha.1 does not expose every Extension Center service dependency')
       }
       let generation!: WritableOwnerGeneration
       generation = new WritableOwnerGeneration(
@@ -547,7 +547,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return await createHostRpcHandler(services)(endpoint, payload, signal)
   }
   ctx.effect(
-    () => host.connection.rpc.handle(EXTENSION_CENTER_RPC_CHANNEL, handler, { authority: 'loopback' }),
-    'extension-center: loopback RPC',
+    () => host.connection.rpc.handle(EXTENSION_CENTER_RPC_CHANNEL, handler),
+    'extension-center: authenticated RPC',
   )
 }

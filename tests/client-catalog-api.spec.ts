@@ -95,4 +95,14 @@ describe('catalog Client wire validation', () => {
     delete missing.entries[0]!.source.upstreamUrl
     expect(() => parseCatalogListResponse(missing)).toThrow('unexpected fields')
   })
+
+  it('accepts the exact alpha Host coordinate without admitting an unknown DSH version', () => {
+    const alpha = structuredClone(response)
+    alpha.entries[0]!.compatibility.dsh = '0.1.2-alpha.1'
+    expect(parseCatalogListResponse(alpha).entries[0]!.compatibility.dsh).toBe('0.1.2-alpha.1')
+
+    const unknown = structuredClone(alpha)
+    unknown.entries[0]!.compatibility.dsh = '0.1.2-alpha.2' as never
+    expect(() => parseCatalogListResponse(unknown)).toThrow('compatibility.dsh')
+  })
 })

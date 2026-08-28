@@ -1,8 +1,11 @@
 {
   "name": "dsh-plugin-extension-center",
-  "version": "0.1.0",
+  "version": "0.2.0-alpha.1",
   "description": "Independent DeepSeek Harness Extension Center for Plugin, MCP connection, and Skill lifecycles",
-  "private": true,
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
   "license": "MIT",
   "author": "striveh",
   "type": "module",
@@ -35,6 +38,7 @@
     "docs",
     "acceptance/store-only",
     "acceptance/full-p0",
+    "acceptance/ordinary-user",
     "CHANGELOG.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
@@ -42,7 +46,7 @@
   ],
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": "0.1.1-rc.2"
+    "dsh": "0.1.2-alpha.1"
   },
   "dsh": {
     "bundle": {
@@ -52,7 +56,6 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-primitives",
@@ -66,8 +69,9 @@
     "clean:client-build": "node scripts/clean-client-build.mjs",
     "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "build": "pnpm run clean && tsc -p tsconfig.host.json && tsc -p tsconfig.client.json && tsdown && pnpm run clean:client-build && node scripts/normalize-build-newlines.mjs",
-    "test": "pnpm run build && vitest run && node --test scripts/verify-deterministic-pack.test.mjs acceptance/store-only/support.test.mjs acceptance/full-p0/support.test.mjs acceptance/full-p0/receipt-binding.test.mjs acceptance/full-p0/agent-acquisition.test.mjs acceptance/full-p0/assert-release-ready.test.mjs acceptance/full-p0/break-glass-e2e.test.mjs acceptance/full-p0/controlled-aba.test.mjs acceptance/full-p0/fault-matrix.test.mjs acceptance/release/assert-publication-incident.test.mjs acceptance/release/verify-catalog-sources.test.mjs acceptance/release/verify-github-ci.test.mjs acceptance/release/verify-public-catalog.test.mjs acceptance/release/verify-public-release.test.mjs acceptance/release/verify-runtime-release.test.mjs",
+    "test": "pnpm run build && vitest run && node --test scripts/verify-deterministic-pack.test.mjs scripts/verify-alpha-publish-ready.test.mjs scripts/verify-alpha-ci-release-input.test.mjs scripts/verify-alpha-npm-publication.test.mjs scripts/run-alpha-npm-signature-audit.test.mjs acceptance/store-only/support.test.mjs acceptance/ordinary-user/support.test.mjs acceptance/alpha-p0/support.test.mjs acceptance/full-p0/support.test.mjs acceptance/full-p0/receipt-binding.test.mjs acceptance/full-p0/agent-acquisition.test.mjs acceptance/full-p0/assert-release-ready.test.mjs acceptance/full-p0/break-glass-e2e.test.mjs acceptance/full-p0/controlled-aba.test.mjs acceptance/full-p0/fault-matrix.test.mjs acceptance/release/assert-publication-incident.test.mjs acceptance/release/verify-catalog-sources.test.mjs acceptance/release/verify-github-ci.test.mjs acceptance/release/verify-public-catalog.test.mjs acceptance/release/verify-public-release.test.mjs acceptance/release/verify-runtime-release.test.mjs",
     "test:acceptance:store": "pnpm run build && node acceptance/store-only/run.mjs",
+    "test:acceptance:ordinary-user": "node acceptance/ordinary-user/run.mjs",
     "test:acceptance:official-rc2": "pnpm run build && node acceptance/full-p0/verify-official-rc2.mjs",
     "test:acceptance:runtime-release": "node acceptance/release/verify-runtime-release.mjs",
     "test:acceptance:public-release": "node acceptance/release/verify-public-release.mjs",
@@ -81,7 +85,9 @@
     "catalog:publish": "pnpm run build && node scripts/catalog-pipeline.mjs publish",
     "catalog:rollover": "pnpm run build && node scripts/rollover-public-catalog.mjs",
     "pack:preview": "pnpm run build && pnpm pack --dry-run",
-    "verify:pack": "node scripts/verify-deterministic-pack.mjs"
+    "verify:pack": "node scripts/verify-deterministic-pack.mjs",
+    "verify:alpha-publish-ready": "node scripts/verify-alpha-publish-ready.mjs",
+    "verify:alpha-p0-composite": "node acceptance/alpha-p0/verify.mjs"
   },
   "keywords": [
     "dsh-plugin",
@@ -103,13 +109,12 @@
   "homepage": "https://github.com/striveh/dsh-plugin-extension-center#readme",
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-layout": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-connection": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-locale": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.1",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
@@ -117,9 +122,6 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-locale": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-runtime": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-layout": {
@@ -143,7 +145,6 @@
     "@deepseek-ai/dsh": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-locale": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-layout": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.1-rc.2",

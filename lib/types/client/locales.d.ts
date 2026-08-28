@@ -8,7 +8,7 @@ export declare const en: {
     readonly close: "Close Extension Store";
     readonly description: "Discover Plugin, MCP server, and Skill candidates from one verified local catalog.";
     readonly preview: "Trusted extension catalog";
-    readonly host: "DSH 0.1.1-rc.2";
+    readonly host: "DSH 0.1.2-alpha.1";
     readonly views: "Extension Center views";
     readonly 'tab.store': "Store";
     readonly 'tab.installed': "Installed";
@@ -73,7 +73,7 @@ export declare const en: {
     readonly 'acquire.scope': "Target scope";
     readonly 'acquire.scope.placeholder': "Choose a scope…";
     readonly 'acquire.scope.required': "Choose the exact target scope before previewing a plan.";
-    readonly 'compatibility.compatible': "Compatible with rc.2";
+    readonly 'compatibility.compatible': "Compatible";
     readonly 'compatibility.review': "Compatibility review required";
     readonly 'field.type': "Type";
     readonly 'field.publisher': "Publisher";

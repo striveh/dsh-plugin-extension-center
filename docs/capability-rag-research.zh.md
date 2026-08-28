@@ -91,7 +91,7 @@ Agent 获得的是一个狭窄的模型工具，而不是原始目录。商店�
 | 从任意 Web 或社区搜索结果直接安装 | 禁止；结果保持 `external-only` |
 | 记住宽泛安装授权或替未来候选批准 | P0 排除 |
 
-模型侧获取请求只接受 `resolutionId`、`candidateRef` 和 `continuationId`。Host 必须在相同 catalog、inventory、policy、scope、expiry 与 integrity revision 下重新解析这些不透明值，生成不可变计划，并等待独立的 loopback 人工确认。Agent 无法调用确认 endpoint。
+模型侧获取请求只接受 `resolutionId`、`candidateRef` 和 `continuationId`。Host 必须在相同 catalog、inventory、policy、scope、expiry 与 integrity revision 下重新解析这些不透明值，生成不可变计划，并等待已认证 DSH Web 浏览器会话中的独立用户决定。Agent 无法调用该决定 endpoint。
 
 ## 产品决策：续行
 

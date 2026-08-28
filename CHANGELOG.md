@@ -4,12 +4,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Changed
+
+- Target official DSH `0.1.2-alpha.1`, including its Connection-authenticated browser RPC and framework-neutral Client store contracts.
+- Name the required alpha CI aggregate `Alpha package contract checkpoint` because it covers package contracts only. Add an official-alpha source-checkpoint procedure, while withholding a compatibility claim until a self-digested receipt binds a completed run to the exact source commit and Center artifact.
+- Add a registry-only ordinary-user acceptance lane that requires exact `pnpm@11.21.0`, installs `0.2.0-alpha.0`, resolves `@next` to immutable version and integrity, and checks update, Host/Client boot, uninstall, and an unchanged official DSH package tree. Its receipt schema 3 drives the Skill lifecycle through the real Playwright UI and can prove only that protected Skill lane; product `p0Status` remains `red` until separate Plugin, MCP, and Agent evidence is cross-bound.
+- Raise the official-alpha Wiki lifecycle receipt to schema 2 with catalog observation time and per-operation operation, journal, inventory, managed, configuration, material, and owner-state evidence. Derive lifecycle catalog time from the current TLS-protected GitHub HTTP `Date`, and require catalog admission to reuse the receipt's observed and issued times instead of dispatcher inputs. These source controls do not claim a completed lifecycle or catalog publication.
+- Promote stable's receipt-proven exact public revision 11 into the alpha package bootstrap and make the exact predecessor preflight pass. This closes only the r11 prerequisite; the alpha r12 lifecycle, admission, review, Pages deployment, runtime refresh, and registry ordinary-user evidence remain `Pending`/RED.
+- Prepare npm publication under the `next` tag without adding a fork, Host patch, or custom installer. The workflow requires the exact successful main CI artifact, rejects mixed DSH release trees, verifies post-publication registry integrity without moving `latest`, retries only bounded network and attestation-propagation failures, persists a self-digested secret-free npm provenance receipt, and then requires the ordinary-user lifecycle receipt. This source change does not claim that either alpha release or the tag exists in npm.
+
 ## [0.1.0] - 2026-08-28
 
 ### Changed
 
 - Promote the exact revision-10 catalog deployed and verified by the successful rc.2 receipt into the packaged offline bootstrap, and commit its reviewed, entry-preserving, signed revision-11 successor as the stable publication input.
-- Require stable publication to update from the exact successful rc.2 artifact and receipt; the immutable stable Release, Pages revision 11 deployment, same-root update, and composite status remain established only by the stable post-publication receipt.
+- Complete stable post-publication run `33130950000` successfully on protected `main` commit `6d95545652e15c57b9e13390095a7172e65034b3`. Its artifact digest is `sha256:7dbc3145d376f75ed4ff8763af46290f7daff5a0be9dcf446fd017f02a23c2c0`; its release-ready receipt digest is `sha256:cdc27dfcb5768b8fe14c082553b5120e98d050748015df0311d1e610edf27994`; its public-catalog receipt digest is `sha256:4bb66be8eef541eaebde8e0ee56ad09225f6f288948365d08c00c9d3159ad700`; and that catalog receipt binds public revision 11 to exact file SHA-256 `38a5414c2da581bf0014a2769c9842375b0d0822b77f89e5159b27b3042fc58e`.
 
 ## [0.1.0-rc.2] - 2026-08-28
 
@@ -51,7 +60,7 @@ All notable changes to this project will be documented in this file. The format 
 
 - Initial public development source for the independent DeepSeek Harness Unified Extension Center.
 - A signed offline Store, strict live signed-catalog refresh, lead-only community discovery pipeline, and local task-first Capability RAG.
-- Center-owned discovery, admission, immutable plans, loopback human approval, per-target journals, secret-free receipts, recovery coordination, and durable original-task continuation binding.
+- Center-owned discovery, admission, immutable plans, browser-session-authenticated user decisions, per-target journals, secret-free receipts, recovery coordination, and durable original-task continuation binding.
 - Typed Plugin, MCP, and Skill providers with distinct lifecycle and verification semantics.
 - Store, Installed, Updates, and Activity & Recovery Web surfaces with explicit unavailable, unverified, and recovery states.
 - Packed Store discovery and complete plugin-only release acceptance lanes for the unmodified official DSH rc.2 artifact.
@@ -76,7 +85,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Release gates
 
 - Every release remains conditional on exact packed-artifact lifecycle, browser, recovery, continuation, deterministic-pack, and platform receipts against the unmodified official DSH rc.2 artifact.
-- `0.1.0-rc.0` is the successful bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it proves catalog `r8→r9`. The immutable rc.1 candidate promoted `r9` and deployed `r10`, but its only post-publication run exposed the cache-rollover defect and produced no successful composite receipt. Recovery rc.2 binds rc.0's successful receipt, keeps packaged `r9` and deployed `r10`, binds the rc.1 `not-release-ready` incident, and has a successful composite receipt. Stable uses that exact rc.2 receipt, packages `r10`, and commits signed `r11`; its Release, Pages, runtime, catalog-source, and composite claims require the stable receipt. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
+- `0.1.0-rc.0` is the successful bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it proves catalog `r8→r9`. The immutable rc.1 candidate promoted `r9` and deployed `r10`, but its only post-publication run exposed the cache-rollover defect and produced no successful composite receipt. Recovery rc.2 binds rc.0's successful receipt, keeps packaged `r9` and deployed `r10`, binds the rc.1 `not-release-ready` incident, and has a successful composite receipt. Stable used that exact rc.2 receipt, packaged `r10`, committed signed `r11`, and proved its Release, Pages, runtime, catalog-source, and composite status in successful post-publication run `33130950000`. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close a different version's external claims.
 
 [Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.2...v0.1.0

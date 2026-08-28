@@ -91,7 +91,7 @@ The Store uses the same deterministic eligibility filter but lets the user brows
 | Install directly from arbitrary web or community search results | Forbidden; result remains `external-only` |
 | Remember a broad install grant or approve future candidates | Excluded from P0 |
 
-The model-facing acquisition request accepts only `resolutionId`, `candidateRef`, and `continuationId`. The Host re-resolves those opaque values against the same catalog, inventory, policy, scope, expiry, and integrity revision, mints the immutable plan, and waits for a separate loopback human confirmation. The Agent cannot call that confirmation endpoint.
+The model-facing acquisition request accepts only `resolutionId`, `candidateRef`, and `continuationId`. The Host re-resolves those opaque values against the same catalog, inventory, policy, scope, expiry, and integrity revision, mints the immutable plan, and waits for a separate decision from an authenticated DSH Web browser session. The Agent cannot call that decision endpoint.
 
 ## Product decision: continuation
 

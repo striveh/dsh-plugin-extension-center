@@ -2,7 +2,7 @@ import { canonicalSha256, immutableJsonClone } from '../domain/index.ts'
 import type { CandidatePolicyInput, CandidatePolicyResult, PolicyDenialCode } from './types.ts'
 
 export const POLICY_REVISION = 'extension-center-p0-policy-v2' as const
-export const SUPPORTED_DSH_VERSION = '0.1.1-rc.2' as const
+export const SUPPORTED_DSH_VERSION = '0.1.2-alpha.1' as const
 
 function denied(code: PolicyDenialCode, reason: string): CandidatePolicyResult {
   return Object.freeze({ status: 'denied', policyRevision: POLICY_REVISION, code, reason })

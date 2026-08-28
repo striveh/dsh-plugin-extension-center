@@ -4,11 +4,11 @@ Status: normative P0 product and acceptance baseline, 2026-08-28
 
 English | [中文](p0-product-spec.zh.md)
 
-Compatibility target under verification: the unmodified official DeepSeek Harness `0.1.1-rc.2` release at commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`.
+Compatibility target under verification: the unmodified official DeepSeek Harness source tag `dsh-v0.1.2-alpha.1` at commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`. Production proof remains `Pending` until the matching immutable npm coordinate and exact alpha receipts exist. Stable Center `0.1.0` evidence remains historical and scoped only to official DSH `0.1.1-rc.2`.
 
 The Extension Center is an independently released DSH bundle. Its Host code, Web Client, admitted catalog, discovery, plans, grants, journals, receipts, verification, recovery coordination, and durable continuation claims all ship from this repository. Official DSH is not patched. The Center itself and every admitted child Plugin Bundle, whether Host-only or Host+Client, are installed, updated, downgraded, and removed only through the official `dsh plugin --profile <profile> ...` CLI. The Center may stage and retain exact archives but never writes Profile package-manager state directly. See the [plugin-only architecture](plugin-only-architecture.md) for the implementation boundary and [Capability RAG research](capability-rag-research.md) for the source evidence behind the discovery model.
 
-The public branch is development input rather than release evidence. The exact packed artifact must pass the complete official rc.2 lifecycle, recovery, browser, deterministic Agent, and release-provenance gates below before a version claims them. The stable P0 Agent gate uses official DSH Replay to substitute only the model response edge while the official Agent, Session, Tool dispatch, Center-managed Skill, continuation, and receipt path run normally. A live-provider run is a non-blocking advisory compatibility smoke, not a hard P0 requirement and not a substitute for deterministic evidence. Public Release installation, Pages catalog deployment and refresh, and completed CI platform claims exist only when their own exact-version receipts pass.
+The public branch is development input rather than release evidence. The exact packed artifact must pass the complete official DSH `0.1.2-alpha.1` lifecycle, recovery, browser, deterministic Agent, and release-provenance gates below before an alpha version claims them. The historical stable P0 Agent gate uses official DSH Replay to substitute only the model response edge while the official Agent, Session, Tool dispatch, Center-managed Skill, continuation, and receipt path run normally; that result does not prove alpha. A live-provider run is a non-blocking advisory compatibility smoke, not a hard P0 requirement and not a substitute for deterministic evidence. Public Release installation, Pages catalog deployment and refresh, and completed CI platform claims exist only when their own exact-version receipts pass.
 
 ## Problem
 
@@ -36,7 +36,7 @@ P0 succeeds when a non-expert can answer five questions for every action:
 ## Product and repository boundary
 
 - The product lives only in this repository and is released as one packed Host+Web Client bundle.
-- The compatibility target is the published official rc.2 artifact, not a source checkout or modified package.
+- The compatibility target is exact official DSH `0.1.2-alpha.1`; source-checkpoint work remains development input, and production proof requires the matching immutable registry artifact rather than a checkout or modified package.
 - For every admitted child Plugin Bundle, the Center stages and pins exact archives and owns the operation evidence. Only the official Plugin CLI writes Profile dependencies, lock data, `node_modules`, Bundle membership, and package-membership Loader rows; pure configuration replaces the managed row through the official Loader. The Center never writes package-manager locations directly.
 - Managed MCP connections are Center-owned desired-state records that mount the official MCP Client.
 - Managed Skills are Center-owned files and records projected through the official Skill registry.
@@ -58,7 +58,7 @@ The primary user understands outcomes such as “let the Agent query this servic
 4. Return `use-existing`, `management-required`, `acquisition-candidate`, `choice-required`, `no-eligible-candidate`, `discovery-unavailable`, or `external-only`.
 5. When deterministic evidence produces one material winner, the Agent may select it and initiate a plan request using only opaque ids. Otherwise it asks the user to choose among at most three eligible candidates.
 6. The Host-side Center re-resolves the candidate, current inventory, target scope, policy, catalog revision, and integrity before minting a plan. Any supplied target key must equal the canonical candidate, profile, scope, and extension identity before managed state is read.
-7. The user reviews that exact plan in the loopback Client and grants it once. The Agent cannot call the confirmation action.
+7. The user reviews that exact plan in an authenticated DSH Web browser session and decides once. The Agent cannot call the decision action.
 8. The Center executes the approved typed operation and verifies the matching official observation. Every admitted child Plugin Bundle package membership change is delegated only to the exact official Plugin CLI action bound by the plan; pure configuration uses the plan-bound official Loader row replacement on the same Host process.
 9. The Center consumes one task-bound continuation claim and dispatches one continuation to the original Session. A restart-required Plugin remains pending until a later official Host boot verifies the selected official Profile dependency and declared consumer.
 10. Task completion is recorded only after the acquired capability is actually used and its task-level observable passes.
@@ -69,7 +69,7 @@ The primary user understands outcomes such as “let the Agent query this servic
 2. Search and filter one verified catalog by extension kind, capability, publisher, source class, platform, scope, authority, lifecycle completeness, and configuration readiness.
 3. Compare no more than three candidates using catalog-authored normalized facts. Publisher prose and community text are escaped review data, never instructions.
 4. Preview an exact action plan and its authority delta.
-5. Confirm once in the loopback Client.
+5. Decide once in the authenticated DSH Web Client.
 6. Watch mutation, restart requirement, verification, and recovery state as distinct steps.
 7. Inspect the content-addressed receipt and the exact runtime evidence.
 8. Manage the result from Installed. Store-originated actions never create a task continuation claim.
@@ -144,7 +144,7 @@ An immutable plan binds the protocol version, intent origin, catalog and invento
 
 The Center reads one catalog snapshot while rechecking a plan. The live catalog and owner revisions remain mandatory through the single-use consumption decision. After consumption, the immutable plan, operation authorization, durable intent payload, journal, and provider snapshot are the provider execution and recovery authority; catalog rollover or candidate removal cannot block rollback. Terminal receipt repair and lock release use the consumed plan, authorization, and terminal journal even if a failed operation's intent is unavailable, while task-continuation bookkeeping retries separately from the intent payload. Plugin rollback completion orders exact restored-state verification, durable terminal receipt publication, transient absent-state proof removal, and target-lock release. Startup recovery retains the lock when provider proof is unavailable before receipt publication and completes proof cleanup or unlock from the durable receipt afterward.
 
-The loopback Client shows the plan before it issues a candidate-bound decision. A grant is secret, unexpired, single-use, and bound to the exact plan digest, target, action, scope, inventory revision, and decision identity. Denial and cancellation are terminal facts, not errors to retry silently.
+The authenticated DSH Web Client shows the plan before it issues a candidate-bound decision. The request does not carry a secret grant and does not prove a human principal; Connection has already applied Host/Origin/Fetch-Site trust checks and browser-session cookie authentication. The Center rechecks plan expiry, exact digest, target, action, scope, inventory revision, and decision identity, then consumes the resulting operation authorization once. Denial and cancellation are terminal facts, not errors to retry silently.
 
 Each target has one Center operation owner and monotonic revision. For `managedPlugins`, this ownership covers plans, journals, receipts, retained archives, recovery selection, and evidence; the official Profile package manager remains the physical Plugin owner:
 
@@ -167,7 +167,7 @@ The Center consumes the claim only after the operation is committed, the exact c
 
 Every operation records an absent-state or managed-version rollback point before mutation. The package copies a dependency-free, hash-pinned recovery module to a versioned Center state directory. When the Center or Web cannot load, the user stops DSH and invokes that exact module with `node` and the Center operation id.
 
-Recovery binding schema v5 contains official-execution binding v2 and pins the recovery bytes, canonical Center root, canonical Node executable/version/digest, process-group supervisor, private bundled `pnpm@11.21.0` SRI/tree/entrypoint/shim/POSIX shell, and the exact official rc.2 package/entrypoint/installed production-dependency closure, `hostHome`, and timeout. Normal and standalone execution verify every pin, reject Profile package-manager execution controls, and use a minimal environment. For an installed Profile, the Center strictly parses the exact pre-mutation `package.json`, `pnpm-lock.yaml`, `node_modules/.modules.yaml`, and referenced installed package manifests, then synthesizes owner-only pnpm 11 abbreviated and full registry metadata into a content-addressed generation. Its bound identity covers the Profile digests, existing canonical store, generated files, cache manifest, and pinned pnpm runtime. The Plugin provider recovery snapshot carries the binding, so normal rollback and standalone break-glass use and re-verify the same generation. Missing, changed, symlinked, or mismatched cache material fails before the next official CLI Profile write. Execution remains offline with lifecycle scripts disabled; the generated metadata is not a network prewarm and cannot supply unavailable package bytes. Only a Profile with neither lock nor `node_modules` installation uses a Center-private per-Profile store. The supervisor terminates the mutation process group on timeout or parent loss, including parent `SIGKILL`; a live execution record blocks lease recovery until that group is gone. This mutation and recovery path fails closed on Windows. Recovery also verifies the journal chain, current pointer, plan evidence, provider snapshot, and retained archives. It can restore Center-owned MCP, Skill, and continuation state directly. When the Center or Host cannot start, an admitted child Plugin Bundle rollback invokes only the bound official Plugin CLI to restore the exact Profile before-state, verifies the result, and only then commits Center state. Provider apply is an ambiguity threshold: if mutation recovery cannot prove the result after dispatch begins, the operation remains `recovery-required` with its target lock. Exact rc.0 pnpm 11.7.0 version/SRI pairs are accepted only by durable readers. Unfinished history, including a consumed plan with only its pre-journal reservation, remains locked and shows a non-executable quarantine notice. Before owner initialization, a failed retired Plugin journal that entered apply with a provider snapshot is compared against the Center and raw owner sidecar projections; an exact durable operation reference is also quarantined and a missing exact lock blocks writable activation. Current execution, explicit recovery, owner reconciliation, and standalone break-glass all reject the retired pair before provider or process activity. Unknown and mixed pairs fail as corruption. Recovery never writes Profile dependencies, lock data, `node_modules`, Bundle membership, or Loader rows directly. The next normal official DSH boot verifies the selected Profile dependency and declared consumer before terminal recovery evidence is valid.
+Recovery binding schema v5 contains official-execution binding v2 and pins the recovery bytes, canonical Center root, canonical Node executable/version/digest, process-group supervisor, private bundled `pnpm@11.21.0` SRI/tree/entrypoint/shim/POSIX shell, and the exact official DSH `0.1.2-alpha.1` package/entrypoint/installed production-dependency closure, `hostHome`, and timeout. Normal and standalone execution verify every pin, reject Profile package-manager execution controls, and use a minimal environment. For an installed Profile, the Center strictly parses the exact pre-mutation `package.json`, `pnpm-lock.yaml`, `node_modules/.modules.yaml`, and referenced installed package manifests, then synthesizes owner-only pnpm 11 abbreviated and full registry metadata into a content-addressed generation. Its bound identity covers the Profile digests, existing canonical store, generated files, cache manifest, and pinned pnpm runtime. The Plugin provider recovery snapshot carries the binding, so normal rollback and standalone break-glass use and re-verify the same generation. Missing, changed, symlinked, or mismatched cache material fails before the next official CLI Profile write. Execution remains offline with lifecycle scripts disabled; the generated metadata is not a network prewarm and cannot supply unavailable package bytes. Only a Profile with neither lock nor `node_modules` installation uses a Center-private per-Profile store. The supervisor terminates the mutation process group on timeout or parent loss, including parent `SIGKILL`; a live execution record blocks lease recovery until that group is gone. This mutation and recovery path fails closed on Windows. Recovery also verifies the journal chain, current pointer, plan evidence, provider snapshot, and retained archives. It can restore Center-owned MCP, Skill, and continuation state directly. When the Center or Host cannot start, an admitted child Plugin Bundle rollback invokes only the bound official Plugin CLI to restore the exact Profile before-state, verifies the result, and only then commits Center state. Provider apply is an ambiguity threshold: if mutation recovery cannot prove the result after dispatch begins, the operation remains `recovery-required` with its target lock. Exact rc.0 pnpm 11.7.0 version/SRI pairs are accepted only by durable readers. Unfinished history, including a consumed plan with only its pre-journal reservation, remains locked and shows a non-executable quarantine notice. Before owner initialization, a failed retired Plugin journal that entered apply with a provider snapshot is compared against the Center and raw owner sidecar projections; an exact durable operation reference is also quarantined and a missing exact lock blocks writable activation. Current execution, explicit recovery, owner reconciliation, and standalone break-glass all reject the retired pair before provider or process activity. Unknown and mixed pairs fail as corruption. Recovery never writes Profile dependencies, lock data, `node_modules`, Bundle membership, or Loader rows directly. The next normal official DSH boot verifies the selected Profile dependency and declared consumer before terminal recovery evidence is valid.
 
 ## Trust and security rules
 
@@ -180,16 +180,16 @@ Recovery binding schema v5 contains official-execution binding v2 and pins the r
 - Artifact acquisition rejects all IPv4 and IPv6 literals in initial and redirect URLs. Hostnames, DNS changes, and MCP Tool results remain untrusted; the URL check does not resolve names and does not claim DNS-rebinding protection. Network authority is explicit and exact.
 - Recovery and normal mutation share the same ownership manifest. They cannot write outside Center-owned roots and MCP/Skill registrations; every admitted child Plugin Bundle package membership change is performed only by the official Plugin CLI, while pure configuration uses the official Loader.
 
-## Official rc.2 extension points
+## Official DSH 0.1.2-alpha.1 extension points
 
-The bundle consumes only published rc.2 behavior:
+The bundle consumes only public behavior exposed by exact official DSH `0.1.2-alpha.1`:
 
 - the official `dsh plugin --profile` CLI for every admitted child Plugin Bundle package change;
 - Cordis Loader observation and public configuration methods for verifying Profile-managed Plugin contributions;
 - effect-scoped `ctx.tools` and `ctx.skills` registrations;
 - `@deepseek-ai/dsh-mcp-client` for admitted MCP connection runtimes;
 - official Agent, Session, and persistence services for continuation;
-- loopback `@deepseek-ai/dsh-client-connection` RPC and the `dsh.client` Web bundle declaration.
+- the Connection-authenticated `@deepseek-ai/dsh-client-connection` browser RPC channel and the `dsh.client` Web bundle declaration; release acceptance uses the official Web Profile on its default loopback bind.
 
 The Center's services and operation owners are private product internals, not new official DSH Service Definitions. Center-owned MCP and Skill contributions dispose with their owning fibers; every admitted child Plugin Bundle remains under the official Profile package manager until an approved official CLI action changes it.
 
@@ -216,7 +216,7 @@ Implementation and release proceed through ordered evidence. Later gates do not 
 2. Pack twice and require identical bytes and SHA-256. Inspect every archive entry and reject lifecycle scripts or undeclared executables.
 3. On the exact `main` push, require the Node 22 CI job to upload that deterministic tarball, `SHA256SUMS`, and a self-digested attestation bound to the source commit, run id and attempt, packed manifest, bundled pnpm tree, and artifact coordinates.
 4. Download the exact Actions artifact through the fixed GitHub API and at most one admitted GitHub Actions or Azure Blob storage redirect. Require the declared Actions archive digest and a bounded ZIP containing exactly the tarball, `SHA256SUMS`, and attestation.
-5. Install the attested tarball through the official CLI into isolated DSH, Agents, workspace, and home directories using official `dsh@0.1.1-rc.2` only.
+5. Once its npm coordinate exists, install the attested tarball through the official CLI into isolated DSH, Agents, workspace, and home directories using exact official `dsh@0.1.2-alpha.1` only.
 6. Record the official package identities and audited commit. Reject source checkouts, workspace imports, patched packages, adjacent repositories, and unpacked Center code.
 7. Boot the real Host and browser Client through the published entry points.
 
@@ -242,8 +242,8 @@ Use pinned synthetic Plugin, MCP, and Skill fixtures with real official extensio
 ### Gate D — recovery and original-task continuation
 
 1. Inject faults before material selection, after selection but before runtime verification, after runtime verification but before receipt publication, during restart reconciliation, and during recovery.
-2. Run the schema-v5 hash-pinned break-glass module with the Center or Host unable to start. Prove its official-execution binding v2 verifies Node, the supervisor, private bundled pnpm, and the bound official rc.2 package tree, production closure, entrypoint, and `hostHome`; invokes the exact official Plugin CLI rollback to the admitted absent-state or retained-version before-state; verifies the Profile result before committing Center state; and fails on any binding, executable, journal, pointer, plan, Profile revision, or archive drift without writing Profile state directly.
-3. Start a task through the official Agent and use official DSH Replay to force a deterministic capability gap and model tool-call sequence. Replay may replace only model responses; capability resolution, loopback approval, operation execution, Session logging, Tool dispatch, acquired Skill use, continuation, and receipt evidence must use the real official paths. Prove one continuation reaches the original Session.
+2. Run the schema-v5 hash-pinned break-glass module with the Center or Host unable to start. Prove its official-execution binding v2 verifies Node, the supervisor, private bundled pnpm, and the bound official DSH `0.1.2-alpha.1` package tree, production closure, entrypoint, and `hostHome`; invokes the exact official Plugin CLI rollback to the admitted absent-state or retained-version before-state; verifies the Profile result before committing Center state; and fails on any binding, executable, journal, pointer, plan, Profile revision, or archive drift without writing Profile state directly.
+3. Start a task through the official Agent and use official DSH Replay to force a deterministic capability gap and model tool-call sequence. Replay may replace only model responses; capability resolution, authenticated browser decision, operation execution, Session logging, Tool dispatch, acquired Skill use, continuation, and receipt evidence must use the real official paths. Prove one continuation reaches the original Session.
 4. For Plugin, restart the official Host and prove the durable claim is consumed only after the selected consumer is visible.
 5. Prove denial, cancellation, supersession, wrong Session, replay, failed verification, and Store-originated operations cannot dispatch continuation.
 6. Use the acquired capability and separately record the task-level observable.
@@ -267,7 +267,7 @@ Unit and integration tests must cover at least:
 - separate Plugin/MCP/Skill inventory projections and stale observation handling;
 - Center archive, official Profile dependency and installed-byte, Loader, restart, MCP handshake/Tool, Skill registry, and continuation evidence codecs;
 - journal hash chains, checkpoints, receipt binding, rollback selection, retained-version limits, and cleanup;
-- loopback origin, session, CSRF, replay, timeout, disconnect, cancellation, teardown, and sensitive-data redaction;
+- official Web-Profile loopback binding; Host/Origin/Fetch-Site/media-type rejection; missing, expired, or wrong-authority browser cookies; replay, timeout, disconnect, cancellation, teardown, and sensitive-data redaction;
 - Host and Client protocol compatibility against the packed artifact.
 
 ## Fault injection
@@ -285,7 +285,7 @@ At minimum, acceptance must reject or recover from:
 
 P0 is releasable only when all statements are true:
 
-- One packed artifact installs and removes through the official rc.2 CLI without modifying official DSH code.
+- One packed artifact installs and removes through the exact official DSH `0.1.2-alpha.1` CLI without modifying official DSH code.
 - Store and Agent acquisition use one admitted catalog and one policy path.
 - Discovery sources are visible, source facts are fresh, and leads cannot bypass admission.
 - Plugin, MCP, and Skill each cover discovery, install, configure, exact update, runtime verification, uninstall, and recovery; enable/disable is truthful per kind.
@@ -308,8 +308,8 @@ P0 is releasable only when all statements are true:
 - **Prompt or description injection:** expose only normalized catalog facts to the Agent; render untrusted prose as escaped review data.
 - **Lifecycle drift:** bind actions to owner revisions and verify official runtime observations after every mutation and restart.
 - **Overlapping ownership:** fail closed on foreign or drifted official Profile dependencies, installed bytes, Loader contributions, registry winners, or Center archives.
-- **External CLI concurrency:** rc.2 exposes no lock or compare-and-swap token to the Center. The controlled ABA lane proves one adversarial ordering fails safely; its receipt must not be generalized to every possible interleaving.
+- **External CLI concurrency:** the official DSH `0.1.2-alpha.1` CLI exposes no lock or compare-and-swap token to the Center. The controlled ABA lane proves one adversarial ordering fails safely; its receipt must not be generalized to every possible interleaving.
 - **Restart ambiguity:** keep restart-required Plugin package operations and their continuation claims pending until the exact consumer is observed on a later boot; pure configuration completes only after same-Host Loader verification.
 - **Recovery corruption:** pin the standalone executable and every journal/material digest; never depend on the failing runtime.
 - **False task success:** keep acquisition, runtime visibility, capability use, and task outcome as separate evidence.
-- **Host-version drift:** compatibility is exact-release evidence. No result from a patched or moving source tree broadens the official rc.2 claim.
+- **Host-version drift:** compatibility is exact-version evidence. No result from a patched or moving source tree broadens the official DSH `0.1.2-alpha.1` claim.

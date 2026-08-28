@@ -24,36 +24,6 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   },
 }))
 
-vi.mock('@deepseek-ai/dsh-client-runtime/client', () => ({
-  defineStore: (spec: {
-    init: () => Record<string, unknown>
-    actions: Record<string, (draft: Record<string, unknown>, ...args: unknown[]) => void>
-  }) => ({
-    spec,
-    create: () => {
-      let state = spec.init()
-      const listeners = new Set<() => void>()
-      const actions = Object.fromEntries(Object.entries(spec.actions).map(([name, mutate]) => [
-        name,
-        (...args: unknown[]) => {
-          const draft = { ...state }
-          mutate(draft, ...args)
-          state = draft
-          listeners.forEach(listener => { listener() })
-        },
-      ]))
-      return {
-        actions,
-        getSnapshot: () => state,
-        subscribe: (listener: () => void) => {
-          listeners.add(listener)
-          return () => { listeners.delete(listener) }
-        },
-      }
-    },
-  }),
-}))
-
 import {
   ExtensionCenterOverlay,
   ExtensionCenterTrigger,

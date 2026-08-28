@@ -20,6 +20,8 @@ const originalNodeOptions = process.env.NODE_OPTIONS
 const originalNodePath = process.env.NODE_PATH
 const originalPath = process.env.PATH
 const PROFILE_WORKSPACE = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n'
+const INSTALLED_DSH_MANIFEST_PATH = require.resolve('@deepseek-ai/dsh/package.json')
+const INSTALLED_DSH_VERSION = (JSON.parse(await readFile(INSTALLED_DSH_MANIFEST_PATH, 'utf8')) as { version?: unknown }).version
 
 function storageKey(value: string): string {
   return createHash('sha256').update(value).digest('hex')
@@ -109,15 +111,22 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function officialCli(version = '0.1.1-rc.2'): Promise<Readonly<{ entrypoint: string; hostHome: string; log: string }>> {
+async function officialCli(version = '0.1.2-alpha.1'): Promise<Readonly<{
+  entrypoint: string
+  sourceEntrypoint: string
+  hostHome: string
+  log: string
+}>> {
   const root = await mkdtemp(join(tmpdir(), 'extension-official-dsh-cli-'))
   roots.push(root)
   const directory = join(root, 'cli')
   const library = join(directory, 'lib')
   const entrypoint = join(library, 'bin.js')
+  const sourceEntrypoint = join(directory, 'src', 'bin.ts')
   const log = join(root, 'invocations.jsonl')
   const hostHome = join(root, 'dsh-home')
   await mkdir(library, { recursive: true })
+  await mkdir(dirname(sourceEntrypoint), { recursive: true })
   await mkdir(hostHome, { recursive: true })
   await writeFile(join(directory, 'package.json'), JSON.stringify({
     name: '@deepseek-ai/dsh', version, type: 'module', bin: { dsh: 'lib/bin.js' },
@@ -126,7 +135,8 @@ async function officialCli(version = '0.1.1-rc.2'): Promise<Readonly<{ entrypoin
     "import { appendFileSync } from 'node:fs'",
     `appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv: process.argv.slice(2), dshHome: process.env.DSH_HOME, home: process.env.HOME, nodeOptions: process.env.NODE_OPTIONS, nodePath: process.env.NODE_PATH, path: process.env.PATH, pnpmCache: process.env.pnpm_config_cache, pnpmOffline: process.env.pnpm_config_offline, pnpmIgnoreScripts: process.env.pnpm_config_ignore_scripts, pnpmStore: process.env.pnpm_config_store_dir }) + '\\n')`,
   ].join('\n'))
-  return { entrypoint, hostHome, log }
+  await writeFile(sourceEntrypoint, "throw new Error('official DSH source startup entrypoint must not run during recovery')\n")
+  return { entrypoint, sourceEntrypoint, hostHome, log }
 }
 
 async function hangingOfficialCli(): Promise<Readonly<{ entrypoint: string; hostHome: string; pids: string }>> {
@@ -304,7 +314,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const fixture = await officialCli()
     const profile = await prepareProfile(fixture.hostHome, 'web')
     const packageName = '@deepseek-ai/dsh-llm-replay'
-    const version = '0.1.1-rc.2'
+    const version = '0.1.2-alpha.1'
     const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`
     const packagePath = join(profile, 'node_modules', ...packageName.split('/'))
     const storeDir = join(dirname(fixture.hostHome), 'profile-store', 'v11')
@@ -391,7 +401,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const localVersion = 'file:../../artifacts/keyless-agent-proof.tgz'
     const localKey = `${localName}@${localVersion}`
     const packageName = '@deepseek-ai/dsh-llm-replay'
-    const version = '0.1.1-rc.2'
+    const version = '0.1.2-alpha.1'
     const packageKey = `${packageName}@${version}`
     const integrity = `sha512-${Buffer.alloc(64, 2).toString('base64')}`
     const packagePath = join(profile, 'node_modules', ...packageName.split('/'))
@@ -449,7 +459,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const fixture = await officialCli()
     const profile = await prepareProfile(fixture.hostHome, 'web')
     const parentName = '@deepseek-ai/dsh-llm-replay'
-    const parentVersion = '0.1.1-rc.2'
+    const parentVersion = '0.1.2-alpha.1'
     const parentKey = `${parentName}@${parentVersion}`
     const childName = '@hono/node-server'
     const childVersion = '2.1.1'
@@ -598,9 +608,60 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
-  it('fails closed when the configured entrypoint is not the supported official rc.2 package', async () => {
+  it('binds an official source startup to its manifest-declared built CLI', async () => {
+    const fixture = await officialCli()
+    await prepareProfile(fixture.hostHome, 'web')
+    const binding = await bindFixture({
+      entrypoint: fixture.sourceEntrypoint,
+      hostHome: fixture.hostHome,
+    })
+
+    expect(binding.entrypointPath).toBe(await realpath(fixture.entrypoint))
+    expect(binding.entrypointPath).not.toBe(await realpath(fixture.sourceEntrypoint))
+    await new OfficialDshPluginCli(binding).remove('web', 'fixture-plugin')
+    await expect(readFile(fixture.log, 'utf8')).resolves.toContain('"plugin"')
+  }, 15_000)
+
+  it('rejects an undeclared startup file inside the official package', async () => {
+    const fixture = await officialCli()
+    const undeclaredEntrypoint = join(dirname(fixture.sourceEntrypoint), 'other.ts')
+    await writeFile(undeclaredEntrypoint, 'throw new Error()\n')
+
+    await expect(bindFixture({
+      entrypoint: undeclaredEntrypoint,
+      hostHome: fixture.hostHome,
+    })).rejects.toThrow('official DSH startup entrypoint does not match its package manifest')
+  })
+
+  it('rejects a source startup when its manifest-declared built CLI is unavailable', async () => {
+    const fixture = await officialCli()
+    await rm(fixture.entrypoint)
+
+    await expect(bindFixture({
+      entrypoint: fixture.sourceEntrypoint,
+      hostHome: fixture.hostHome,
+    })).rejects.toThrow('official DSH built recovery entrypoint is unavailable')
+  })
+
+  it('rejects an official manifest that declares its TypeScript source as the recovery CLI', async () => {
+    const fixture = await officialCli()
+    const packageRoot = dirname(dirname(fixture.entrypoint))
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh',
+      version: '0.1.2-alpha.1',
+      type: 'module',
+      bin: { dsh: 'src/bin.ts' },
+    }))
+
+    await expect(bindFixture({
+      entrypoint: fixture.sourceEntrypoint,
+      hostHome: fixture.hostHome,
+    })).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.1')
+  })
+
+  it('fails closed when the configured entrypoint is not the supported official alpha.1 package', async () => {
     const fixture = await officialCli('0.1.1-rc.1')
-    await expect(bindFixture(fixture)).rejects.toThrow('@deepseek-ai/dsh@0.1.1-rc.2')
+    await expect(bindFixture(fixture)).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.1')
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -914,14 +975,15 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(readFile(dispatchPath, 'utf8')).resolves.toContain('watchdog-parent')
   }, 30_000)
 
-  it('runs add and remove through the installed official rc.2 CLI and pnpm', async () => {
+  it.skipIf(INSTALLED_DSH_VERSION !== '0.1.2-alpha.1')(
+    'runs add and remove through the published official alpha.1 CLI and pnpm', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-official-dsh-smoke-'))
     roots.push(root)
     const dshHome = join(root, 'dsh-home')
     await mkdir(dshHome, { recursive: true })
     const profile = await prepareProfile(dshHome, 'smoke')
     const artifact = await packedSmokePlugin(root)
-    const manifestPath = require.resolve('@deepseek-ai/dsh/package.json')
+    const manifestPath = INSTALLED_DSH_MANIFEST_PATH
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { bin: { dsh: string } }
     const entrypoint = resolve(dirname(manifestPath), manifest.bin.dsh)
     const cli = new OfficialDshPluginCli(await bindFixture({ entrypoint, hostHome: dshHome }, 120_000))
@@ -935,7 +997,8 @@ describe('official DSH Plugin CLI adapter', () => {
     const removed = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8')) as Record<string, unknown>
     expect(removed.dependencies ?? {}).toEqual({})
     expect(removed).toMatchObject({ dsh: { profile: { bundles: [] } } })
-  }, 180_000)
+    }, 180_000,
+  )
 
   it.each(['-web', 'web:next', 'web\0next', 'web\nnext'])('rejects unsafe Profile argv %j', async (profileId) => {
     const fixture = await officialCli()

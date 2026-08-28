@@ -23,18 +23,16 @@ const expectedCatalogBytes = await readFile(expectedCatalogPath)
 const expectedCatalogDocument = decodeCanonicalDocument(expectedCatalogBytes)
 const expectedCatalogEnvelope = record(expectedCatalogDocument.envelope, 'committed public catalog envelope')
 const expectedCatalogSignatures = expectedCatalogDocument.signatures
+const expectedCatalogState = classifyCommittedPublicCatalog(expectedCatalogDocument)
+const packagedBootstrapEnvelopeDigest = canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE)
 
-if (!Array.isArray(expectedCatalogSignatures)
-  || expectedCatalogEnvelope.revision !== BOOTSTRAP_CATALOG_ENVELOPE.revision + 1
-  || expectedCatalogEnvelope.previousRevisionDigest !== canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE)) {
-  fail('P0-PUBLIC-CATALOG-CHAIN', 'committed public catalog is not the exact adjacent successor to the packaged bootstrap')
-}
-
-/** Exact committed adjacent-successor coordinates admitted by this source commit. */
+/** Exact committed public-tip coordinates admitted by this source commit. */
 export const EXPECTED_PUBLIC_CATALOG = Object.freeze({
+  state: expectedCatalogState,
   revision: expectedCatalogEnvelope.revision,
   previousRevision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
-  previousRevisionDigest: canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE),
+  previousRevisionDigest: packagedBootstrapEnvelopeDigest,
+  committedPreviousRevisionDigest: expectedCatalogEnvelope.previousRevisionDigest,
   entriesDigest: expectedCatalogEnvelope.entriesDigest,
   envelopeDigest: canonicalSha256(expectedCatalogEnvelope),
   signatureSetDigest: canonicalSha256(expectedCatalogSignatures),
@@ -43,6 +41,7 @@ export const EXPECTED_PUBLIC_CATALOG = Object.freeze({
   sizeBytes: expectedCatalogBytes.length,
   packagedBootstrapPreviousRevisionDigest: BOOTSTRAP_CATALOG_ENVELOPE.previousRevisionDigest,
   packagedBootstrapEntriesDigest: BOOTSTRAP_CATALOG_ENVELOPE.entriesDigest,
+  packagedBootstrapEnvelopeDigest,
   packagedBootstrapRootDigest: canonicalSha256(BOOTSTRAP_CATALOG_ROOT),
   packagedBootstrapSignatureSetDigest: canonicalSha256(BOOTSTRAP_CATALOG_SIGNATURES),
 })
@@ -64,6 +63,47 @@ function record(value, label) {
     fail('P0-PUBLIC-CATALOG-FORMAT', `${label} must be an object`)
   }
   return value
+}
+
+function exactFields(value, fields, label) {
+  const actual = Object.keys(value).sort()
+  const expected = [...fields].sort()
+  if (actual.length !== expected.length || actual.some((field, index) => field !== expected[index])) {
+    fail('P0-PUBLIC-CATALOG-FORMAT', `${label} fields are invalid`)
+  }
+}
+
+/** Distinguish an exact packaged public tip from a signed adjacent-successor input. */
+export function classifyCommittedPublicCatalog(
+  document,
+  packagedEnvelope = BOOTSTRAP_CATALOG_ENVELOPE,
+  packagedSignatures = BOOTSTRAP_CATALOG_SIGNATURES,
+) {
+  const input = record(document, 'committed public catalog document')
+  exactFields(input, ['envelope', 'signatures'], 'committed public catalog document')
+  const envelope = record(input.envelope, 'committed public catalog envelope')
+  if (!Array.isArray(input.signatures)) {
+    fail('P0-PUBLIC-CATALOG-FORMAT', 'committed public catalog signatures must be an array')
+  }
+  const revision = envelope.revision
+  if (!Number.isSafeInteger(revision)) {
+    fail('P0-PUBLIC-CATALOG-FORMAT', 'committed public catalog revision is invalid')
+  }
+  if (revision < packagedEnvelope.revision) {
+    fail('P0-PUBLIC-CATALOG-ROLLBACK', 'committed public catalog is older than the packaged bootstrap')
+  }
+  if (revision === packagedEnvelope.revision) {
+    if (canonicalSha256(envelope) !== canonicalSha256(packagedEnvelope)
+      || canonicalSha256(input.signatures) !== canonicalSha256(packagedSignatures)) {
+      fail('P0-PUBLIC-CATALOG-CHAIN', 'committed public catalog conflicts with the signed packaged tip')
+    }
+    return 'packaged-tip'
+  }
+  if (revision !== packagedEnvelope.revision + 1
+    || envelope.previousRevisionDigest !== canonicalSha256(packagedEnvelope)) {
+    fail('P0-PUBLIC-CATALOG-CHAIN', 'committed public catalog is neither the packaged tip nor its exact adjacent successor')
+  }
+  return 'adjacent-successor'
 }
 
 function sha256(bytes) {
@@ -110,26 +150,31 @@ function decodeCanonicalDocument(bytes) {
   if (!text.endsWith('\n') || text.slice(0, -1).includes('\n') || `${canonicalJson(document)}\n` !== text) {
     fail('P0-PUBLIC-CATALOG-FORMAT', 'public catalog is not one canonical JSON line with a trailing newline')
   }
-  return record(document, 'public catalog document')
+  const input = record(document, 'public catalog document')
+  exactFields(input, ['envelope', 'signatures'], 'public catalog document')
+  return input
 }
 
-function assertExpectedRevision(document) {
+function assertExpectedDocument(document) {
   const envelope = record(document.envelope, 'public catalog envelope')
   const revision = envelope.revision
   if (!Number.isSafeInteger(revision)) fail('P0-PUBLIC-CATALOG-FORMAT', 'public catalog revision is invalid')
-  if (revision <= EXPECTED_PUBLIC_CATALOG.previousRevision) {
-    fail('P0-PUBLIC-CATALOG-ROLLBACK', 'public catalog did not advance beyond the packaged bootstrap')
-  }
   if (revision !== EXPECTED_PUBLIC_CATALOG.revision) {
-    fail('P0-PUBLIC-CATALOG-CHAIN', `public catalog revision is ${String(revision)}, not the committed adjacent revision ${String(EXPECTED_PUBLIC_CATALOG.revision)}`)
+    fail('P0-PUBLIC-CATALOG-CHAIN', `public catalog revision is ${String(revision)}, not committed revision ${String(EXPECTED_PUBLIC_CATALOG.revision)}`)
   }
-  if (envelope.previousRevisionDigest !== EXPECTED_PUBLIC_CATALOG.previousRevisionDigest) {
-    fail('P0-PUBLIC-CATALOG-CHAIN', 'public catalog does not name the exact packaged bootstrap predecessor')
+  if (envelope.previousRevisionDigest !== EXPECTED_PUBLIC_CATALOG.committedPreviousRevisionDigest) {
+    fail('P0-PUBLIC-CATALOG-CHAIN', 'public catalog predecessor digest does not match the committed document')
   }
   if (envelope.entriesDigest !== EXPECTED_PUBLIC_CATALOG.entriesDigest) {
-    fail('P0-PUBLIC-CATALOG-CHAIN', 'public catalog entries digest does not match the committed adjacent successor')
+    fail('P0-PUBLIC-CATALOG-CHAIN', 'public catalog entries digest does not match the committed document')
   }
   return envelope
+}
+
+function assertDeploymentUpgradeState() {
+  if (EXPECTED_PUBLIC_CATALOG.state !== 'adjacent-successor') {
+    fail('P0-PUBLIC-CATALOG-NO-ADVANCE', 'public catalog equals the packaged signed tip; deployment upgrade acceptance requires an exact adjacent successor')
+  }
 }
 
 /** Pin the complete packaged bootstrap authority, not only its envelope. */
@@ -144,7 +189,7 @@ export function assertPackagedCatalogAuthority(
   if (envelope.revision !== EXPECTED_PUBLIC_CATALOG.previousRevision
     || envelope.previousRevisionDigest !== EXPECTED_PUBLIC_CATALOG.packagedBootstrapPreviousRevisionDigest
     || envelope.entriesDigest !== EXPECTED_PUBLIC_CATALOG.packagedBootstrapEntriesDigest
-    || envelopeDigest !== EXPECTED_PUBLIC_CATALOG.previousRevisionDigest
+    || envelopeDigest !== EXPECTED_PUBLIC_CATALOG.packagedBootstrapEnvelopeDigest
     || rootDigest !== EXPECTED_PUBLIC_CATALOG.packagedBootstrapRootDigest
     || signatureSetDigest !== EXPECTED_PUBLIC_CATALOG.packagedBootstrapSignatureSetDigest) {
     fail('P0-PUBLIC-CATALOG-AUTHORITY', 'built package no longer contains the exact committed bootstrap trust root, envelope, and signatures')
@@ -152,7 +197,7 @@ export function assertPackagedCatalogAuthority(
   return Object.freeze({ envelopeDigest, rootDigest, signatureSetDigest })
 }
 
-/** Verify one signed public document directly against the pinned packaged bootstrap authority. */
+/** Verify one signed same-tip or adjacent public document against the pinned packaged authority. */
 export function verifySignedPublicCatalogAdvance(document, now) {
   assertPackagedCatalogAuthority()
   try {
@@ -198,7 +243,7 @@ async function observeRuntimeRefresh(bytes, now) {
       || snapshot.status.degraded !== false
       || snapshot.status.degradedReason !== null
       || snapshot.status.lastRefreshAtMs !== now) {
-      fail('P0-PUBLIC-CATALOG-RUNTIME', 'built runtime did not admit the committed adjacent successor as one fresh non-degraded remote snapshot')
+      fail('P0-PUBLIC-CATALOG-RUNTIME', 'built runtime did not admit the exact committed public catalog as one fresh non-degraded remote snapshot')
     }
     return Object.freeze({
       source: snapshot.status.source,
@@ -247,8 +292,8 @@ async function fetchDeployment(fetchImpl) {
   })
 }
 
-/** Verify the exact deployed catalog and observe the built runtime admitting it over the packaged bootstrap. */
-export async function verifyPublicCatalogDeployment(dependencies = {}) {
+/** Verify the exact deployed public tip without claiming that its revision advanced. */
+export async function verifyPublicCatalogObservation(dependencies = {}) {
   const fetchImpl = dependencies.fetchImpl ?? globalThis.fetch
   const now = dependencies.now ?? Date.now()
   if (typeof fetchImpl !== 'function') fail('P0-PUBLIC-CATALOG-FETCH', 'HTTPS fetch is unavailable')
@@ -260,28 +305,25 @@ export async function verifyPublicCatalogDeployment(dependencies = {}) {
 
   const deployed = await fetchDeployment(fetchImpl)
   const document = decodeCanonicalDocument(deployed.bytes)
-  const envelope = assertExpectedRevision(document)
+  const envelope = assertExpectedDocument(document)
   const observedBytesSha256 = sha256(deployed.bytes)
   const observedDocumentDigest = canonicalSha256(document)
   if (deployed.bytes.length !== EXPECTED_PUBLIC_CATALOG.sizeBytes
     || observedBytesSha256 !== EXPECTED_PUBLIC_CATALOG.bytesSha256) {
-    fail('P0-PUBLIC-CATALOG-BYTES', 'public catalog bytes do not match the committed adjacent successor SHA-256 and size')
+    fail('P0-PUBLIC-CATALOG-BYTES', 'public catalog bytes do not match the committed SHA-256 and size')
   }
   if (observedDocumentDigest !== EXPECTED_PUBLIC_CATALOG.documentDigest) {
-    fail('P0-PUBLIC-CATALOG-BYTES', 'public catalog canonical document digest does not match the committed adjacent successor')
+    fail('P0-PUBLIC-CATALOG-BYTES', 'public catalog canonical document digest does not match the committed document')
   }
 
   const advanced = verifySignedPublicCatalogAdvance(document, now)
   if (advanced.envelope.revision !== EXPECTED_PUBLIC_CATALOG.revision) {
-    fail('P0-PUBLIC-CATALOG-CHAIN', 'direct catalog verification did not produce the committed adjacent successor')
+    fail('P0-PUBLIC-CATALOG-CHAIN', 'direct catalog verification did not produce the committed public catalog')
   }
   const runtimeRefresh = await observeRuntimeRefresh(deployed.bytes, now)
 
-  const body = Object.freeze({
-    schemaVersion: 2,
-    acceptanceId: 'P0-PUBLIC-CATALOG-DEPLOYMENT',
-    status: 'passed',
-    p0Status: 'public-catalog-deployment-proven',
+  return Object.freeze({
+    catalogState: EXPECTED_PUBLIC_CATALOG.state,
     observedAt: new Date(now).toISOString(),
     target: Object.freeze({
       url: PUBLIC_CATALOG_URL,
@@ -317,6 +359,24 @@ export async function verifyPublicCatalogDeployment(dependencies = {}) {
       keyIds: Object.freeze([...advanced.keyIds]),
     }),
     runtimeRefresh,
+  })
+}
+
+/** Prove an exact deployed adjacent successor and issue the release-upgrade receipt body. */
+export async function verifyPublicCatalogDeployment(dependencies = {}) {
+  assertDeploymentUpgradeState()
+  const observation = await verifyPublicCatalogObservation(dependencies)
+
+  const body = Object.freeze({
+    schemaVersion: 2,
+    acceptanceId: 'P0-PUBLIC-CATALOG-DEPLOYMENT',
+    status: 'passed',
+    p0Status: 'public-catalog-deployment-proven',
+    observedAt: observation.observedAt,
+    target: observation.target,
+    packagedBootstrap: observation.packagedBootstrap,
+    deployment: observation.deployment,
+    runtimeRefresh: observation.runtimeRefresh,
     notProven: Object.freeze([]),
   })
   return Object.freeze({ ...body, receiptDigest: canonicalSha256(body) })

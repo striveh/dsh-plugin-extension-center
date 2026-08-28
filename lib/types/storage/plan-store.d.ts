@@ -26,7 +26,7 @@ export declare class FilePlanStore {
     /**
      * Record the only human decision after rechecking all current fences.
      * @param hash Exact plan hash.
-     * @param decision Trusted loopback decision payload.
+     * @param decision Browser-session-authenticated decision payload.
      * @param context Current authoritative owner revisions.
      * @param nowMs Trusted decision time.
      * @returns Approved, rejected, or expired durable state.

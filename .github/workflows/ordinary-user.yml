@@ -1,0 +1,96 @@
+name: Ordinary-user alpha registry lifecycle
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ordinary-user-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Input, fail-closed, and receipt contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+      - name: Verify ordinary-user runner contract
+        run: node --test acceptance/ordinary-user/support.test.mjs
+
+  registry-lifecycle:
+    name: Ordinary-user registry Skill lane proven
+    needs: contract
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.ref == 'refs/heads/main'
+      && github.ref_protected == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium with Linux dependencies
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run the exact audited registry lane
+        run: node acceptance/ordinary-user/run.mjs
+      - name: Require a proven production Skill-lane receipt
+        if: always()
+        run: >-
+          node acceptance/ordinary-user/actions-evidence.mjs verify-receipt
+          --receipt .artifacts/acceptance/ordinary-user/receipt.json
+          --require-proven true
+      - name: Upload the secret-free receipt
+        id: upload_receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ordinary-user-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/acceptance/ordinary-user/receipt.json
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+      - name: Bind the receipt to the exact Actions artifact archive
+        if: always() && steps.upload_receipt.outcome == 'success'
+        run: >-
+          node acceptance/ordinary-user/actions-evidence.mjs write
+          --receipt .artifacts/acceptance/ordinary-user/receipt.json
+          --artifact-name ordinary-user-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          --artifact-id ${{ steps.upload_receipt.outputs.artifact-id }}
+          --artifact-digest ${{ steps.upload_receipt.outputs.artifact-digest }}
+          --output .artifacts/acceptance/ordinary-user/actions-artifact-evidence.json
+      - name: Upload the Actions artifact evidence
+        if: always() && steps.upload_receipt.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ordinary-user-evidence-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/acceptance/ordinary-user/actions-artifact-evidence.json
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0

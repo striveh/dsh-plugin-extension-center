@@ -8,7 +8,7 @@ export interface ExtensionManagementContext {
 }
 /** Exact Browser preview input; existing targets remain opaque inventory values. */
 export type StorePreviewInput = Omit<IntentPreviewRequest, 'protocolVersion' | 'origin' | 'continuationId'>;
-/** Browser client for loopback-only Extension Center management RPC. */
+/** Browser client for Connection-authenticated Extension Center management RPC. */
 export interface ExtensionManagementClient {
     /** Read one normalized inventory observation. */
     inventory(scopeKey: string, profileId: string, signal?: AbortSignal): Promise<InventoryListResponse>;

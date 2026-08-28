@@ -37,7 +37,7 @@ const PROCESS_GROUP_QUIESCENCE_MS = 5_000
 const PROCESS_GROUP_POLL_MS = 10
 const SUPERVISOR_CHILD_OUTCOME_BYTES = 4_096
 const OFFICIAL_DSH_PACKAGE = '@deepseek-ai/dsh'
-const OFFICIAL_DSH_VERSION = '0.1.1-rc.2'
+const OFFICIAL_DSH_VERSION = '0.1.2-alpha.1'
 const PNPM_11_PACKAGE_MANAGER = /^pnpm@11\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
@@ -76,7 +76,7 @@ interface OfficialDshDependencyBinding {
 interface OfficialDshRecoveryBinding {
   readonly schemaVersion: 2
   readonly packageName: '@deepseek-ai/dsh'
-  readonly packageVersion: '0.1.1-rc.2'
+  readonly packageVersion: '0.1.2-alpha.1'
   readonly packageRoot: string
   readonly packageTreeSha256: string
   readonly productionDependencies: readonly OfficialDshDependencyBinding[]
@@ -1231,7 +1231,7 @@ async function verifyOfficialDsh(binding: OfficialDshRecoveryBinding): Promise<v
     failure('official DSH recovery package manifest is invalid JSON')
   }
   if (!isRecord(manifest) || manifest.name !== OFFICIAL_DSH_PACKAGE || manifest.version !== OFFICIAL_DSH_VERSION
-    || !isRecord(manifest.bin) || typeof manifest.bin.dsh !== 'string') {
+    || !isRecord(manifest.bin) || manifest.bin.dsh !== 'lib/bin.js') {
     failure('official DSH recovery package identity changed')
   }
   const declared = await realpath(resolve(packageRoot, manifest.bin.dsh))

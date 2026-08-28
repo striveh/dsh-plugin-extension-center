@@ -48,7 +48,7 @@ export declare class IntentPlanService {
     private readonly planTtlMs;
     constructor(store: CenterStateStore, plans: FilePlanStore, inventory: HostInventoryService, owners: HostOwners, catalog: () => VerifiedCatalog, managedPlugins: ManagedPluginSnapshotPort, preflight: IntentProviderPreflight, planTtlMs?: number);
     /** Mint a plan from a browser Store/Installed action or an internally verified task resolution. */
-    preview(request: IntentPreviewRequest, authority: 'loopback-browser' | 'model-resolution', nowMs?: number, taskBinding?: TaskIntentBinding | null): Promise<IntentPreviewResponse>;
+    preview(request: IntentPreviewRequest, authority: 'authenticated-browser-session' | 'model-resolution', nowMs?: number, taskBinding?: TaskIntentBinding | null): Promise<IntentPreviewResponse>;
     /** Re-observe every fence before decision or consumption. */
     context(plan: ImmutablePlan): Promise<PlanUseContext>;
     /** List bounded task-origin plans with only the typed configuration needed for human review. */

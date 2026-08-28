@@ -16,7 +16,7 @@ function profileArgument(profileId: string): string {
   return profileId
 }
 
-/** Official rc.2 Plugin CLI adapter bound to one private, hash-pinned execution toolchain. */
+/** Official Plugin CLI adapter bound to one private, hash-pinned execution toolchain. */
 export class OfficialDshPluginCli implements ManagedPluginCli {
   constructor(private readonly binding: OfficialDshRecoveryBinding) {}
 

@@ -183,7 +183,7 @@ async function createOfficialDshFixture(root: string): Promise<Readonly<{
   await mkdir(storeDir, { recursive: true })
   await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify({
     name: '@deepseek-ai/dsh',
-    version: '0.1.1-rc.2',
+    version: '0.1.2-alpha.1',
     type: 'module',
     bin: { dsh: 'lib/bin.js' },
   })}\n`)

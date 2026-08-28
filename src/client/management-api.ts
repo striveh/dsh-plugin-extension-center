@@ -50,7 +50,7 @@ export interface ExtensionManagementContext {
 /** Exact Browser preview input; existing targets remain opaque inventory values. */
 export type StorePreviewInput = Omit<IntentPreviewRequest, 'protocolVersion' | 'origin' | 'continuationId'>
 
-/** Browser client for loopback-only Extension Center management RPC. */
+/** Browser client for Connection-authenticated Extension Center management RPC. */
 export interface ExtensionManagementClient {
   /** Read one normalized inventory observation. */
   inventory(scopeKey: string, profileId: string, signal?: AbortSignal): Promise<InventoryListResponse>
@@ -1222,7 +1222,7 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
     'timeoutMs', 'node',
   ])
   if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
-    || officialDsh.packageVersion !== '0.1.1-rc.2') {
+    || officialDsh.packageVersion !== '0.1.2-alpha.1') {
     fail(`${subject}.recoveryExecutable.officialDsh identity`)
   }
   for (const field of ['entrypointPath', 'hostHome', 'packageRoot', 'supervisorPath'] as const) {

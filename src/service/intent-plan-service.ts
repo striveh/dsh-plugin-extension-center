@@ -119,11 +119,13 @@ export class IntentPlanService {
   /** Mint a plan from a browser Store/Installed action or an internally verified task resolution. */
   async preview(
     request: IntentPreviewRequest,
-    authority: 'loopback-browser' | 'model-resolution',
+    authority: 'authenticated-browser-session' | 'model-resolution',
     nowMs = Date.now(),
     taskBinding: TaskIntentBinding | null = null,
   ): Promise<IntentPreviewResponse> {
-    if ((authority === 'loopback-browser') !== (request.origin === 'store')) throw new Error('intent origin is not authorized by this carrier')
+    if ((authority === 'authenticated-browser-session') !== (request.origin === 'store')) {
+      throw new Error('intent origin is not authorized by this carrier')
+    }
     const capabilities = hostCapabilities(this.owners)
     if (!capabilities.acquisition) {
       throw new IntentPolicyDeniedError({

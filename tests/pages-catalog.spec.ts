@@ -59,13 +59,22 @@ describe('GitHub Pages signed catalog projection', () => {
     })).rejects.toThrow('runtime download bound')
   })
 
-  it('binds the committed public document to the exact next signed bootstrap revision', async () => {
+  it('binds the committed public document to the packaged tip or its exact signed successor', async () => {
     const body = await readFile('catalog/public/plugins.json', 'utf8')
     const document = JSON.parse(body) as {
       envelope: typeof BOOTSTRAP_CATALOG_ENVELOPE
       signatures: typeof BOOTSTRAP_CATALOG_SIGNATURES
     }
     expect(body).toBe(`${canonicalJson(document)}\n`)
+    const packaged = {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }
+    if (document.envelope.revision === BOOTSTRAP_CATALOG_ENVELOPE.revision) {
+      expect(document).toEqual(packaged)
+      expect(canonicalSha256(document)).toBe(canonicalSha256(packaged))
+      return
+    }
     expect(document.envelope.revision).toBe(BOOTSTRAP_CATALOG_ENVELOPE.revision + 1)
     expect(document.envelope.previousRevisionDigest).toBe(canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE))
     expect(verifyCatalog(

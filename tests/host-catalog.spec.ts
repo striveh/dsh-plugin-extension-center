@@ -26,12 +26,12 @@ import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 const VALID_NOW = Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1
 
 describe('signed bootstrap catalog', () => {
-  it('verifies revision 10 and projects exact update candidates across all three extension kinds', () => {
+  it('verifies revision 11 and projects exact update candidates across all three extension kinds', () => {
     const catalog = verifyBootstrapCatalog(VALID_NOW)
     const response = catalogListResponse(catalog)
     expect(catalog.keyIds).toEqual(['bootstrap-2026-08-26-8'])
-    expect(BOOTSTRAP_CATALOG_ROOT.minimumRevision).toBe(10)
-    expect(response.catalog).toMatchObject({ revision: 10, signatureStatus: 'verified' })
+    expect(BOOTSTRAP_CATALOG_ROOT.minimumRevision).toBe(11)
+    expect(response.catalog).toMatchObject({ revision: 11, signatureStatus: 'verified' })
     expect(response.entries.map(entry => entry.kind)).toEqual([
       'mcp', 'mcp', 'plugin', 'plugin', 'skill', 'skill', 'skill',
     ])
@@ -198,16 +198,15 @@ describe('signed bootstrap catalog', () => {
   })
 })
 
-describe('loopback catalog RPC', () => {
+describe('authenticated catalog RPC', () => {
   it('registers only a read endpoint and rejects malformed or unknown calls', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-center-host-'))
     vi.useFakeTimers()
     vi.setSystemTime(VALID_NOW)
     try {
       let handler: ConnectionRpcHandler | undefined
-      const handle = vi.fn((channel, next, options) => {
+      const handle = vi.fn((channel, next) => {
         expect(channel).toBe(EXTENSION_CENTER_RPC_CHANNEL)
-        expect(options).toEqual({ authority: 'loopback' })
         handler = next
         return async () => {}
       })
@@ -219,6 +218,7 @@ describe('loopback catalog RPC', () => {
         effect: (effect: () => unknown) => effect(),
       } as unknown as Context, { root })
       expect(handle).toHaveBeenCalledOnce()
+      expect(handle.mock.calls[0]).toHaveLength(2)
       if (handler === undefined) throw new Error('Host did not register the catalog RPC')
       const signal = new AbortController().signal
       await expect(handler('catalog/list', { protocolVersion: 1 }, signal)).resolves.toMatchObject({

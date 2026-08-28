@@ -23,6 +23,7 @@ const host = {
 
 function policyInput(): CandidatePolicyInput {
   const entry = structuredClone(BOOTSTRAP_CATALOG_ENVELOPE.entries.find(item => item.kind === 'skill')!)
+  entry.compatibility.dsh = '0.1.2-alpha.1'
   for (const action of Object.values(entry.lifecycle)) {
     action.status = 'available'
     delete action.reason
@@ -105,6 +106,7 @@ describe('full P0 deterministic policy and dual-entry intent', () => {
 
   it.each([
     ['lifecycle-script', { lifecycleScriptControl: 'unknown' }],
+    ['compatibility-unavailable', { entry: { ...policyInput().entry, compatibility: { ...policyInput().entry.compatibility, dsh: '0.1.1-rc.2' } } }],
     ['compatibility-unavailable', { entry: { ...policyInput().entry, compatibility: { ...policyInput().entry.compatibility, status: 'review-required' } } }],
     ['platform-unavailable', { currentPlatform: 'windows', entry: { ...policyInput().entry, compatibility: { ...policyInput().entry.compatibility, platforms: ['darwin'] } } }],
     ['authority-unknown', { authorityKnown: false }],

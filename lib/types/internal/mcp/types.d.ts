@@ -134,7 +134,7 @@ export declare class CenterMcpConnectionIdempotencyError extends Error {
     readonly code = "MCP_CONNECTION_IDEMPOTENCY_MISMATCH";
     constructor(mutationId: string);
 }
-/** Official rc.2 cannot enforce the Center's no-redirect HTTP admission rule. */
+/** The official MCP Client does not expose a redirect-forbidden HTTP policy. */
 export declare class CenterMcpHttpUnsupportedError extends Error {
     readonly code = "MCP_HTTP_REDIRECT_GUARD_UNAVAILABLE";
     constructor();
