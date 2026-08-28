@@ -64,6 +64,7 @@ import type { ExtensionCatalogClient } from '../src/client/catalog-api.ts'
 import { en, zh, type ExtensionCenterKey } from '../src/client/locales.ts'
 import type { ExtensionManagementClient, StorePreviewInput } from '../src/client/management-api.ts'
 import { createExtensionCenterStore } from '../src/client/store.ts'
+import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { catalogListResponse, verifyBootstrapCatalog } from '../src/catalog.ts'
 import { canonicalSha256 } from '../src/domain/index.ts'
 import { createInventorySnapshot, type InventoryRow } from '../src/inventory/index.ts'
@@ -81,7 +82,7 @@ import {
 } from '../src/plans/index.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
-const NOW = Date.parse('2026-08-27T00:00:01.000Z')
+const NOW = Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000
 beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(NOW + 10) })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 

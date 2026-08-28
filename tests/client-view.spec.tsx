@@ -64,13 +64,16 @@ import {
 import type { ExtensionCatalogClient } from '../src/client/catalog-api.ts'
 import { en, zh, type ExtensionCenterKey } from '../src/client/locales.ts'
 import { createExtensionCenterStore } from '../src/client/store.ts'
+import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { catalogListResponse, verifyBootstrapCatalog } from '../src/catalog.ts'
 import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 
 afterEach(() => { cleanup() })
 
 /** Mount both slot occupants over one real rc.2 store engine instance. */
-const verifiedCatalog = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-27T00:00:01.000Z')))
+const verifiedCatalog = catalogListResponse(
+  verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+)
 
 function renderCenter(
   dictionary: Record<ExtensionCenterKey, string> = en,

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-28
+
+### Changed
+
+- Promote the exact revision-10 catalog deployed and verified by the successful rc.2 receipt into the packaged offline bootstrap, and commit its reviewed, entry-preserving, signed revision-11 successor as the stable publication input.
+- Require stable publication to update from the exact successful rc.2 artifact and receipt; the immutable stable Release, Pages revision 11 deployment, same-root update, and composite status remain established only by the stable post-publication receipt.
+
 ## [0.1.0-rc.2] - 2026-08-28
 
 ### Added
@@ -14,7 +21,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Fixed
 
 - Verify a legacy signed catalog cache before atomically rebasing it to the newer packaged bootstrap, or trim a verified historical prefix when the exact packaged bootstrap already appears in the chain. Serialize durable cache commits across DSH processes, re-read the authoritative chain inside the writer reservation, and retain a newer verified tip when a stale refresh finishes later. This lets an official-CLI same-Profile update recover the rc.0 revision-8 cache, adopt packaged revision 9, and refresh to public revision 10 without deleting user state or allowing a concurrent Host to roll it back.
-- Route recovery promotion through rc.0's last successful composite receipt: rc.2 updates from rc.0, and stable can advance only from a successful rc.2 receipt. The immutable rc.1 Release remains published but is not release-ready because its only post-publication attempt failed during the real cache-preserving update.
+- Route recovery promotion through rc.0's last successful composite receipt. rc.2 updates from rc.0, binds the immutable failed rc.1 candidate as an incident, and produces the successful predecessor receipt required by stable.
 
 ## [0.1.0-rc.1] - 2026-08-28
 
@@ -69,9 +76,10 @@ All notable changes to this project will be documented in this file. The format 
 ### Release gates
 
 - Every release remains conditional on exact packed-artifact lifecycle, browser, recovery, continuation, deterministic-pack, and platform receipts against the unmodified official DSH rc.2 artifact.
-- `0.1.0-rc.0` is the successful bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it proves catalog `r8→r9`. The immutable rc.1 candidate promoted `r9` and deployed `r10`, but its only post-publication run exposed the cache-rollover defect and produced no successful composite receipt. Recovery rc.2 therefore binds rc.0's successful receipt, keeps packaged `r9` and deployed `r10`, and also binds the rc.1 `not-release-ready` incident. Stable must bind a successful rc.2 receipt, promote `r10`, and deploy `r11`. Public Release, Pages, catalog-source, runtime, incident, and composite claims require their own receipts. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
+- `0.1.0-rc.0` is the successful bootstrap candidate and records previous Center, CI, release-ready, and evidence-run inputs as `null`; it proves catalog `r8→r9`. The immutable rc.1 candidate promoted `r9` and deployed `r10`, but its only post-publication run exposed the cache-rollover defect and produced no successful composite receipt. Recovery rc.2 binds rc.0's successful receipt, keeps packaged `r9` and deployed `r10`, binds the rc.1 `not-release-ready` incident, and has a successful composite receipt. Stable uses that exact rc.2 receipt, packages `r10`, and commits signed `r11`; its Release, Pages, runtime, catalog-source, and composite claims require the stable receipt. Live-provider execution is an advisory compatibility smoke rather than a release blocker. Source, workflows, repository policy, and local tests do not close those external claims.
 
-[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.2...HEAD
+[Unreleased]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.2...v0.1.0
 [0.1.0-rc.2]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/striveh/dsh-plugin-extension-center/compare/v0.1.0-rc.0...v0.1.0-rc.1
 [0.1.0-rc.0]: https://github.com/striveh/dsh-plugin-extension-center/releases/tag/v0.1.0-rc.0

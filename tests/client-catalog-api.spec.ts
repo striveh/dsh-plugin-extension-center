@@ -1,9 +1,10 @@
 import type { ClientConnectionRpc } from '@deepseek-ai/dsh-client-connection/client'
 import { describe, expect, it, vi } from 'vitest'
+import { BOOTSTRAP_CATALOG_ENVELOPE } from '../src/catalog-data.ts'
 import { catalogListResponse, verifyBootstrapCatalog } from '../src/catalog.ts'
 import { createExtensionCatalogClient, parseCatalogListResponse } from '../src/client/catalog-api.ts'
 
-const response = catalogListResponse(verifyBootstrapCatalog(Date.parse('2026-08-27T00:00:01.000Z')))
+const response = catalogListResponse(verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000))
 
 describe('catalog Client wire validation', () => {
   it('calls the catalog endpoint and deeply accepts the verified projection', async () => {

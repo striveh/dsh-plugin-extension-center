@@ -2,13 +2,14 @@
 
 ## Supported versions
 
-Security fixes target the current prerelease and `main`. The only claimed compatibility target is the packed Extension Center running on the unmodified official DSH `0.1.1-rc.2` artifact documented in the README; a source checkout or modified Host is not release evidence.
+Security fixes target the current stable release and `main`; immutable prereleases receive fixes only through a newer release. The only claimed compatibility target is the packed Extension Center running on the unmodified official DSH `0.1.1-rc.2` artifact documented in the README; a source checkout or modified Host is not release evidence.
 
 | Version | Security support | DSH compatibility |
 | --- | --- | --- |
-| `0.1.0-rc.2` | Prerelease security fixes | Only the official DSH `0.1.1-rc.2` artifact bound by that version's receipts |
+| `0.1.0` | Stable security fixes | Only the official DSH `0.1.1-rc.2` artifact bound by that version's receipts |
+| `0.1.0-rc.2` | No fixes; immutable successful predecessor | Successful recovery evidence; superseded only by a newer version with passing receipts |
 | `0.1.0-rc.1` | No fixes; immutable failed candidate | Its post-publication update failed and produced no release-ready receipt |
-| `0.1.0-rc.0` | No fixes; immutable bootstrap | Last successful release-ready bootstrap; upgrade only after a newer version has passing receipts |
+| `0.1.0-rc.0` | No fixes; immutable bootstrap | Historical bootstrap superseded by the successful rc.2 recovery receipt |
 | `main` | Development fixes | No compatibility inherited from a published version without a new exact-commit receipt |
 
 ## Report a vulnerability privately

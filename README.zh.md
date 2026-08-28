@@ -11,9 +11,9 @@
 
 状态（2026-08-28）：源码实现了签名商店、带未过期 last-good 缓存的签名目录刷新、只产生线索的发现与 threshold signing、归一化 inventory、不可变计划与 loopback 人工批准、逐目标 journal 与 receipt、Plugin/MCP/Skill 类型化操作、任务优先的本地 Capability RAG、恢复编排以及持久化续行 claim。对每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，扩展中心都会暂存并锁定准确 archive，并把 package membership 变更委托给官方 `dsh plugin --profile` CLI；只有官方 Profile package manager 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row。纯配置通过官方 Loader 在同一个 Host 进程替换并验证准确受管 row。MCP stdio connection 挂载官方 MCP Client，Skill 通过官方 registry 投影，续行使用官方 Agent 与 Session 服务。设计中不存在 fork 专用 package 或 DSH Host PR。准确边界见[纯插件架构](docs/plugin-only-architecture.zh.md)。
 
-证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。成功的 `0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`。不可变 rc.1 候选没有成功 composite receipt：它唯一一次 post-publication 尝试在真实同 Profile 更新中暴露了持久目录缓存换锚缺陷，因此保持为 `not-release-ready` 事故。恢复候选 rc.2 必须直接从 rc.0 的最后一个成功 receipt 更新，保留并迁移同一个 Center root，继续使用 package 内置 `r9` 与已部署 `r10`，并绑定该 rc.1 事故；stable 只能从成功 rc.2 晋级。公开 Release 安装、Pages 刷新与跨边界完成状态只由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
+证据按 receipt 划分。发布前验收要求准确 packed artifact 通过完整官方 rc.2 生命周期、浏览器、受控 ABA、break-glass、故障、确定性 Replay Agent、Ubuntu 与 macOS lane。成功的 `0.1.0-rc.0` bootstrap 把 previous Center、CI、release-ready 与 evidence-run 输入记录为 `null`。不可变 rc.1 候选没有成功 composite receipt：它唯一一次 post-publication 尝试在真实同 Profile 更新中暴露了持久目录缓存换锚缺陷，因此保持为 `not-release-ready` 事故。恢复候选 rc.2 已直接从 rc.0 的最后一个成功 receipt 更新，在同一 Center root 中从 package 内置 `r9` 迁移到已部署 `r10`，绑定 rc.1 事故，并生成本次 stable 晋级使用的成功前序 receipt。Stable 源码把 `r10` 提升进 package，并提交其签名后继 `r11`；stable Release、Pages 部署与跨边界完成状态仍只能由各自通过的 post-publication 与 composite receipt 建立。Replay 只替换模型响应这一条边，官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行只是非阻塞兼容性 smoke，既不阻断 P0，也不能替代确定性 receipt。
 
-公开的 `main` 分支是开发源码预览，不是稳定 Release 或 npm 发布。Manifest 有意保留 `private: true` 以阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码或经过审查的 GitHub Release asset。GitHub Release、公开 Pages 目录或已完成 CI lane 的状态只由对应准确版本的 receipt 记录，绝不能从源码文件、workflow、repository setting 或本地测试中推断。
+公开的 `main` 分支是持续移动的开发源码，不是 Release 坐标或 npm 发布。Manifest 有意保留 `private: true` 以阻止误发 npm；这不限制采用 MIT 许可证的 GitHub 源码或经过审查的 GitHub Release asset。GitHub Release、公开 Pages 目录或已完成 CI lane 的状态只由对应准确版本的 receipt 记录，绝不能从源码文件、workflow、repository setting 或本地测试中推断。
 
 Release provenance 以 byte 为准。只有准确 `main` push 的 Node 22 CI job 上传的确定性 tarball、`SHA256SUMS` 和自摘要 pack attestation 可作为 Release 候选。CI verifier 会绑定 Actions archive digest、run id 与 attempt、只含三个准确 entry 的 ZIP payload、source commit、packed manifest、bundled pnpm tree 和 tarball byte；下载只允许固定 GitHub API，以及随后一次准入的 GitHub Actions 或 Azure Blob storage redirect。Runtime、公开 Release 与复合 receipt 都必须绑定同一个已 attested tarball。Repository Release immutability 与受保护 `v*` tag 会阻止后续修改；这些 repository policy 不能替代任何具体 Release 的 receipt。
 
@@ -30,15 +30,15 @@ Release provenance 以 byte 为准。只有准确 `main` push 的 Node 22 CI job
 
 正在验证的兼容性目标是不可变的官方 `dsh-v0.1.1-rc.2` Release，对应 commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`。扩展中心消费其已发布的 Plugin CLI、Loader、Tool、Skill、MCP Client、Agent、Session、Connection RPC 与 Web Client 扩展点。只有 packed Bundle 在未经修改的该 Release 上通过相应 lane，兼容性主张才有效。
 
-## 安装已发布的候选版本
+## 安装已发布版本
 
-只有匹配的 GitHub Release 已存在且公开 Release receipt 通过后，下列坐标才有效；否则 Release 安装主张不可用，开发版本 checkout 不能替代它。对于已发布候选，应从不可变 GitHub Release asset 安装扩展中心，不能依赖移动分支。官方 DSH Plugin CLI 会把 Profile package management 委托给 pnpm，因此 `PATH` 中必须存在 `pnpm`：
+只有匹配的 GitHub Release 已存在且公开 Release receipt 通过后，下列坐标才有效；否则 Release 安装主张不可用，开发版本 checkout 不能替代它。对于已发布版本，应从不可变 GitHub Release asset 安装扩展中心，不能依赖移动分支。官方 DSH Plugin CLI 会把 Profile package management 委托给 pnpm，因此 `PATH` 中必须存在 `pnpm`：
 
 ```sh
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.2/dsh-plugin-extension-center-0.1.0-rc.2.tgz
-curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0-rc.2/SHA256SUMS
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0/dsh-plugin-extension-center-0.1.0.tgz
+curl -fLO https://github.com/striveh/dsh-plugin-extension-center/releases/download/v0.1.0/SHA256SUMS
 shasum -a 256 -c SHA256SUMS
-dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0-rc.2.tgz --ignore-scripts --save-exact
+dsh plugin --profile web add ./dsh-plugin-extension-center-0.1.0.tgz --ignore-scripts --save-exact
 dsh plugin --profile web list --depth 0
 dsh --profile web --dump-config
 dsh web
@@ -54,7 +54,7 @@ dsh plugin --profile web remove dsh-plugin-extension-center
 
 ## 开发版本检出
 
-公开 `main` 只用于源码审查和开发。验证 packed rc.2 商店纵切时，应锁定一个审查过的准确 commit，不能依赖移动分支：
+公开 `main` 只用于源码审查和开发。验证 packed 商店纵切与官方 DSH rc.2 兼容性时，应锁定一个审查过的准确 commit，不能依赖移动分支：
 
 ```sh
 dsh plugin --profile web add github:striveh/dsh-plugin-extension-center#<reviewed-commit-sha>
@@ -62,7 +62,7 @@ dsh --profile web --dump-config
 dsh web
 ```
 
-仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。扩展中心自身必须只通过这个官方 CLI 从外部安装、更新、降级或卸载；运行中的扩展中心不会自我修改。成功的 `0.1.0-rc.0` bootstrap 证明目录 `r8→r9`。不可变 rc.1 候选虽已部署 `r10`，但真实 rc.0 到 rc.1 的同 Profile 更新失败，未生成 composite receipt。恢复候选 rc.2 因此把 rc.0 作为最后一个成功前序，证明保留的 r8 cache 可以经 package 内置 r9 迁移到公开 r10，并把 rc.1 记录为失败候选。Stable 必须直接从成功 rc.2 晋级、提升 `r10` 并部署 `r11`。
+仓库提交确定性 `lib/` 构建产物，并且不声明 package lifecycle script，因此从 GitHub 安装时不会执行项目构建。扩展中心自身必须只通过这个官方 CLI 从外部安装、更新、降级或卸载；运行中的扩展中心不会自我修改。成功的 `0.1.0-rc.0` bootstrap 证明目录 `r8→r9`。不可变 rc.1 候选虽已部署 `r10`，但真实 rc.0 到 rc.1 的同 Profile 更新失败，未生成 composite receipt。恢复候选 rc.2 把 rc.0 作为最后一个成功前序，证明保留的 r8 cache 可以经 package 内置 r9 迁移到公开 r10，把 rc.1 记录为失败候选，并提供 stable 晋级所需的成功前序 receipt。Stable package 内置 `r10` 并提交签名 `r11`；只有其准确 post-publication receipt 才能证明 stable Release 与部署已完成。
 
 开发与验证命令：
 
@@ -83,7 +83,7 @@ pnpm run test:acceptance:official-rc2
 
 ## Break-glass 扩展中心恢复
 
-源码会把无依赖恢复 CLI 安装到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。恢复绑定 schema v5 与 official-execution binding v2 会固定该文件和 Center root，同时固定 canonical Node executable、版本与 digest，POSIX supervisor，私有 bundled `pnpm@11.21.0` package、registry SRI、完整 tree、entrypoint、shim 与 shell，以及准确官方 rc.2 package、entrypoint 与已安装 production-dependency closure。对已安装 Profile，扩展中心严格读取变更前的准确 `package.json`、`pnpm-lock.yaml`、`node_modules/.modules.yaml` 与引用的已安装 package manifest，再从这些本地事实合成 owner-only、content-addressed 的 pnpm 11 abbreviated/full metadata-cache generation。被绑定的 generation identity 覆盖 Profile digest、现有 canonical store、生成文件、固定 pnpm runtime 与 cache manifest；每次使用前都重新验证 manifest 与文件 digest。Binding 存入 Plugin provider recovery snapshot，因此正常 rollback 与独立 break-glass recovery 会验证并使用同一 generation。Cache 缺失、被更改、经由 symlink 替换或与 binding 不匹配时，会在下一次官方 CLI Profile 写入前 fail closed。执行期继续 offline 且禁用 lifecycle script；该 cache 不是网络预热，也不声称能获取不可用的 package byte。只有同时没有 lock 且没有 `node_modules` 安装的 Profile 才使用扩展中心私有的 per-Profile store。独立 process-group supervisor 会在 timeout 或 parent 丢失（包括 parent `SIGKILL`）后终止完整 mutation subtree；execution lease 会在该 subtree 仍存活时阻止 stale-lock reclaim。该变更与恢复路径只支持 macOS 和 Linux，在 Windows 上 fail closed。Provider apply 一旦开始，mutation recovery 不可用时会保留锁并进入 `recovery-required`，不会签发 failed receipt。启动会在 owner 初始化前读取 retired Center 与 owner sidecar 状态；仍被任一 projection 引用的 retired failed Plugin journal 会被隔离，缺少准确 target lock 时阻止可写激活。DSH 停止时，break-glass recovery 会验证 journal 绑定的 provider snapshot，只调用已绑定的官方 CLI 恢复准确 Profile before-state，验证结果后才提交 Center state。它绝不直接写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row，也不导入已损坏的 Center runtime。后续官方 DSH 启动必须验证所选 Profile dependency、Loader contribution 与声明 consumer，恢复终态证据才有效。准确完整生命周期 receipt 记录某个 Release candidate 的 packed break-glass 执行是否通过；源码本身不构成该主张。
+源码会把无依赖恢复 CLI 安装到 `$DSH_HOME/extension-center/recovery/<package-version>/<platform>-<arch>/break-glass.mjs`。恢复绑定 schema v5 与 official-execution binding v2 会固定该文件和 Center root，同时固定 canonical Node executable、版本与 digest，POSIX supervisor，私有 bundled `pnpm@11.21.0` package、registry SRI、完整 tree、entrypoint、shim 与 shell，以及准确官方 rc.2 package、entrypoint 与已安装 production-dependency closure。对已安装 Profile，扩展中心严格读取变更前的准确 `package.json`、`pnpm-lock.yaml`、`node_modules/.modules.yaml` 与引用的已安装 package manifest，再从这些本地事实合成 owner-only、content-addressed 的 pnpm 11 abbreviated/full metadata-cache generation。被绑定的 generation identity 覆盖 Profile digest、现有 canonical store、生成文件、固定 pnpm runtime 与 cache manifest；每次使用前都重新验证 manifest 与文件 digest。Binding 存入 Plugin provider recovery snapshot，因此正常 rollback 与独立 break-glass recovery 会验证并使用同一 generation。Cache 缺失、被更改、经由 symlink 替换或与 binding 不匹配时，会在下一次官方 CLI Profile 写入前 fail closed。执行期继续 offline 且禁用 lifecycle script；该 cache 不是网络预热，也不声称能获取不可用的 package byte。只有同时没有 lock 且没有 `node_modules` 安装的 Profile 才使用扩展中心私有的 per-Profile store。独立 process-group supervisor 会在 timeout 或 parent 丢失（包括 parent `SIGKILL`）后终止完整 mutation subtree；execution lease 会在该 subtree 仍存活时阻止 stale-lock reclaim。该变更与恢复路径只支持 macOS 和 Linux，在 Windows 上 fail closed。Provider apply 一旦开始，mutation recovery 不可用时会保留锁并进入 `recovery-required`，不会签发 failed receipt。启动会在 owner 初始化前读取 retired Center 与 owner sidecar 状态；仍被任一 projection 引用的 retired failed Plugin journal 会被隔离，缺少准确 target lock 时阻止可写激活。DSH 停止时，break-glass recovery 会验证 journal 绑定的 provider snapshot，只调用已绑定的官方 CLI 恢复准确 Profile before-state，验证结果后才提交 Center state。它绝不直接写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row，也不导入已损坏的 Center runtime。后续官方 DSH 启动必须验证所选 Profile dependency、Loader contribution 与声明 consumer，恢复终态证据才有效。准确完整生命周期 receipt 记录待审查 Release artifact 的 packed break-glass 执行是否通过；源码本身不构成该主张。
 
 ## 许可证
 
