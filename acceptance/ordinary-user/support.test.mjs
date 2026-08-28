@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { parse as parseYaml } from 'yaml'
 import {
   OrdinaryUserLaneFailure,
   actionsProvenanceFromEnvironment,
@@ -686,6 +687,19 @@ test('ordinary-user verification helper rejects and records every direct mutatio
   }
   assert.equal(audit.directMutationRpcCalls, 3)
   assert.equal(browserRequests, 0)
+})
+
+test('ordinary-user contract workflow installs the locked test runtime before loading the runner', async () => {
+  const workflow = parseYaml(await readFile(
+    new URL('../../.github/workflows/ordinary-user.yml', import.meta.url),
+    'utf8',
+  ))
+  const steps = workflow.jobs.contract.steps
+  const installIndex = steps.findIndex(step => step.name === 'Install locked dependencies')
+  const verifyIndex = steps.findIndex(step => step.name === 'Verify ordinary-user runner contract')
+  assert.ok(steps.some(step => step.name === 'Install pnpm'))
+  assert.ok(installIndex >= 0 && installIndex < verifyIndex)
+  assert.equal(steps[installIndex].run, 'pnpm install --frozen-lockfile')
 })
 
 test('writes a receipt atomically without adding forbidden evidence fields', async () => {
