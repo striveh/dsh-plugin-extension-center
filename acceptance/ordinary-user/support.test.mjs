@@ -56,6 +56,10 @@ function actionsEnvironment(workflowFile = '.github/workflows/ordinary-user.yml'
   }
 }
 
+function parseNeutralArguments(argv = [], cwd = process.cwd()) {
+  return parseOrdinaryUserArguments(argv, cwd, {})
+}
+
 function deliveryOnlyReceipt(config) {
   const receipt = createOrdinaryUserReceipt(config)
   Object.assign(receipt.observations.cli, {
@@ -269,7 +273,7 @@ function completedReceipt(config) {
 }
 
 test('defaults to the unpublished alpha registry lane without a local artifact escape', () => {
-  const parsed = parseOrdinaryUserArguments([], '/acceptance')
+  const parsed = parseNeutralArguments([], '/acceptance')
   assert.equal(parsed.mode, 'registry')
   assert.equal(parsed.dshVersion, '0.1.2-alpha.1')
   assert.deepEqual(parsed.center, {
@@ -359,7 +363,7 @@ test('admits only the exact signed Skill successor coordinates with alpha compat
 })
 
 test('development mode admits only an immutable github shorthand and explicit package identity', () => {
-  const parsed = parseOrdinaryUserArguments([
+  const parsed = parseNeutralArguments([
     '--mode', 'development',
     '--dsh-version', '0.1.2-alpha.1',
     '--dsh-source-root', '/official/deepseek-harness',
@@ -390,14 +394,14 @@ test('development mode admits only an immutable github shorthand and explicit pa
 
 test('requires an immutable previous release and a distinct update target', () => {
   assert.throws(
-    () => parseOrdinaryUserArguments([
+    () => parseNeutralArguments([
       '--center-initial-spec', 'dsh-plugin-extension-center@latest',
       '--center-target-spec', 'dsh-plugin-extension-center@next',
     ]),
     /initial Center registry spec must select one exact version/u,
   )
   assert.throws(
-    () => parseOrdinaryUserArguments([
+    () => parseNeutralArguments([
       '--center-initial-spec', 'dsh-plugin-extension-center@0.1.0',
       '--center-target-spec', 'dsh-plugin-extension-center@0.1.0',
     ]),
@@ -406,7 +410,7 @@ test('requires an immutable previous release and a distinct update target', () =
 })
 
 test('binds a mutable target selector to one workflow-verified version and integrity', () => {
-  const config = parseOrdinaryUserArguments([
+  const config = parseNeutralArguments([
     '--expected-center-target-version', '0.2.0-alpha.1',
     '--expected-center-target-integrity', targetIntegrity,
   ])
@@ -424,11 +428,11 @@ test('binds a mutable target selector to one workflow-verified version and integ
     /does not match the publication workflow binding/u,
   )
   assert.throws(
-    () => parseOrdinaryUserArguments(['--expected-center-target-version', '0.2.0-alpha.1']),
+    () => parseNeutralArguments(['--expected-center-target-version', '0.2.0-alpha.1']),
     /must be supplied together/u,
   )
   assert.throws(
-    () => parseOrdinaryUserArguments([
+    () => parseNeutralArguments([
       '--expected-center-target-version', '0.2.0-alpha.1',
       '--expected-center-target-integrity', 'sha512-not-canonical',
     ]),
@@ -499,14 +503,14 @@ test('registry mode rejects even an immutable github spec', () => {
 
 test('validates source launcher coupling and supports command prefix flags', () => {
   assert.throws(
-    () => parseOrdinaryUserArguments(['--mode', 'development', '--dsh-source-root', '/official']),
+    () => parseNeutralArguments(['--mode', 'development', '--dsh-source-root', '/official']),
     /requires one lowercase 40-character commit/u,
   )
   assert.throws(
-    () => parseOrdinaryUserArguments(['--dsh-source-root', '/official', '--dsh-commit', alphaCommit]),
+    () => parseNeutralArguments(['--dsh-source-root', '/official', '--dsh-commit', alphaCommit]),
     /registry mode cannot use/u,
   )
-  const command = parseOrdinaryUserArguments([
+  const command = parseNeutralArguments([
     '--mode', 'development',
     '--dsh-command', 'node',
     '--dsh-arg', '--import',
@@ -519,7 +523,7 @@ test('validates source launcher coupling and supports command prefix flags', () 
 })
 
 test('pending and failed receipts stay RED and never retain an underlying diagnostic', () => {
-  const config = parseOrdinaryUserArguments([], '/acceptance')
+  const config = parseNeutralArguments([], '/acceptance')
   const pending = markPending(createOrdinaryUserReceipt(config), 'official DSH')
   assert.equal(pending.status, 'pending')
   assert.equal(pending.laneStatus, 'red')
@@ -553,7 +557,7 @@ test('pending and failed receipts stay RED and never retain an underlying diagno
 })
 
 test('only a protected self-installed registry run can prove the alpha Skill lane without claiming product P0', () => {
-  const localRegistry = parseOrdinaryUserArguments([])
+  const localRegistry = parseNeutralArguments([])
   const local = markPassed(completedReceipt(localRegistry), localRegistry)
   assert.equal(local.laneStatus, 'not-proven-local')
   assert.equal(local.p0Status, 'red')
@@ -627,7 +631,7 @@ test('only a protected self-installed registry run can prove the alpha Skill lan
     'purge must prove absent managed state without erasing its non-recoverable history row',
   )
 
-  const bound = parseOrdinaryUserArguments([
+  const bound = parseNeutralArguments([
     '--expected-center-target-version', '0.2.0-alpha.1',
     '--expected-center-target-integrity', targetIntegrity,
   ])
@@ -640,7 +644,7 @@ test('only a protected self-installed registry run can prove the alpha Skill lan
   }
   assert.throws(() => markPassed(drifted, bound), /publication workflow binding/u)
 
-  const development = parseOrdinaryUserArguments([
+  const development = parseNeutralArguments([
     '--mode', 'development',
     '--dsh-source-root', '/official/deepseek-harness',
     '--dsh-commit', alphaCommit,
@@ -705,7 +709,7 @@ test('ordinary-user contract workflow installs the locked test runtime before lo
 test('writes a receipt atomically without adding forbidden evidence fields', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ordinary-user-receipt-test-'))
   try {
-    const config = parseOrdinaryUserArguments([], root)
+    const config = parseNeutralArguments([], root)
     const receipt = markPending(createOrdinaryUserReceipt(config), 'Extension Center')
     const path = join(root, 'nested', 'receipt.json')
     await writeOrdinaryUserReceipt(path, receipt)
