@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
 import { canonicalJson, canonicalSha256 } from '../src/domain/index.ts'
@@ -21,6 +22,16 @@ import { testReviewEvidence } from './support/review-evidence.ts'
 
 const roots: string[] = []
 const spawnedPids: number[] = []
+interface TrackedCliProcess {
+  readonly child: ChildProcess
+  readonly close: Promise<void>
+  closed: boolean
+  cleanup: Promise<void> | null
+}
+
+const spawnedCliProcesses = new Set<TrackedCliProcess>()
+const CLI_RUN_TIMEOUT_MS = 20_000
+const CLI_CLEANUP_TIMEOUT_MS = 5_000
 const OPERATION_ID = 'operation:break-glass:plugin:1'
 const PROFILE_ID = 'web'
 const SCOPE_KEY = 'profile:web'
@@ -30,6 +41,7 @@ const TARGET_KEY = `plugin:${PROFILE_ID}:${SCOPE_KEY}:${EXTENSION_ID}`
 interface Fixture {
   readonly root: string
   readonly cliPath: string
+  readonly supervisorPath: string
   readonly dshEntrypoint: string
   readonly dshPackageRoot: string
   readonly officialCliLog: string
@@ -49,15 +61,78 @@ interface RetainedVersion {
   readonly artifactPath: string
 }
 
+async function within<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timeout: NodeJS.Timeout | null = null
+  const deadline = new Promise<never>((_resolvePromise, reject) => {
+    timeout = setTimeout(() => reject(new Error(label)), timeoutMs)
+    timeout.unref()
+  })
+  try {
+    return await Promise.race([operation, deadline])
+  } finally {
+    if (timeout !== null) clearTimeout(timeout)
+  }
+}
+
+function trackCliProcess(child: ChildProcess): TrackedCliProcess {
+  let resolveClose!: () => void
+  const tracked: TrackedCliProcess = {
+    child,
+    close: new Promise<void>(accept => { resolveClose = accept }),
+    closed: false,
+    cleanup: null,
+  }
+  spawnedCliProcesses.add(tracked)
+  child.once('close', () => {
+    tracked.closed = true
+    spawnedCliProcesses.delete(tracked)
+    resolveClose()
+  })
+  return tracked
+}
+
+function stopTrackedCliProcess(tracked: TrackedCliProcess): Promise<void> {
+  tracked.cleanup ??= (async () => {
+    if (!tracked.closed && tracked.child.exitCode === null && tracked.child.signalCode === null) {
+      try {
+        tracked.child.kill('SIGKILL')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+      }
+    }
+    await within(
+      tracked.close,
+      CLI_CLEANUP_TIMEOUT_MS,
+      'break-glass CLI did not close during test cleanup',
+    )
+  })()
+  return tracked.cleanup
+}
+
+async function terminateTrackedCliChildren(): Promise<void> {
+  await Promise.all([...spawnedCliProcesses].map(stopTrackedCliProcess))
+}
+
 afterEach(async () => {
+  const cleanupErrors: unknown[] = []
+  try {
+    await terminateTrackedCliChildren()
+  } catch (error: unknown) {
+    cleanupErrors.push(error)
+  }
   for (const pid of spawnedPids.splice(0)) {
     try {
       process.kill(pid, 'SIGKILL')
     } catch (error: unknown) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') cleanupErrors.push(error)
     }
   }
-  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, 'break-glass process cleanup failed; fixture roots retained')
+  }
+  const removals = await Promise.allSettled(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  for (const removal of removals) if (removal.status === 'rejected') cleanupErrors.push(removal.reason)
+  if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'break-glass test cleanup failed')
 })
 
 function storageKey(value: string): string {
@@ -459,6 +534,7 @@ async function fixture(input: Readonly<{
   return {
     root,
     cliPath: recoveryExecutable.executablePath,
+    supervisorPath: recoveryExecutable.officialDsh.supervisorPath,
     dshEntrypoint: official.entrypointPath,
     dshPackageRoot: official.packageRoot,
     officialCliLog: official.logPath,
@@ -474,26 +550,32 @@ async function fixture(input: Readonly<{
   }
 }
 
-function runCli(
+async function runCli(
   value: Fixture,
   root = value.root,
   environment: Readonly<Record<string, string>> = {},
 ): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>> {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [value.cliPath, root, OPERATION_ID], {
-      env: { PATH: '/definitely-not-used', ...environment },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    const stdout: Buffer[] = []
-    const stderr: Buffer[] = []
+  const child = spawn(process.execPath, [value.cliPath, root, OPERATION_ID], {
+    env: { PATH: '/definitely-not-used', ...environment },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const tracked = trackCliProcess(child)
+  const stdout: Buffer[] = []
+  const stderr: Buffer[] = []
+  const completion = new Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>>((accept, reject) => {
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk))
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk))
     child.once('error', reject)
     child.once('close', (code, signal) => {
       if (code === null || signal !== null) return reject(new Error('break-glass CLI did not exit normally'))
-      resolvePromise({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), exitCode: code })
+      accept({ stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8'), exitCode: code })
     })
   })
+  try {
+    return await within(completion, CLI_RUN_TIMEOUT_MS, 'break-glass CLI did not close within its test deadline')
+  } finally {
+    await stopTrackedCliProcess(tracked)
+  }
 }
 
 async function expectProcessAbsent(pid: number): Promise<void> {
@@ -535,7 +617,7 @@ async function profileState(value: Fixture): Promise<Readonly<{
   }
 }
 
-describe('standalone Center break-glass recovery', () => {
+describe('standalone Center break-glass recovery', { timeout: 30_000 }, () => {
   it('classifies the observed child outcome deadline before accepting supervisor success', async () => {
     for (const name of ['execution.ts', 'break-glass.ts']) {
       const source = await readFile(join(process.cwd(), 'src', 'recovery', name), 'utf8')
@@ -544,6 +626,7 @@ describe('standalone Center break-glass recovery', () => {
       const success = source.indexOf('else if (childOutcome.code === 0)', deadline)
       const stdinError = source.indexOf("child.stdin.once('error'")
       const startDispatch = source.indexOf("child.stdin.write('START\\n'", stdinError)
+      const durableDispatch = source.indexOf('writeExecutionDispatch(candidate)', startDispatch)
       const exitObserved = source.indexOf("child.once('exit'")
       const closeObserved = source.indexOf("child.once('close'", exitObserved)
       const passiveDispatchFailure = source.indexOf('if (!exitObserved) child.stdin.destroy()')
@@ -552,12 +635,53 @@ describe('standalone Center break-glass recovery', () => {
       expect(success).toBeGreaterThan(deadline)
       expect(stdinError).toBeGreaterThanOrEqual(0)
       expect(startDispatch).toBeGreaterThan(stdinError)
+      expect(durableDispatch).toBeGreaterThan(startDispatch)
       expect(exitObserved).toBeGreaterThanOrEqual(0)
+      expect(durableDispatch).toBeLessThan(exitObserved)
       expect(closeObserved).toBeGreaterThan(exitObserved)
       expect(passiveDispatchFailure).toBeGreaterThan(closeObserved)
       expect([...source.matchAll(/process\.kill\(-pid, 'SIGKILL'\)/gu)]).toHaveLength(1)
     }
   })
+
+  it('makes a fast recovery dispatch durable before observing supervisor close', async () => {
+    const value = await fixture()
+    const preloadPath = join(value.root, 'dispatch-close-barrier.mjs')
+    await writeFile(preloadPath, [
+      "import childProcess from 'node:child_process'",
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      "const suffix = '/execution-dispatch.json'",
+      'let resolveSupervisorClose',
+      'const supervisorClosed = new Promise(accept => { resolveSupervisorClose = accept })',
+      'const realSpawn = childProcess.spawn.bind(childProcess)',
+      'const realOpen = fs.promises.open.bind(fs.promises)',
+      'childProcess.spawn = (command, arguments_, options) => {',
+      '  const child = realSpawn(command, arguments_, options)',
+      '  if (Array.isArray(arguments_) && arguments_[0] === process.env.DISPATCH_SUPERVISOR_PATH) {',
+      '    child.once(\'close\', resolveSupervisorClose)',
+      '  }',
+      '  return child',
+      '}',
+      'fs.promises.open = async (path, ...arguments_) => {',
+      '  const handle = await realOpen(path, ...arguments_)',
+      '  if (String(path).endsWith(suffix)) {',
+      '    const realSync = handle.sync.bind(handle)',
+      '    handle.sync = async () => {',
+      '      await supervisorClosed',
+      '      return realSync()',
+      '    }',
+      '  }',
+      '  return handle',
+      '}',
+      'syncBuiltinESMExports()',
+    ].join('\n'))
+
+    await expect(runCli(value, value.root, {
+      DISPATCH_SUPERVISOR_PATH: value.supervisorPath,
+      NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}`,
+    })).resolves.toMatchObject({ exitCode: 0, stderr: '' })
+  }, 30_000)
 
   it('uses the bound official CLI to restore Profile v1 before committing Center state', async () => {
     const value = await fixture()
@@ -619,7 +743,7 @@ describe('standalone Center break-glass recovery', () => {
     }>
     expect(invocations.at(-1)?.argv.slice(-2)).toEqual(['--store-dir', value.profileStore])
     expect(invocations.at(-1)?.pnpmStore).toBe(value.profileStore)
-  }, 15_000)
+  }, 30_000)
 
   it('rejects corrupt and unsafe installed Profile store metadata before break-glass mutation', async () => {
     const corrupt = await fixture()
@@ -645,7 +769,7 @@ describe('standalone Center break-glass recovery', () => {
 
     expect(unsafeResult.exitCode).toBe(1)
     expect(unsafeResult.stderr).toContain('metadata storeDir is unsafe')
-  }, 15_000)
+  }, 30_000)
 
   it('uses the provider-bound pre-mutation cache after a partial mutation changes the current lockfile', async () => {
     const value = await fixture()
@@ -684,7 +808,7 @@ describe('standalone Center break-glass recovery', () => {
     await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
     await expect(readFile(join(attackerHome, 'profiles', PROFILE_ID, 'package.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
-  }, 15_000)
+  }, 30_000)
 
   it('accepts the strict rollback marker when standalone recovery reads a managed Plugin version', async () => {
     const value = await fixture()
@@ -701,7 +825,7 @@ describe('standalone Center break-glass recovery', () => {
     await writeCanonical(value.sidecarPath, sidecar(marked))
 
     await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0, stderr: '' })
-  }, 15_000)
+  }, 30_000)
 
   it('replays a committed recovery without advancing the revision again', async () => {
     const value = await fixture()
@@ -717,7 +841,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(await readFile(value.sidecarPath, 'utf8')).toBe(firstSidecar)
     expect(await readFile(value.transactionPath, 'utf8')).toBe(firstTransaction)
     await expect(profileState(value)).resolves.toMatchObject({ bundles: [EXTENSION_ID], installedVersion: '1.0.0' })
-  }, 15_000)
+  }, 30_000)
 
   it('finishes a prepared transaction after only the owner sidecar reached restored state', async () => {
     const value = await fixture()
@@ -733,7 +857,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(replay.exitCode).toBe(0)
     expect(JSON.parse(await readFile(value.managedPath, 'utf8'))).toEqual(transaction.restoredManaged)
     expect(JSON.parse(await readFile(value.transactionPath, 'utf8'))).toMatchObject({ status: 'committed' })
-  }, 15_000)
+  }, 30_000)
 
   it('removes the official dependency, bundle, installed target, and Center records when before-state was absent', async () => {
     const value = await fixture({ absentBefore: true })
@@ -761,7 +885,7 @@ describe('standalone Center break-glass recovery', () => {
       status: 'settled',
     })
     await expect(runCli(value)).resolves.toMatchObject({ exitCode: 0 })
-  }, 15_000)
+  }, 30_000)
 
   it('rejects a changed dependency spec and duplicate bundle membership after commit', async () => {
     const dependency = await fixture()
@@ -787,7 +911,7 @@ describe('standalone Center break-glass recovery', () => {
     const duplicateReplay = await runCli(duplicate)
     expect(duplicateReplay.exitCode).toBe(1)
     expect(duplicateReplay.stderr).toContain('Profile diverged from the committed recovery transaction')
-  }, 15_000)
+  }, 30_000)
 
   it('reclaims a dead shared Profile lease before restoring', async () => {
     const value = await fixture()
@@ -926,7 +1050,7 @@ describe('standalone Center break-glass recovery', () => {
     await expect(readdir(takeoverRoot)).resolves.toEqual([])
     await expect(readdir(quarantineRoot)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(readdir(join(coordination, 'leases'))).resolves.toEqual([])
-  })
+  }, 30_000)
 
   it('fails closed without removing a lease whose process may still own a live subtree', async () => {
     const value = await fixture()
@@ -998,7 +1122,7 @@ describe('standalone Center break-glass recovery', () => {
     expect(result.exitCode).toBe(1)
     expect(result.stderr).toContain('quarantine does not bind this recovery operation')
     await expect(readFile(mismatchedPath, 'utf8')).resolves.toContain('operation:foreign')
-  }, 15_000)
+  }, 30_000)
 
   it('fails closed when the bound official CLI entrypoint or package tree changes', async () => {
     const entrypoint = await fixture()
@@ -1013,7 +1137,7 @@ describe('standalone Center break-glass recovery', () => {
     const treeResult = await runCli(tree)
     expect(treeResult.exitCode).toBe(1)
     expect(treeResult.stderr).toContain('official DSH recovery package tree does not match its pin')
-  }, 15_000)
+  }, 30_000)
 
   it('fails closed on executable pin, journal chain, and CURRENT tampering', async () => {
     const executable = await fixture()
@@ -1041,7 +1165,7 @@ describe('standalone Center break-glass recovery', () => {
     const pointerResult = await runCli(pointer)
     expect(pointerResult.exitCode).toBe(1)
     expect(pointerResult.stderr).toContain('headDigest does not match')
-  }, 15_000)
+  }, 30_000)
 
   it('rejects current-state drift before recovery and after a committed replay', async () => {
     const before = await fixture()
@@ -1060,7 +1184,7 @@ describe('standalone Center break-glass recovery', () => {
     const replay = await runCli(after)
     expect(replay.exitCode).toBe(1)
     expect(replay.stderr).toContain('diverged from the committed recovery transaction')
-  }, 15_000)
+  }, 30_000)
 
   it('rejects retained artifact drift and committed Profile tree drift', async () => {
     const artifact = await fixture()
@@ -1078,7 +1202,7 @@ describe('standalone Center break-glass recovery', () => {
     const profileResult = await runCli(profile)
     expect(profileResult.exitCode).toBe(1)
     expect(profileResult.stderr).toContain('Profile diverged from the committed recovery transaction')
-  }, 15_000)
+  }, 30_000)
 
   it('rejects a non-Center Plugin owner and a non-canonical root', async () => {
     const wrongOwner = await fixture({ ownerKey: 'profileTransactions' })

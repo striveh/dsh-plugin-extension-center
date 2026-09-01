@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { closeSync, constants, fsyncSync, openSync, writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -697,6 +697,15 @@ async function syncDirectory(path: string): Promise<void> {
     await handle.sync()
   } finally {
     await handle.close()
+  }
+}
+
+function syncDirectorySync(path: string): void {
+  const descriptor = openSync(path, constants.O_RDONLY)
+  try {
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
   }
 }
 
@@ -1645,6 +1654,22 @@ function executionDispatch(record: RecoveryExecutionRecord): RecoveryExecutionDi
   })
 }
 
+function writeExecutionDispatch(record: RecoveryExecutionDispatchRecord): void {
+  if (constants.O_NOFOLLOW === undefined) failure('official DSH recovery execution dispatch cannot exclude symlinks')
+  const descriptor = openSync(
+    record.path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  )
+  try {
+    writeFileSync(descriptor, `${canonicalJson(record.value)}\n`, 'utf8')
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+  syncDirectorySync(dirname(record.path))
+}
+
 async function clearExecutionRecord(
   record: Readonly<{ path: string; value: unknown }>,
   label: string,
@@ -1713,7 +1738,6 @@ async function runOfficialDsh(
     let exitObserved = false
     let dispatchSettled = false
     let executionWrite: Promise<void> = Promise.resolve()
-    let dispatchWrite: Promise<void> = Promise.resolve()
     let resolveDispatch!: () => void
     let rejectDispatch!: (cause: unknown) => void
     const dispatchPromise = new Promise<void>((accept, reject) => {
@@ -1791,12 +1815,13 @@ async function runOfficialDsh(
             }
             const candidate = executionDispatch(record)
             durableRecords.dispatch = candidate
-            dispatchWrite = writeExclusive(candidate.path, candidate.value).then(() => {
+            try {
+              writeExecutionDispatch(candidate)
               durableRecords.dispatchDurable = true
-              if (!closeObserved) resolveDispatch()
-            }, cause => {
+              resolveDispatch()
+            } catch (cause: unknown) {
               rejectDispatch(new Error('official DSH recovery supervisor start dispatch could not be recorded', { cause }))
-            })
+            }
           })
         } catch (cause: unknown) {
           rejectDispatch(new Error('official DSH recovery supervisor start dispatch failed', { cause }))
@@ -1835,7 +1860,6 @@ async function runOfficialDsh(
     }
     const supervisorOutcome = await closePromise
     await executionWrite
-    await dispatchWrite
     const pid = child.pid
     processGroupQuiescent = pid === undefined || await waitForProcessGroupQuiescence(pid)
     if (!processGroupQuiescent) {
