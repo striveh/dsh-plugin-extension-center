@@ -329,7 +329,7 @@ export function parseAuthenticatedLaunchUrl(output) {
 /**
  * Derive every independent post-remove absence check from persisted CLI and Profile state.
  * @param {{manifest: object, packageName: string, packagePresent: boolean, listStdout: string, dumpStdout: string, dumpStderr: string}} input Observed post-remove state.
- * @returns {{profileDependencyAbsent: boolean, profileBundleAbsent: boolean, profilePackageAbsent: boolean, pluginListAbsent: boolean, bundleLayerAbsent: boolean, dumpStderrClean: boolean}} Closed evidence fields.
+ * @returns {{profileDependencyAbsent: boolean, profileBundleAbsent: boolean, profilePackageAbsent: boolean, pluginListAbsent: boolean, bundleLayerAbsent: boolean, dumpHasNoPatchResidue: boolean}} Closed evidence fields.
  */
 export function removedProfileEvidence(input) {
   const manifest = input.manifest
@@ -341,7 +341,7 @@ export function removedProfileEvidence(input) {
     bundleLayerAbsent: !input.dumpStdout.includes(`# == ${input.packageName}`)
       && !input.dumpStdout.includes(`name: ${input.packageName}`)
       && !input.dumpStdout.includes(`name: '${input.packageName}'`),
-    dumpStderrClean: !input.dumpStderr.includes(input.packageName)
+    dumpHasNoPatchResidue: !input.dumpStderr.includes(input.packageName)
       && !input.dumpStderr.includes('patch: entry'),
   })
 }
@@ -478,46 +478,50 @@ export function waitForReadyUrl(child, output, timeoutMs = 90_000) {
 /**
  * Stop a child process and wait for its close event.
  * @param {import('node:child_process').ChildProcess | undefined} child Process to stop.
- * @param {{requireRunning?: boolean, requireGraceful?: boolean}} [options] Passing-lane shutdown requirements.
- * @returns {Promise<{wasRunning: boolean, forced: boolean, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence.
+ * @param {{requireRunning?: boolean, requireGraceful?: boolean, gracefulTimeoutMs?: number, killTimeoutMs?: number}} [options] Passing-lane shutdown requirements.
+ * @returns {Promise<{wasRunning: boolean, forced: boolean, closeObserved: boolean, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence.
  */
 export async function stopChild(child, options = {}) {
   if (child === undefined) {
     if (options.requireRunning === true) throw new Error('spawned DSH Web process was absent before shutdown')
-    return { wasRunning: false, forced: false, exitCode: null, signalCode: null }
+    return { wasRunning: false, forced: false, closeObserved: false, exitCode: null, signalCode: null }
   }
   if (child.exitCode !== null || child.signalCode !== null) {
+    let forced = false
+    if (!childCloseAlreadyObserved(child)) {
+      const forcedClose = waitForChildClose(child, options.killTimeoutMs ?? 2_000)
+      signalChildTree(child, 'SIGKILL')
+      if (!await forcedClose) throw new Error('spawned DSH Web process did not close after SIGKILL')
+      forced = true
+    }
     if (options.requireRunning === true) throw new Error('spawned DSH Web process exited before runner-owned shutdown')
-    return { wasRunning: false, forced: false, exitCode: child.exitCode, signalCode: child.signalCode }
+    return { wasRunning: false, forced, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
   }
-  const gracefulClose = waitForChildClose(child, 8_000)
+  const gracefulClose = waitForChildClose(child, options.gracefulTimeoutMs ?? 8_000)
   signalChildTree(child, 'SIGTERM')
   if (await gracefulClose) {
-    const result = { wasRunning: true, forced: false, exitCode: child.exitCode, signalCode: child.signalCode }
+    const result = { wasRunning: true, forced: false, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
     if (options.requireGraceful === true && (result.exitCode !== 0 || result.signalCode !== null)) {
       throw new Error(`spawned DSH Web process did not close gracefully (${result.signalCode ?? String(result.exitCode)})`)
     }
     return result
   }
-  if (child.exitCode !== null || child.signalCode !== null) {
-    const result = { wasRunning: true, forced: false, exitCode: child.exitCode, signalCode: child.signalCode }
-    if (options.requireGraceful === true && (result.exitCode !== 0 || result.signalCode !== null)) {
-      throw new Error(`spawned DSH Web process did not close gracefully (${result.signalCode ?? String(result.exitCode)})`)
-    }
-    return result
-  }
-  const forcedClose = waitForChildClose(child, 2_000)
+  const forcedClose = waitForChildClose(child, options.killTimeoutMs ?? 2_000)
   signalChildTree(child, 'SIGKILL')
-  if (await forcedClose || child.exitCode !== null || child.signalCode !== null) {
-    if (options.requireGraceful === true) throw new Error('spawned DSH Web process required SIGKILL during runner-owned shutdown')
-    return { wasRunning: true, forced: true, exitCode: child.exitCode, signalCode: child.signalCode }
-  }
-  throw new Error('spawned DSH Web process did not terminate after SIGKILL')
+  if (!await forcedClose) throw new Error('spawned DSH Web process did not close after SIGKILL')
+  if (options.requireGraceful === true) throw new Error('spawned DSH Web process required SIGKILL during runner-owned shutdown')
+  return { wasRunning: true, forced: true, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
 }
 
-/** Wait a bounded interval for a child close event without losing an already terminal state. */
+/** Return whether the direct child and each owned stdio stream have reached terminal state. */
+function childCloseAlreadyObserved(child) {
+  return (child.exitCode !== null || child.signalCode !== null)
+    && child.stdio.every(stream => stream === null || stream.closed === true)
+}
+
+/** Wait a bounded interval for the child and its inherited stdio handles to close. */
 function waitForChildClose(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  if (childCloseAlreadyObserved(child)) return Promise.resolve(true)
   return new Promise(resolveClose => {
     const onClose = () => {
       clearTimeout(timer)

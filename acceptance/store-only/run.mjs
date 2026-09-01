@@ -47,14 +47,18 @@ const MCP_CANDIDATE_REFS = new Set([
   'mcp:io.github.domdomegg/filesystem-mcp@1.3.0',
 ])
 const receipt = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   acceptanceId: 'STORE-UI-01',
   proofScope: 'latest-official-dsh-unmodified-host-offline-store-ui',
   p0Status: 'pending',
   source: {
     commit: null,
+    tree: null,
     worktreeCleanAtPack: null,
+    worktreeCleanAfterAcceptance: null,
     runnerSha256: null,
+    supportSha256: null,
+    journeyEvidenceSha256: null,
     lockfileSha256: null,
   },
   target: {
@@ -146,7 +150,7 @@ const receipt = {
     profileBundleAbsentAfterRemoval: false,
     profilePackageAbsentAfterRemoval: false,
     pluginListAbsentAfterRemoval: false,
-    removedDumpStderrClean: false,
+    removedDumpHasNoPatchResidue: false,
     webShutdown: null,
     officialDshPackageTreeUnchanged: false,
     officialHostInstallTreeUnchanged: false,
@@ -162,6 +166,8 @@ let context
 let page
 let proxy
 let browserLaunchToken
+let sourceBindingBefore
+let sourceEnvironment
 let webOutput = { value: '' }
 const storeJourney = createStoreJourneyWindow()
 const openConnectionStreams = new Map()
@@ -190,6 +196,7 @@ try {
     DEEPSEEK_API_KEY: SECRET_CANARY,
     DEEPSEEK_BASE_URL: `https://provider.invalid/${SECRET_CANARY}`,
   })
+  sourceEnvironment = baseEnv
   receipt.inputs.blockedCredentialVariablePassed = Object.keys(baseEnv).some(key => BLOCKED_CREDENTIAL_ENV_PATTERN.test(key))
   receipt.inputs.providerEndpointOverridePassed = Object.keys(baseEnv).some(key => BASE_URL_ENV_PATTERN.test(key))
   receipt.inputs.telemetryModeRequested = baseEnv.DSH_TELEMETRY_MODE ?? null
@@ -207,31 +214,20 @@ try {
   }
   const sourceManifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
   assertNoPackageLifecycleScripts(sourceManifest, 'source')
-  const sourceCommit = await runChecked('git', ['rev-parse', '--verify', 'HEAD'], {
-    cwd: projectRoot,
-    env: baseEnv,
-    timeoutMs: 30_000,
-  })
-  const normalizedSourceCommit = sourceCommit.stdout.trim()
-  if (!/^[0-9a-f]{40}$/u.test(normalizedSourceCommit)) {
-    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'repository HEAD was not one exact commit')
+  sourceBindingBefore = await readSourceBinding(baseEnv)
+  receipt.source.commit = sourceBindingBefore.commit
+  receipt.source.tree = sourceBindingBefore.tree
+  receipt.source.worktreeCleanAtPack = sourceBindingBefore.clean
+  receipt.source.runnerSha256 = sourceBindingBefore.runnerSha256
+  receipt.source.supportSha256 = sourceBindingBefore.supportSha256
+  receipt.source.journeyEvidenceSha256 = sourceBindingBefore.journeyEvidenceSha256
+  receipt.source.lockfileSha256 = sourceBindingBefore.lockfileSha256
+  if (!sourceBindingBefore.clean) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-DIRTY', 'repository worktree was not clean before packing')
   }
-  if (process.env.GITHUB_SHA !== undefined && process.env.GITHUB_SHA !== normalizedSourceCommit) {
+  if (process.env.GITHUB_SHA !== undefined && process.env.GITHUB_SHA !== sourceBindingBefore.commit) {
     throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'GitHub workflow commit did not match repository HEAD')
   }
-  const sourceStatus = await runChecked('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
-    cwd: projectRoot,
-    env: baseEnv,
-    timeoutMs: 30_000,
-  })
-  const [runnerBytes, lockfileBytes] = await Promise.all([
-    readFile(fileURLToPath(import.meta.url)),
-    readFile(join(projectRoot, 'pnpm-lock.yaml')),
-  ])
-  receipt.source.commit = normalizedSourceCommit
-  receipt.source.worktreeCleanAtPack = sourceStatus.stdout.length === 0
-  receipt.source.runnerSha256 = createHash('sha256').update(runnerBytes).digest('hex')
-  receipt.source.lockfileSha256 = createHash('sha256').update(lockfileBytes).digest('hex')
   receipt.phase = 'installing-official-host'
   const officialHost = await installOfficialDshHost({
     hostRoot,
@@ -577,7 +573,7 @@ try {
   receipt.observations.profilePackageAbsentAfterRemoval = removalEvidence.profilePackageAbsent
   receipt.observations.pluginListAbsentAfterRemoval = removalEvidence.pluginListAbsent
   receipt.observations.bundleLayerAbsentAfterRemoval = removalEvidence.bundleLayerAbsent
-  receipt.observations.removedDumpStderrClean = removalEvidence.dumpStderrClean
+  receipt.observations.removedDumpHasNoPatchResidue = removalEvidence.dumpHasNoPatchResidue
   await Promise.all([
     writeFile(join(evidenceRoot, 'removed-plugin-list.stdout.txt'), sanitizeDiagnostic(removedList.stdout)),
     writeFile(join(evidenceRoot, 'removed-plugin-list.stderr.txt'), sanitizeDiagnostic(removedList.stderr)),
@@ -672,6 +668,16 @@ try {
   } catch (finalEvidenceError) {
     postShutdownFailure = finalEvidenceError
   }
+  let sourceClosureFailure
+  if (sourceBindingBefore?.clean === true && sourceEnvironment !== undefined) {
+    try {
+      const sourceBindingAfter = await readSourceBinding(sourceEnvironment)
+      receipt.source.worktreeCleanAfterAcceptance = sourceBindingAfter.clean
+      assertSourceBindingClosed(sourceBindingBefore, sourceBindingAfter)
+    } catch (sourceError) {
+      sourceClosureFailure = sourceError
+    }
+  }
   if (finalizationFailures.length > 0) {
     const preceding = receipt.failure ?? null
     receipt.status = 'invalid'
@@ -697,6 +703,20 @@ try {
       preceding,
     }
     process.exitCode = 1
+  } else if (sourceClosureFailure !== undefined) {
+    const preceding = receipt.failure ?? null
+    const code = sourceClosureFailure instanceof AcceptanceFailure
+      ? sourceClosureFailure.code
+      : 'STORE-UI-SOURCE-DRIFT'
+    receipt.status = 'invalid'
+    receipt.p0Status = 'not-proven'
+    receipt.failure = {
+      code,
+      message: sanitizeDiagnostic(sourceClosureFailure instanceof Error ? sourceClosureFailure.message : String(sourceClosureFailure)),
+      phase: 'source-closure',
+      preceding,
+    }
+    process.exitCode = 1
   }
   await writeFile(join(evidenceRoot, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`)
 }
@@ -713,6 +733,61 @@ function acceptanceFailure(error, fallbackCode) {
   return {
     code: error instanceof AcceptanceFailure ? error.code : fallbackCode,
     message: sanitizeDiagnostic(error instanceof Error ? error.message : String(error)),
+  }
+}
+
+/** Bind the compatibility receipt to one clean committed source tree and its acceptance programs. */
+async function readSourceBinding(environment) {
+  const [commitResult, treeResult, statusResult, runnerBytes, supportBytes, journeyEvidenceBytes, lockfileBytes] = await Promise.all([
+    runChecked('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['rev-parse', '--verify', 'HEAD^{tree}'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    readFile(fileURLToPath(import.meta.url)),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'support.mjs')),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'journey-evidence.mjs')),
+    readFile(join(projectRoot, 'pnpm-lock.yaml')),
+  ])
+  const commit = commitResult.stdout.trim()
+  const tree = treeResult.stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'repository HEAD was not one exact commit')
+  }
+  if (!/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-TREE', 'repository HEAD tree was not one exact Git tree')
+  }
+  return Object.freeze({
+    commit,
+    tree,
+    clean: statusResult.stdout.length === 0,
+    runnerSha256: createHash('sha256').update(runnerBytes).digest('hex'),
+    supportSha256: createHash('sha256').update(supportBytes).digest('hex'),
+    journeyEvidenceSha256: createHash('sha256').update(journeyEvidenceBytes).digest('hex'),
+    lockfileSha256: createHash('sha256').update(lockfileBytes).digest('hex'),
+  })
+}
+
+/** Reject any source or acceptance-program drift across the complete Store journey. */
+function assertSourceBindingClosed(before, after) {
+  const fields = ['commit', 'tree', 'runnerSha256', 'supportSha256', 'journeyEvidenceSha256', 'lockfileSha256']
+  const changed = fields.filter(field => before[field] !== after[field])
+  if (!after.clean || changed.length > 0) {
+    const detail = [
+      ...(!after.clean ? ['worktree'] : []),
+      ...changed,
+    ].join(', ')
+    throw new AcceptanceFailure('STORE-UI-SOURCE-DRIFT', `repository source changed during acceptance: ${detail}`)
   }
 }
 

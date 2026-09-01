@@ -299,6 +299,7 @@ test('subprocess timeouts and child teardown are bounded', async () => {
   assert.deepEqual(gracefulResult, {
     wasRunning: true,
     forced: false,
+    closeObserved: true,
     exitCode: 0,
     signalCode: null,
   })
@@ -309,4 +310,44 @@ test('subprocess timeouts and child teardown are bounded', async () => {
     stopChild(crashed, { requireRunning: true, requireGraceful: true }),
     /exited before runner-owned shutdown/u,
   )
+})
+
+test('strict child teardown kills a descendant that retains inherited stdout', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.stdout.write("descendant-ready\\n"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'inherit', 'ignore'] })`,
+    'process.on("SIGTERM", () => process.exit(0))',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  await once(parent, 'spawn')
+  await once(parent.stdout, 'data')
+  try {
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        gracefulTimeoutMs: 50,
+        killTimeoutMs: 1_000,
+      }),
+      /required SIGKILL during runner-owned shutdown/u,
+    )
+    assert.equal(parent.stdout.closed, true)
+    assert.throws(
+      () => process.kill(-parent.pid, 0),
+      error => error?.code === 'ESRCH',
+    )
+  } finally {
+    try {
+      process.kill(-parent.pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+    }
+  }
 })
