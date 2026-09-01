@@ -228,10 +228,10 @@ export function validatePackedBreakGlassPrecondition(input) {
   const packageVersion = string(binding.packageVersion, 'recovery packageVersion', 128)
   if (binding.schemaVersion !== 5 || binding.platform !== process.platform || binding.arch !== process.arch
     || binding.centerRoot !== centerRoot || official.schemaVersion !== 2
-    || official.packageName !== '@deepseek-ai/dsh' || official.packageVersion !== '0.1.1-rc.2'
+    || official.packageName !== '@deepseek-ai/dsh' || official.packageVersion !== '0.1.2-alpha.3'
     || node.schemaVersion !== 1 || node.version !== process.version
     || pnpm.schemaVersion !== 1 || pnpm.packageName !== 'pnpm' || pnpm.packageVersion !== '11.21.0') {
-    fail('P0-BREAK-GLASS-BINDING', 'journal does not carry the exact schema 5 official rc.2 execution binding')
+    fail('P0-BREAK-GLASS-BINDING', 'journal does not carry the exact schema 5 latest official DSH execution binding')
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(packageVersion)) {
     fail('P0-BREAK-GLASS-BINDING', 'recovery package version is not a safe installed-generation segment')
@@ -651,7 +651,7 @@ export async function runPackedBreakGlassE2e(input) {
     acceptanceId: 'P0-PACKED-BREAK-GLASS-MANAGED-PLUGIN-RESTORE',
     status: 'passed',
     target: Object.freeze({
-      dshPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
+      dshPackage: '@deepseek-ai/dsh@0.1.2-alpha.3',
       packageTreeDigestBefore: officialBefore,
       packageTreeDigestAfter: officialAfter,
       platform: process.platform,

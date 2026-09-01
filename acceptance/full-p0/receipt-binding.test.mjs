@@ -180,7 +180,7 @@ function operationPlanEvidence() {
       officialDsh: {
         schemaVersion: 2,
         packageName: '@deepseek-ai/dsh',
-        packageVersion: '0.1.1-rc.2',
+        packageVersion: '0.1.2-alpha.3',
         packageRoot: recoveryPath('official-dsh'),
         packageTreeSha256: canonicalSha256({ officialDshTree: true }),
         productionDependencies: [],

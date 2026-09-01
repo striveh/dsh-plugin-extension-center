@@ -145,7 +145,7 @@ interface ConfigurationRuntimeOptionBase {
     readonly runtimeRef: string;
     readonly version: string;
 }
-/** Exact preprovisioned stdio selector disclosed to the loopback management UI. */
+/** Exact preprovisioned stdio selector disclosed to the authenticated management UI. */
 export interface ConfigurationStdioRuntimeOption extends ConfigurationRuntimeOptionBase {
     readonly transport: 'stdio';
     readonly executablePath: string;
@@ -175,7 +175,7 @@ export interface ConfigurationOptionsResponse extends RpcVersioned {
     readonly options: readonly ConfigurationRuntimeOption[];
     readonly currentConfiguration: RpcJson | null;
 }
-/** Human decision accepted only from the loopback-authorized RPC carrier. */
+/** Human decision accepted only from the Connection-authenticated browser carrier. */
 export interface PlanDecideRequest extends RpcVersioned {
     readonly planId: string;
     readonly planHash: string;

@@ -20,7 +20,7 @@ vi.mock('../src/recovery/install.ts', () => ({
     officialDsh: {
       schemaVersion: 2,
       packageName: '@deepseek-ai/dsh',
-      packageVersion: '0.1.1-rc.2',
+      packageVersion: '0.1.2-alpha.3',
       packageRoot: root,
       packageTreeSha256: `sha256:${'2'.repeat(64)}`,
       productionDependencies: [],
@@ -69,8 +69,8 @@ class TestConnection extends Service {
   private handler: ConnectionRpcHandler | undefined
 
   readonly rpc = {
-    handle: (channel: string, handler: ConnectionRpcHandler, options: { authority: 'loopback' }) => {
-      if (channel !== EXTENSION_CENTER_RPC_CHANNEL || options.authority !== 'loopback' || this.handler !== undefined) {
+    handle: (channel: string, handler: ConnectionRpcHandler) => {
+      if (channel !== EXTENSION_CENTER_RPC_CHANNEL || this.handler !== undefined) {
         throw new Error('unexpected Extension Center RPC registration')
       }
       this.handler = handler
@@ -232,7 +232,7 @@ describe('independent Center owner activation', () => {
     await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))
   })
 
-  it('activates recovery RPC while official Profile ambiguity keeps new Plugin planning fail-closed', async () => {
+  it('activates recovery RPC while official Profile ambiguity and the stable catalog keep alpha planning fail-closed', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-owner-ambiguity-'))
     roots.push(root)
     const ctx = new Context()
@@ -269,9 +269,9 @@ describe('independent Center owner activation', () => {
       configuration: {},
     })).resolves.toMatchObject({
       ok: false,
-      error: { message: 'Extension Center operation failed' },
+      error: { message: 'the exact candidate is not admitted for this DSH release' },
     })
-    expect(initialize.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(initialize).toHaveBeenCalledOnce()
 
     await centerFiber.dispose()
     await Promise.all([...mounted.fibers].reverse().map(fiber => fiber.dispose()))

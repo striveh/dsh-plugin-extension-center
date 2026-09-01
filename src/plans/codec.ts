@@ -100,7 +100,7 @@ function decodeRecoveryExecutableBindingWithIdentity(
     failDomain('invalid-data', `${path} values are invalid`)
   }
   if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
-    || officialDsh.packageVersion !== '0.1.1-rc.2' || !isAbsolute(packageRoot)
+    || officialDsh.packageVersion !== '0.1.2-alpha.3' || !isAbsolute(packageRoot)
     || !isAbsolute(entrypointPath) || !isAbsolute(hostHome) || !isAbsolute(supervisorPath)
     || timeoutMs < 1_000 || timeoutMs > 600_000 || node.schemaVersion !== 1 || !isAbsolute(nodePath)
     || !/^v\d+\.\d+\.\d+(?:[-+].*)?$/u.test(nodeVersion) || pnpm.schemaVersion !== 1
@@ -142,7 +142,7 @@ function decodeRecoveryExecutableBindingWithIdentity(
     officialDsh: {
       schemaVersion: 2,
       packageName: '@deepseek-ai/dsh',
-      packageVersion: '0.1.1-rc.2',
+      packageVersion: '0.1.2-alpha.3',
       packageRoot,
       packageTreeSha256: readSha256Digest(
         officialDsh.packageTreeSha256,

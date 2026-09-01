@@ -96,6 +96,7 @@ function rejection(sourceId, index, value, error) {
 }
 
 function sourceReport(sourceId, sourceUrl, retrievedAt, document, parse) {
+  text(sourceId, 'sourceId', { maximum: 128 })
   timestamp(retrievedAt, 'retrievedAt')
   httpsUrl(sourceUrl, 'sourceUrl')
   const records = parse.records(document)
@@ -234,8 +235,13 @@ export function discoverOfficialMcpRegistry(document, sourceUrl, retrievedAt) {
 }
 
 /** Convert a fixed GitHub repository-search page into Skill curation leads. */
-export function discoverGithubSkillRepositories(document, sourceUrl, retrievedAt) {
-  return sourceReport('github-skill-search', sourceUrl, retrievedAt, document, {
+export function discoverGithubSkillRepositories(
+  document,
+  sourceUrl,
+  retrievedAt,
+  sourceId = 'github-agent-skill-search',
+) {
+  return sourceReport(sourceId, sourceUrl, retrievedAt, document, {
     records(value) {
       const root = object(value, 'GitHub repository search')
       return root.items
@@ -251,6 +257,10 @@ export function discoverGithubSkillRepositories(document, sourceUrl, retrievedAt
       if (!Array.isArray(topics) || topics.length > 64 || topics.some(topic => typeof topic !== 'string')) {
         throw new Error('GitHub repository topics are invalid')
       }
+      const topic = topics.includes('agent-skill')
+        ? 'agent-skill'
+        : topics.includes('agent-skills') ? 'agent-skills' : null
+      if (topic === null) throw new Error('GitHub repository is absent from the fixed Skill topics')
       const identity = {
         sourceId: source.sourceId,
         sourceDocumentDigest: source.documentDigest,
@@ -271,7 +281,7 @@ export function discoverGithubSkillRepositories(document, sourceUrl, retrievedAt
         remoteUrls: Object.freeze([]),
         discoveredAt: source.retrievedAt,
         signals: Object.freeze({
-          category: topics.includes('agent-skill') ? 'agent-skill' : 'agents',
+          category: topic,
           stars,
           downloads: null,
           registryStatus: null,

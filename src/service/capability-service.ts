@@ -1378,7 +1378,7 @@ export class CapabilityAcquisitionService {
     }
   }
 
-  /** Bind a loopback plan decision to its independent task attempt. */
+  /** Bind a browser-session-authenticated plan decision to its independent task attempt. */
   async assertPlanDecisionAllowed(planHash: string, decision: 'approve' | 'reject'): Promise<void> {
     await this.ensureTaskAttempts()
     const state = await this.plans.load(planHash as `sha256:${string}`)
@@ -1400,7 +1400,7 @@ export class CapabilityAcquisitionService {
     }
   }
 
-  /** Bind a loopback plan decision to its independent task attempt. */
+  /** Bind a browser-session-authenticated plan decision to its independent task attempt. */
   async recordPlanDecision(planHash: string, decision: 'approve' | 'reject'): Promise<void> {
     await this.ensureTaskAttempts()
     const state = await this.plans.load(planHash as `sha256:${string}`)

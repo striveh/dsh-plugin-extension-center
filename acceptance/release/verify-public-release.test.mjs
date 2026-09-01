@@ -637,6 +637,9 @@ test('binds complete packed manifest bytes and authoritative publication fields'
     fileURLToPath(new URL('../../package.json', import.meta.url)),
     'utf8',
   ))
+  // This verifier is frozen to the stable rc.2 release line; current source may target a later Host.
+  authority.private = true
+  authority.engines.dsh = TARGET_DSH_VERSION
   const manifest = structuredClone(authority)
   manifest.version = currentVersion
   const bytes = Buffer.from(JSON.stringify(manifest))

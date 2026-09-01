@@ -75,7 +75,7 @@ function releasePayload(artifact) {
 
 function officialTarget(after = false) {
   return {
-    dshPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
+    dshPackage: '@deepseek-ai/dsh@0.1.2-alpha.3',
     auditedSourceCommit: TARGET_DSH_COMMIT,
     registry: 'https://registry.npmjs.org/',
     registryIntegrity: TARGET_DSH_REGISTRY_INTEGRITY,
@@ -199,7 +199,7 @@ function previousReleaseReadyReceipt(artifact = PREVIOUS, verifier = artifact, r
     },
     evidence: {
       fullP0: {
-        acceptanceId: 'P0-RC2-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
+        acceptanceId: 'P0-LATEST-DSH-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
         sha256: `sha256:${'9'.repeat(64)}`,
         faultMatrix: { platform: 'linux', arch: 'x64', caseCount: REQUIRED_FAULT_MATRIX_CASE_IDS.length },
       },
@@ -330,12 +330,12 @@ function boundArtifact(artifact) {
 function fullReceipt(current = CURRENT) {
   return {
     schemaVersion: 1,
-    acceptanceId: 'P0-RC2-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
-    proofScope: 'packed-extension-unmodified-official-rc2-host-rpc-plugin-mcp-skill-lifecycles',
+    acceptanceId: 'P0-LATEST-DSH-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
+    proofScope: 'packed-extension-unmodified-latest-dsh-host-rpc-plugin-mcp-skill-lifecycles',
     status: 'passed',
-    p0Status: 'official-rc2-lifecycle-proven',
-    releaseClaim: 'official-dsh-rc2-compatible',
-    target: { ...officialTarget(), version: '0.1.1-rc.2', os: process.platform, arch: process.arch },
+    p0Status: 'latest-dsh-lifecycle-proven',
+    releaseClaim: 'latest-official-dsh-compatible',
+    target: { ...officialTarget(), version: '0.1.2-alpha.3', os: process.platform, arch: process.arch },
     inputs: {
       isolatedHomesCreatedEmpty: true,
       credentialVariablesPassed: false,
@@ -390,7 +390,6 @@ function fullReceipt(current = CURRENT) {
       },
     },
     notProven: [
-      'published-extension-center-release-installation',
       'center-update-with-distinct-artifact-version-and-digest',
       'update-with-distinct-signed-catalog-revision',
       'cross-platform-matrix',
@@ -1065,7 +1064,7 @@ test('rejects publication identity drift and a changed official DSH tree within 
     changedIdentity.runtimeRelease.target[field] = value
     assert.throws(
       () => assertReleaseReady(changedIdentity),
-      /does not bind the exact official DSH rc\.2 artifact/u,
+      /does not bind the exact latest official DSH artifact/u,
       field,
     )
   }

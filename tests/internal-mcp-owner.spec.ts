@@ -345,7 +345,7 @@ describe('Center-owned MCP connection lifecycle', () => {
     expect(state.mutations.map(record => record.mutationId).sort()).toEqual(['configure-alpha', 'configure-beta'])
   })
 
-  it('mounts the published official rc.2 MCP client on the real child-Fiber path', async () => {
+  it('mounts the latest official MCP client on the real child-Fiber path', async () => {
     const stateRoot = await root()
     const server = join(stateRoot, 'fixture-mcp-server.mjs')
     await writeFile(server, [

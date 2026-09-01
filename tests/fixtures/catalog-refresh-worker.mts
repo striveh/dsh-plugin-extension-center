@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { withCatalogCacheWriter } from '../../src/catalog-cache-reservation.ts'
 import { canonicalJson } from '../../src/catalog.ts'
 import { CatalogSnapshotManager, type SignedCatalogDocument } from '../../src/catalog-refresh.ts'
@@ -7,6 +6,9 @@ import {
   BOOTSTRAP_CATALOG_ENVELOPE,
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from '../../src/catalog-data.ts'
+import {
+  developmentCatalogSuccessor,
+} from '../support/catalog-refresh-development.ts'
 
 interface ParentCommand {
   readonly command: 'crash' | 'release'
@@ -55,13 +57,11 @@ async function run(mode: string, root: string, now: number): Promise<void> {
     return
   }
   const url = 'https://catalog.example.test/project/plugins.json'
-  const publicDocument = JSON.parse(
-    await readFile(resolve('catalog/public/plugins.json'), 'utf8'),
-  ) as SignedCatalogDocument
   const bootstrapDocument: SignedCatalogDocument = {
     envelope: BOOTSTRAP_CATALOG_ENVELOPE,
     signatures: BOOTSTRAP_CATALOG_SIGNATURES,
   }
+  const developmentSuccessor = developmentCatalogSuccessor(BOOTSTRAP_CATALOG_ENVELOPE)
   const manager = new CatalogSnapshotManager(root, { trustedUrl: url, fetchTimeoutMs: 5_000 }, {
     now: () => now,
     fetch: (async () => {
@@ -71,7 +71,7 @@ async function run(mode: string, root: string, now: number): Promise<void> {
         if (mode === 'stale-offline') throw new Error('deterministic offline')
         return responseAt(url, bootstrapDocument)
       }
-      if (mode === 'winner') return responseAt(url, publicDocument)
+      if (mode === 'winner') return responseAt(url, developmentSuccessor)
       throw new Error(`catalog refresh worker mode is unsupported: ${mode}`)
     }) as typeof fetch,
   })

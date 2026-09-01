@@ -28,35 +28,6 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
   },
 }))
 
-vi.mock('@deepseek-ai/dsh-client-runtime/client', () => ({
-  defineStore: (spec: {
-    init: () => Record<string, unknown>
-    actions: Record<string, (draft: Record<string, unknown>, ...args: unknown[]) => void>
-  }) => ({
-    spec,
-    create: () => {
-      let state = spec.init()
-      const listeners = new Set<() => void>()
-      const actions = Object.fromEntries(Object.entries(spec.actions).map(([name, mutate]) => [
-        name,
-        (...args: unknown[]) => {
-          const draft = { ...state }
-          mutate(draft, ...args)
-          state = draft
-          for (const listener of listeners) listener()
-        },
-      ]))
-      return {
-        actions,
-        getSnapshot: () => state,
-        subscribe: (listener: () => void) => {
-          listeners.add(listener)
-          return () => { listeners.delete(listener) }
-        },
-      }
-    },
-  }),
-}))
 import {
   ExtensionCenterOverlay, type ExtensionCenterOverlayProps,
   ExtensionCenterTrigger, type ExtensionCenterTriggerProps,
@@ -70,7 +41,7 @@ import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 
 afterEach(() => { cleanup() })
 
-/** Mount both slot occupants over one real rc.2 store engine instance. */
+/** Mount both slot occupants over one shared structural store instance. */
 const verifiedCatalog = catalogListResponse(
   verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
 )
@@ -95,7 +66,47 @@ function renderCenter(
   return render(<Harness />)
 }
 
-describe('rc.2 signed read-only Extension Store', () => {
+describe('signed read-only Extension Store', () => {
+  it('provides isolated structural StoreHandle instances with disposable subscriptions', () => {
+    const handle = createExtensionCenterStore()
+    const first = handle.create()
+    const second = handle.create()
+    const changed = vi.fn()
+    const unsubscribe = first.subscribe(changed)
+
+    first.actions.openStore()
+    expect(first.getSnapshot()).toEqual({ open: true, active: 'store' })
+    expect(second.getSnapshot()).toEqual({ open: false, active: 'store' })
+    expect(changed).toHaveBeenCalledOnce()
+
+    first.actions.openStore()
+    expect(changed).toHaveBeenCalledOnce()
+    first.actions.select('updates')
+    expect(changed).toHaveBeenCalledTimes(2)
+
+    unsubscribe()
+    first.actions.close()
+    expect(changed).toHaveBeenCalledTimes(2)
+    expect(first.clearPersisted()).toBeUndefined()
+  })
+
+  it('contains a failing subscriber and still notifies later subscribers', () => {
+    const instance = createExtensionCenterStore().create()
+    const failure = new Error('subscriber failed')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const observed = vi.fn()
+    instance.subscribe(() => { throw failure })
+    instance.subscribe(observed)
+
+    try {
+      expect(() => { instance.actions.openStore() }).not.toThrow()
+      expect(observed).toHaveBeenCalledOnce()
+      expect(report).toHaveBeenCalledWith('extension-center store subscriber failed:', failure)
+    } finally {
+      report.mockRestore()
+    }
+  })
+
   it('opens Store by default, switches all associated panels, and resets on reopen', async () => {
     renderCenter()
     const trigger = screen.getByRole('button', { name: 'Extensions' })
@@ -291,6 +302,49 @@ describe('rc.2 signed read-only Extension Store', () => {
     expect(within(dialog).getByText('受信扩展目录')).toBeVisible()
     expect(await within(dialog).findByText('签名目录已验证')).toBeVisible()
     expect(within(dialog).getByRole('heading', { name: '文件系统 MCP' })).toBeVisible()
+  })
+
+  it('renders alpha compatibility from the candidate coordinate without a stale rc.2 label', async () => {
+    const [sourceEntry, ...otherEntries] = verifiedCatalog.entries
+    if (sourceEntry === undefined) throw new Error('verified catalog is empty')
+    const alphaEntry = {
+      ...sourceEntry,
+      compatibility: {
+        ...sourceEntry.compatibility,
+        status: 'compatible' as const,
+        dsh: '0.1.2-alpha.3' as const,
+        detail: {
+          en: 'Verified against the exact official alpha target.',
+          zh: '已针对准确官方 alpha 目标完成验证。',
+        },
+      },
+    }
+    const catalog: ExtensionCatalogClient = {
+      list: async () => ({ ...verifiedCatalog, entries: [alphaEntry, ...otherEntries] }),
+    }
+
+    const english = renderCenter(en, catalog)
+    fireEvent.click(screen.getByRole('button', { name: 'Extensions' }))
+    let store = within(screen.getByRole('dialog', { name: 'Extension Store' }))
+      .getByRole('tabpanel', { name: 'Store' })
+    let card = (await within(store).findByRole('heading', { name: alphaEntry.displayName.en })).closest('article')!
+    expect(within(card).getByText('Compatible')).toBeVisible()
+    expect(within(card).queryByText('Compatible with rc.2')).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: 'View details' }))
+    let details = within(store).getByRole('heading', { level: 3, name: alphaEntry.displayName.en }).closest('section')!
+    expect(within(details).getByText(/Compatible · DSH 0\.1\.2-alpha\.3/u)).toBeVisible()
+    english.unmount()
+
+    renderCenter(zh, catalog)
+    fireEvent.click(screen.getByRole('button', { name: '扩展' }))
+    store = within(screen.getByRole('dialog', { name: '扩展商店' }))
+      .getByRole('tabpanel', { name: '商店' })
+    card = (await within(store).findByRole('heading', { name: alphaEntry.displayName.zh })).closest('article')!
+    expect(within(card).getByText('兼容')).toBeVisible()
+    expect(within(card).queryByText('兼容 rc.2')).toBeNull()
+    fireEvent.click(within(card).getByRole('button', { name: '查看详情' }))
+    details = within(store).getByRole('heading', { level: 3, name: alphaEntry.displayName.zh }).closest('section')!
+    expect(within(details).getByText(/兼容 · DSH 0\.1\.2-alpha\.3/u)).toBeVisible()
   })
 
   it('shows typed resolver details for the exact 0.1.1 candidate', async () => {

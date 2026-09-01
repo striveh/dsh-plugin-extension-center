@@ -72,7 +72,7 @@ test('renders an acceptance Bundle over only official profile extension rows', (
   assert.match(patch, new RegExp(JSON.stringify(overridePath).replaceAll('/', '\\/'), 'u'))
   assert.doesNotMatch(patch, /host-plugin|agent-loop|mock|official.*checkout/iu)
   assert.equal(KEYLESS_REPLAY_BUNDLE, 'dsh-extension-center-keyless-agent-proof')
-  assert.equal(`${OFFICIAL_REPLAY_PACKAGE}@${TARGET_DSH_VERSION}`, '@deepseek-ai/dsh-llm-replay@0.1.1-rc.2')
+  assert.equal(`${OFFICIAL_REPLAY_PACKAGE}@${TARGET_DSH_VERSION}`, '@deepseek-ai/dsh-llm-replay@0.1.2-alpha.3')
   assert.throws(
     () => renderKeylessReplayBundlePatch({ fixturePath: 'relative', overridePath }),
     /must be absolute/u,

@@ -183,7 +183,7 @@ export interface ContinuationInbox {
   remove(id: string): boolean
 }
 
-/** Minimal official rc.2 Agent surface used by the internal owner. */
+/** Minimal official DSH Agent surface used by the internal owner. */
 export interface ContinuationAgent {
   readonly id: string
   readonly options: Readonly<ContinuationAgentOptions>
@@ -208,7 +208,7 @@ export type ContinuationResumeSetup = (
   claim: TaskContinuationClaim,
 ) => unknown | Promise<unknown>
 
-/** Minimal official rc.2 Agent registry surface. */
+/** Minimal official DSH Agent registry surface. */
 export interface ContinuationAgents {
   get(sessionId: string): ContinuationAgent | undefined
   resume(options: Readonly<{
@@ -220,13 +220,13 @@ export interface ContinuationAgents {
   withoutInitiator?<Value>(operation: () => Value): Value
 }
 
-/** Minimal official rc.2 Session registry surface. */
+/** Minimal official DSH Session registry surface. */
 export interface ContinuationSessions {
   get(sessionId: string): ContinuationSession | undefined
   flush(session: ContinuationSession): Promise<boolean>
 }
 
-/** Minimal official rc.2 session-persistence read surface. */
+/** Minimal official DSH session-persistence read surface. */
 export interface ContinuationSessionPersistence {
   load(sessionId: string): Promise<Readonly<{
     readonly meta: ContinuationSessionHeader
@@ -234,7 +234,7 @@ export interface ContinuationSessionPersistence {
   }>>
 }
 
-/** Minimal official rc.2 Agent Presets surface used during unpublished resume setup. */
+/** Minimal official DSH Agent Presets surface used during replay setup. */
 export interface ContinuationAgentPresets {
   mount(agentContext: unknown, presetId: string): Promise<Readonly<{ readonly id: string }>>
 }

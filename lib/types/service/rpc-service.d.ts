@@ -29,6 +29,9 @@ export interface HostRpcGeneration {
 }
 /** Resolve either one fixed runtime or the currently active dynamic runtime. */
 export type HostRpcServicesSource = HostRpcServices | (() => HostRpcServices);
-/** Create the strict loopback-only management handler; carrier authority is not accepted from payloads. */
+/**
+ * Create the strict authenticated management handler. Connection applies request trust and
+ * browser-session authentication before dispatch; payloads cannot claim carrier authority.
+ */
 export declare function createHostRpcHandler(source: HostRpcServicesSource): ConnectionRpcHandler;
 //# sourceMappingURL=rpc-service.d.ts.map

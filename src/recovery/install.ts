@@ -18,7 +18,7 @@ const MAX_EXECUTABLE_BYTES = 256 * 1024 * 1024
 const MAX_PACKAGE_FILE_BYTES = 64 * 1024 * 1024
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const OFFICIAL_DSH_PACKAGE = '@deepseek-ai/dsh'
-const OFFICIAL_DSH_VERSION = '0.1.1-rc.2'
+const OFFICIAL_DSH_VERSION = '0.1.2-alpha.3'
 const PNPM_PACKAGE = 'pnpm'
 const PNPM_VERSION = '11.21.0'
 const PNPM_REGISTRY_INTEGRITY = 'sha512-UhcFvOaJkk6scvWjWHEi82JonvZXHlW6gAdv1jfBETLs/62ib61Op5xIW/3b/T1aKlsFgFp36JPeceyKbMo7sQ=='
@@ -452,12 +452,12 @@ async function bindOfficialDsh(
   if (!isAbsolute(input.entrypointPath) || !isAbsolute(input.hostHome)) {
     fail('official DSH recovery paths must be absolute')
   }
-  const entrypointPath = await realpath(resolve(input.entrypointPath))
-  const entrypointInfo = await lstat(entrypointPath)
-  if (!entrypointInfo.isFile() || entrypointInfo.isSymbolicLink()) {
-    fail('official DSH recovery entrypoint is not a regular file')
+  const startupEntrypoint = await realpath(resolve(input.entrypointPath))
+  const startupEntrypointInfo = await lstat(startupEntrypoint)
+  if (!startupEntrypointInfo.isFile() || startupEntrypointInfo.isSymbolicLink()) {
+    fail('official DSH startup entrypoint is not a regular file')
   }
-  const packageRoot = await realpath(resolve(dirname(entrypointPath), '..'))
+  const packageRoot = await realpath(resolve(dirname(startupEntrypoint), '..'))
   const packageInfo = await lstat(packageRoot)
   if (!packageInfo.isDirectory() || packageInfo.isSymbolicLink()) {
     fail('official DSH recovery package root is not a real directory')
@@ -465,11 +465,27 @@ async function bindOfficialDsh(
   const manifest = await readJsonFile(join(packageRoot, 'package.json'), 'official DSH recovery package manifest')
   const bin = manifest.bin
   if (manifest.name !== OFFICIAL_DSH_PACKAGE || manifest.version !== OFFICIAL_DSH_VERSION
-    || !plain(bin) || typeof bin.dsh !== 'string') {
+    || !plain(bin) || bin.dsh !== 'lib/bin.js') {
     fail(`official DSH recovery CLI must be ${OFFICIAL_DSH_PACKAGE}@${OFFICIAL_DSH_VERSION}`)
   }
-  const declared = await realpath(resolve(packageRoot, bin.dsh))
-  if (declared !== entrypointPath) fail('official DSH recovery entrypoint does not match its package manifest')
+  const declaredPath = resolve(packageRoot, bin.dsh)
+  if (!sameOrBelow(packageRoot, declaredPath)) fail('official DSH recovery entrypoint escapes its package root')
+  let entrypointPath: string
+  try {
+    entrypointPath = await realpath(declaredPath)
+  } catch (cause) {
+    throw new Error('official DSH built recovery entrypoint is unavailable', { cause })
+  }
+  const entrypointInfo = await lstat(entrypointPath)
+  if (!entrypointInfo.isFile() || entrypointInfo.isSymbolicLink()) {
+    fail('official DSH built recovery entrypoint is not a regular file')
+  }
+  if (startupEntrypoint !== entrypointPath) {
+    const sourceEntrypoint = await realpath(join(packageRoot, 'src', 'bin.ts')).catch(() => null)
+    if (sourceEntrypoint === null || startupEntrypoint !== sourceEntrypoint) {
+      fail('official DSH startup entrypoint does not match its package manifest')
+    }
+  }
   const hostHome = await realpath(resolve(input.hostHome))
   const hostHomeInfo = await lstat(hostHome)
   if (!hostHomeInfo.isDirectory() || hostHomeInfo.isSymbolicLink()) {
@@ -553,7 +569,7 @@ export async function installRecoveryExecutable(
 /**
  * Materialize the built package's standalone CLI and private toolchain below the durable root.
  * @param root Center-owned durable root outside official Profile files.
- * @param officialDsh Exact installed official rc.2 CLI and Harness home.
+ * @param officialDsh Exact official 0.1.2-alpha.3 startup entrypoint and Harness home.
  * @returns Exact executable binding embedded in every consumed operation.
  */
 export async function installPackagedRecoveryExecutable(

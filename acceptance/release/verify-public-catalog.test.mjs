@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,14 +11,17 @@ import {
   BOOTSTRAP_CATALOG_ROOT,
   BOOTSTRAP_CATALOG_SIGNATURES,
 } from '../../lib/catalog-data.js'
-import { canonicalJson, canonicalSha256 } from '../../lib/catalog.js'
+import { verifyCatalogAdvance } from '../../lib/catalog-refresh.js'
+import { canonicalJson, canonicalSha256, verifyCatalog } from '../../lib/catalog.js'
 import {
   EXPECTED_PUBLIC_CATALOG,
   PUBLIC_CATALOG_URL,
   assertPackagedCatalogAuthority,
+  classifyCommittedPublicCatalog,
   parsePublicCatalogArguments,
   runPublicCatalogDeploymentAcceptance,
   verifyPublicCatalogDeployment,
+  verifyPublicCatalogObservation,
   verifySignedPublicCatalogAdvance,
 } from './verify-public-catalog.mjs'
 
@@ -26,6 +29,21 @@ const projectRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const deployedBytes = await readFile(join(projectRoot, 'catalog/public/plugins.json'))
 const deployedDocument = JSON.parse(deployedBytes)
 const NOW = Date.parse(deployedDocument.envelope.issuedAt) + 1_000
+const predecessorRoot = Object.freeze({ ...BOOTSTRAP_CATALOG_ROOT, minimumRevision: 10 })
+const predecessorDocument = Object.freeze({
+  envelope: Object.freeze({
+    ...deployedDocument.envelope,
+    revision: 10,
+    issuedAt: '2026-08-27T17:40:32.000Z',
+    expiresAt: '2027-08-27T17:40:32.000Z',
+    previousRevisionDigest: 'sha256:c559ca39429f6c72e82ddb08bc13636e226e39e0b27f04c8d30495ae57007e7e',
+  }),
+  signatures: Object.freeze([Object.freeze({
+    keyId: 'bootstrap-2026-08-26-8',
+    algorithm: 'ed25519',
+    value: '1/b2bZKc3l4k7HoSmRN2YvgJPp64blLhYuyeCC/6zh39HOwT3cKe4SqbHiL+JANIDEbQNcAZwg4NoGY4dHHMCA==',
+  })]),
+})
 
 function digest(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`
@@ -67,72 +85,39 @@ async function withTemporaryDirectory(run) {
   }
 }
 
-test('accepts the exact committed adjacent successor and writes a SHA-bound receipt', async () => {
+test('observes the exact signed packaged public tip without claiming a deployment upgrade', async () => {
   assert.equal(deployedBytes.length, EXPECTED_PUBLIC_CATALOG.sizeBytes)
   assert.equal(digest(deployedBytes), EXPECTED_PUBLIC_CATALOG.bytesSha256)
   assert.equal(canonicalSha256(deployedDocument), EXPECTED_PUBLIC_CATALOG.documentDigest)
+  assert.equal(EXPECTED_PUBLIC_CATALOG.state, 'packaged-tip')
   assert.equal(EXPECTED_PUBLIC_CATALOG.previousRevision, BOOTSTRAP_CATALOG_ENVELOPE.revision)
-  assert.equal(EXPECTED_PUBLIC_CATALOG.revision, BOOTSTRAP_CATALOG_ENVELOPE.revision + 1)
+  assert.equal(EXPECTED_PUBLIC_CATALOG.revision, BOOTSTRAP_CATALOG_ENVELOPE.revision)
   assert.equal(EXPECTED_PUBLIC_CATALOG.envelopeDigest, canonicalSha256(deployedDocument.envelope))
+  assert.equal(EXPECTED_PUBLIC_CATALOG.envelopeDigest, EXPECTED_PUBLIC_CATALOG.packagedBootstrapEnvelopeDigest)
+  assert.equal(EXPECTED_PUBLIC_CATALOG.signatureSetDigest, EXPECTED_PUBLIC_CATALOG.packagedBootstrapSignatureSetDigest)
   const network = localFetch(() => responseAt(deployedBytes))
-  await withTemporaryDirectory(async root => {
-    const receiptPath = join(root, 'receipt.json')
-    const result = await runPublicCatalogDeploymentAcceptance({
-      fetchImpl: network.fetchImpl,
-      now: NOW,
-      receiptPath,
-    })
-    assert.equal(result.receiptPath, await realpath(receiptPath))
-    assert.equal(result.receipt.schemaVersion, 2)
-    assert.deepEqual(result.receipt.target, {
-      url: PUBLIC_CATALOG_URL,
-      redirectPolicy: 'forbidden',
-      expectedContentType: 'application/json',
-      expectedRevision: EXPECTED_PUBLIC_CATALOG.revision,
-      expectedSizeBytes: EXPECTED_PUBLIC_CATALOG.sizeBytes,
-      expectedBytesSha256: EXPECTED_PUBLIC_CATALOG.bytesSha256,
-      expectedEnvelopeDigest: EXPECTED_PUBLIC_CATALOG.envelopeDigest,
-    })
-    assert.deepEqual(result.receipt.packagedBootstrap, {
-      revision: EXPECTED_PUBLIC_CATALOG.previousRevision,
-      previousRevisionDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapPreviousRevisionDigest,
-      entriesDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapEntriesDigest,
-      envelopeDigest: EXPECTED_PUBLIC_CATALOG.previousRevisionDigest,
-      rootDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapRootDigest,
-      signatureSetDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapSignatureSetDigest,
-    })
-    assert.deepEqual(result.receipt.runtimeRefresh, {
-      source: 'remote',
-      freshness: 'fresh',
-      degraded: false,
-      degradedReason: null,
-      lastRefreshAtMs: NOW,
-      revision: EXPECTED_PUBLIC_CATALOG.revision,
-      entriesDigest: EXPECTED_PUBLIC_CATALOG.entriesDigest,
-      keyIds: deployedDocument.signatures.map(signature => signature.keyId),
-    })
-    assert.deepEqual(result.receipt.deployment, {
-      httpStatus: 200,
-      finalUrl: PUBLIC_CATALOG_URL,
-      redirected: false,
-      contentType: 'application/json',
-      sizeBytes: EXPECTED_PUBLIC_CATALOG.sizeBytes,
-      bytesSha256: EXPECTED_PUBLIC_CATALOG.bytesSha256,
-      canonicalOneLine: true,
-      documentDigest: EXPECTED_PUBLIC_CATALOG.documentDigest,
-      envelopeDigest: EXPECTED_PUBLIC_CATALOG.envelopeDigest,
-      signatureSetDigest: EXPECTED_PUBLIC_CATALOG.signatureSetDigest,
-      revision: EXPECTED_PUBLIC_CATALOG.revision,
-      previousRevisionDigest: EXPECTED_PUBLIC_CATALOG.previousRevisionDigest,
-      entriesDigest: EXPECTED_PUBLIC_CATALOG.entriesDigest,
-      keyIds: deployedDocument.signatures.map(signature => signature.keyId),
-    })
-    const written = JSON.parse(await readFile(receiptPath, 'utf8'))
-    assert.equal((await stat(receiptPath)).mode & 0o777, 0o600)
-    const { receiptDigest, ...body } = written
-    assert.equal(receiptDigest, canonicalSha256(body))
-    assert.deepEqual(written, result.receipt)
+  const observation = await verifyPublicCatalogObservation({ fetchImpl: network.fetchImpl, now: NOW })
+  assert.equal(observation.catalogState, 'packaged-tip')
+  assert.deepEqual(observation.packagedBootstrap, {
+    revision: BOOTSTRAP_CATALOG_ENVELOPE.revision,
+    previousRevisionDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapPreviousRevisionDigest,
+    entriesDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapEntriesDigest,
+    envelopeDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapEnvelopeDigest,
+    rootDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapRootDigest,
+    signatureSetDigest: EXPECTED_PUBLIC_CATALOG.packagedBootstrapSignatureSetDigest,
   })
+  assert.deepEqual(observation.runtimeRefresh, {
+    source: 'remote',
+    freshness: 'fresh',
+    degraded: false,
+    degradedReason: null,
+    lastRefreshAtMs: NOW,
+    revision: EXPECTED_PUBLIC_CATALOG.revision,
+    entriesDigest: EXPECTED_PUBLIC_CATALOG.entriesDigest,
+    keyIds: deployedDocument.signatures.map(signature => signature.keyId),
+  })
+  assert.equal(observation.deployment.previousRevisionDigest, EXPECTED_PUBLIC_CATALOG.committedPreviousRevisionDigest)
+  assert.equal(observation.deployment.signatureSetDigest, EXPECTED_PUBLIC_CATALOG.signatureSetDigest)
   assert.equal(network.calls.length, 1)
   assert.equal(network.calls[0].url, PUBLIC_CATALOG_URL)
   assert.equal(network.calls[0].init.method, 'GET')
@@ -141,6 +126,59 @@ test('accepts the exact committed adjacent successor and writes a SHA-bound rece
     accept: 'application/json',
     'accept-encoding': 'identity',
   })
+})
+
+test('rejects the packaged public tip as an explicit deployment upgrade and writes no receipt', async () => {
+  const network = localFetch(() => responseAt(deployedBytes))
+  await assert.rejects(
+    verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+    acceptanceCode('P0-PUBLIC-CATALOG-NO-ADVANCE'),
+  )
+  await withTemporaryDirectory(async root => {
+    const receiptPath = join(root, 'receipt.json')
+    await assert.rejects(
+      runPublicCatalogDeploymentAcceptance({ fetchImpl: network.fetchImpl, now: NOW, receiptPath }),
+      acceptanceCode('P0-PUBLIC-CATALOG-NO-ADVANCE'),
+    )
+    await assert.rejects(stat(receiptPath), error => error?.code === 'ENOENT')
+  })
+  assert.equal(network.calls.length, 0)
+})
+
+test('classifies and cryptographically verifies the actual signed revision-10 to revision-11 successor', () => {
+  const predecessor = verifyCatalog(
+    predecessorRoot,
+    predecessorDocument.envelope,
+    predecessorDocument.signatures,
+    NOW,
+  )
+  const successor = verifyCatalogAdvance(predecessorRoot, predecessor, deployedDocument, NOW)
+  assert.equal(successor.envelope.revision, 11)
+  assert.equal(
+    classifyCommittedPublicCatalog(
+      deployedDocument,
+      predecessorDocument.envelope,
+      predecessorDocument.signatures,
+    ),
+    'adjacent-successor',
+  )
+})
+
+test('does not classify a same-revision conflict or revision gap as an admitted public state', () => {
+  const conflict = structuredClone(deployedDocument)
+  const signature = conflict.signatures[0].value
+  conflict.signatures[0].value = `${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`
+  assert.throws(
+    () => classifyCommittedPublicCatalog(conflict),
+    acceptanceCode('P0-PUBLIC-CATALOG-CHAIN'),
+  )
+  const gap = structuredClone(deployedDocument)
+  gap.envelope.revision += 2
+  gap.envelope.previousRevisionDigest = canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE)
+  assert.throws(
+    () => classifyCommittedPublicCatalog(gap),
+    acceptanceCode('P0-PUBLIC-CATALOG-CHAIN'),
+  )
 })
 
 test('rejects any public catalog redirect', async () => {
@@ -157,13 +195,13 @@ test('rejects any public catalog redirect', async () => {
   ]) {
     const network = localFetch(response)
     await assert.rejects(
-      verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+      verifyPublicCatalogObservation({ fetchImpl: network.fetchImpl, now: NOW }),
       acceptanceCode('P0-PUBLIC-CATALOG-REDIRECT'),
     )
   }
 })
 
-test('rejects tampered successor bytes even when canonical length and coordinates remain unchanged', async () => {
+test('rejects tampered public-tip bytes even when canonical length and coordinates remain unchanged', async () => {
   const tampered = structuredClone(deployedDocument)
   const signature = tampered.signatures[0].value
   tampered.signatures[0].value = `${signature[0] === 'A' ? 'B' : 'A'}${signature.slice(1)}`
@@ -171,7 +209,7 @@ test('rejects tampered successor bytes even when canonical length and coordinate
   assert.equal(bytes.length, deployedBytes.length)
   const network = localFetch(() => responseAt(bytes))
   await assert.rejects(
-    verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+    verifyPublicCatalogObservation({ fetchImpl: network.fetchImpl, now: NOW }),
     acceptanceCode('P0-PUBLIC-CATALOG-BYTES'),
   )
 })
@@ -201,14 +239,9 @@ test('rejects drift in the packaged trust root or bootstrap signature set', () =
   )
 })
 
-test('rejects the valid signed packaged bootstrap as a deployment rollback', async () => {
-  const rollback = Buffer.from(`${canonicalJson({
-    envelope: BOOTSTRAP_CATALOG_ENVELOPE,
-    signatures: BOOTSTRAP_CATALOG_SIGNATURES,
-  })}\n`)
-  const network = localFetch(() => responseAt(rollback))
-  await assert.rejects(
-    verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+test('rejects an older signed document as a committed public rollback', () => {
+  assert.throws(
+    () => classifyCommittedPublicCatalog(predecessorDocument),
     acceptanceCode('P0-PUBLIC-CATALOG-ROLLBACK'),
   )
 })
@@ -218,7 +251,7 @@ test('rejects a non-JSON content type before reading deployment bytes', async ()
     headers: { 'content-type': 'text/plain', 'content-length': String(deployedBytes.length) },
   }))
   await assert.rejects(
-    verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+    verifyPublicCatalogObservation({ fetchImpl: network.fetchImpl, now: NOW }),
     acceptanceCode('P0-PUBLIC-CATALOG-CONTENT-TYPE'),
   )
 })
@@ -256,7 +289,7 @@ test('rejects non-200, oversized, and noncanonical deployment responses', async 
   for (const fixture of cases) {
     const network = localFetch(fixture.response)
     await assert.rejects(
-      verifyPublicCatalogDeployment({ fetchImpl: network.fetchImpl, now: NOW }),
+      verifyPublicCatalogObservation({ fetchImpl: network.fetchImpl, now: NOW }),
       acceptanceCode(fixture.code),
     )
   }

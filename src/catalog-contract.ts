@@ -3,7 +3,7 @@
 /** Current private RPC protocol version. */
 export const EXTENSION_CENTER_PROTOCOL_VERSION = 1 as const
 
-/** Logical loopback-only Connection channel owned by this plugin. */
+/** Logical Connection-authenticated browser RPC channel owned by this plugin. */
 export const EXTENSION_CENTER_RPC_CHANNEL = '/dsh-extension-center' as const
 
 /** Supported extension kinds. */
@@ -37,7 +37,7 @@ export interface CatalogSource {
 /** Compatibility evidence for the exact supported Host. */
 export interface CatalogCompatibility {
   readonly status: 'compatible' | 'review-required'
-  readonly dsh: '0.1.1-rc.2'
+  readonly dsh: '0.1.1-rc.2' | '0.1.2-alpha.3'
   readonly platforms: readonly ('darwin' | 'linux' | 'windows')[]
   readonly detail: LocalizedText
 }

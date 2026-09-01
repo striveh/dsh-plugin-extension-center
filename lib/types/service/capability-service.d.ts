@@ -88,9 +88,9 @@ export declare class CapabilityAcquisitionService {
     recoverApprovedPlans(signal?: AbortSignal): Promise<void>;
     /** Register the non-mutating verifier that releases only exact committed task receipts. */
     registerVerifier(): () => void;
-    /** Bind a loopback plan decision to its independent task attempt. */
+    /** Bind a browser-session-authenticated plan decision to its independent task attempt. */
     assertPlanDecisionAllowed(planHash: string, decision: 'approve' | 'reject'): Promise<void>;
-    /** Bind a loopback plan decision to its independent task attempt. */
+    /** Bind a browser-session-authenticated plan decision to its independent task attempt. */
     recordPlanDecision(planHash: string, decision: 'approve' | 'reject'): Promise<void>;
     /** Project operation progress without using it as the task's terminal outcome. */
     recordLifecycleResult(planHash: string, status: 'committed' | 'failed' | 'recovery-required' | 'restart-required' | 'rolled-back'): Promise<void>;

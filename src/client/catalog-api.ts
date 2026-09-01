@@ -1,4 +1,4 @@
-import type { ClientConnectionRpc, RpcError } from '@deepseek-ai/dsh-client-connection/client'
+import type { ClientConnectionRpc, ConnectionRpcFailure } from '@deepseek-ai/dsh-client-connection/client'
 import {
   EXTENSION_CENTER_PROTOCOL_VERSION,
   EXTENSION_CENTER_RPC_CHANNEL,
@@ -27,10 +27,10 @@ const VERIFICATION_STATES = new Set(['verified', 'declared', 'unknown'])
 
 /** Error returned through a valid Connection RPC business-failure envelope. */
 export class ExtensionCenterRpcError extends Error {
-  readonly code: RpcError['code']
+  readonly code: ConnectionRpcFailure['code']
 
   /** @param error - Connection RPC error already validated by the carrier. */
-  constructor(error: RpcError) {
+  constructor(error: ConnectionRpcFailure) {
     super(error.message)
     this.name = 'ExtensionCenterRpcError'
     this.code = error.code
@@ -41,7 +41,7 @@ export class ExtensionCenterRpcError extends Error {
 export interface ExtensionCatalogClient {
   /** Read the current verified snapshot projection. */
   list(signal?: AbortSignal): Promise<CatalogListResponse>
-  /** Explicitly ask the loopback Host to refresh its fixed signed catalog endpoint. */
+  /** Explicitly ask the authenticated Host to refresh its fixed signed catalog endpoint. */
   refresh?(signal?: AbortSignal): Promise<CatalogListResponse>
 }
 
@@ -188,7 +188,9 @@ function validateEntry(value: unknown, index: number): CatalogEntry {
     'detail', 'dsh', 'platforms', 'status',
   ])
   expectEnum(compatibility.status, `${subject}.compatibility.status`, COMPATIBILITY_STATUSES)
-  if (compatibility.dsh !== '0.1.1-rc.2') throw new Error(`extension-center: invalid ${subject}.compatibility.dsh`)
+  if (!['0.1.1-rc.2', '0.1.2-alpha.3'].includes(compatibility.dsh as string)) {
+    throw new Error(`extension-center: invalid ${subject}.compatibility.dsh`)
+  }
   const platforms = expectArray(compatibility.platforms, `${subject}.compatibility.platforms`, 3)
   if (platforms.length === 0) throw new Error(`extension-center: empty ${subject}.compatibility.platforms`)
   platforms.forEach((platform, at) => { expectEnum(platform, `${subject}.compatibility.platforms[${at}]`, PLATFORMS) })

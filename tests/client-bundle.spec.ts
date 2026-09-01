@@ -39,9 +39,6 @@ function loadArtifact(): { handoff: Handoff; exports: ArtifactExports; required:
     ['react', {}],
     ['react/jsx-runtime', {}],
     ['@deepseek-ai/dsh-client-ui-primitives', {}],
-    ['@deepseek-ai/dsh-client-runtime/client', {
-      defineStore: (spec: unknown) => ({ spec, create: vi.fn() }),
-    }],
   ])
   const exports = handoff.factory((specifier) => {
     required.push(specifier)
@@ -67,7 +64,7 @@ function disposerOf(value: unknown): () => void {
 }
 
 describe('built Client lazy-CJS ABI', () => {
-  it('uses only rc.2 baseline module ids and exposes the exact plugin body', () => {
+  it('uses only cross-release platform module ids and exposes the exact plugin body', () => {
     const artifact = loadArtifact()
     expect(artifact.handoff.id).toBe(PLUGIN_ID)
     expect(artifact.exports.inject).toEqual(['connection', 'slots', 'locale'])
@@ -75,8 +72,9 @@ describe('built Client lazy-CJS ABI', () => {
     expect(new Set(artifact.required)).toEqual(new Set([
       'react', 'react/jsx-runtime',
       '@deepseek-ai/dsh-client-ui-primitives',
-      '@deepseek-ai/dsh-client-runtime/client',
     ]))
+    expect(bundleCode()).not.toContain('@deepseek-ai/dsh-client-runtime')
+    expect(bundleCode()).not.toContain('@deepseek-ai/dsh-client-store')
     expect(bundleCode()).not.toContain(resolve('.'))
     expect(bundleCode()).not.toContain('extension_center_request_acquisition')
   })

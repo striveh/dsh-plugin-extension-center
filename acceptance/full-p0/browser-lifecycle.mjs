@@ -308,5 +308,5 @@ async function dismissHostOnboarding(page) {
     await page.waitForTimeout(300)
     if (!(await testingNotice.isVisible()) && !(await providerSetup.isVisible())) return
   }
-  throw new Error('official rc.2 onboarding did not settle for browser lifecycle acceptance')
+  throw new Error('latest official DSH onboarding did not settle for browser lifecycle acceptance')
 }

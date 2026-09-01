@@ -43,7 +43,7 @@ jobs:
         run: pnpm test
       - name: Verify committed distribution artifacts
         run: git diff --exit-code -- lib
-      - name: Verify deterministic publication artifact
+      - name: Verify deterministic packed artifact
         run: pnpm run verify:pack
       - name: Upload exact-commit deterministic pack
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.node-version == '22.19.0'
@@ -58,14 +58,11 @@ jobs:
           include-hidden-files: true
           compression-level: 0
 
-  rc2-acceptance:
-    name: Official rc.2 Store and plugin-only lifecycle (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
+  latest-dsh-compatibility:
+    name: Latest official DSH packed-plugin compatibility
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,45 +80,30 @@ jobs:
           cache: pnpm
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build release-candidate inputs
-        run: pnpm run build
-      - name: Verify committed distribution artifacts
-        run: git diff --exit-code -- lib
-      - name: Verify deterministic publication artifact
-        run: pnpm run verify:pack
-      - name: Install Chromium with Linux dependencies
-        if: runner.os == 'Linux'
+      - name: Install isolated Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
-      - name: Install Chromium
-        if: runner.os != 'Linux'
-        run: pnpm exec playwright install chromium
-      - name: Verify packed Store discovery
-        run: pnpm run test:acceptance:store
-      - name: Verify packed Center lifecycle on official rc.2
-        run: pnpm run test:acceptance:official-rc2
-      - name: Upload acceptance and release-candidate evidence
-        if: always()
+      - name: Prove standard packed-plugin install and Host plus Client boot
+        run: pnpm run test:compat:latest
+      - name: Upload exact compatibility evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: rc2-acceptance-${{ matrix.os }}-${{ github.sha }}-attempt-${{ github.run_attempt }}
-          path: |
-            .artifacts/acceptance/store-only/**
-            .artifacts/acceptance/full-p0-official-rc2/**
-            .artifacts/release-candidate/**
-          if-no-files-found: warn
+          name: latest-dsh-compatibility-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/acceptance/store-only
+          if-no-files-found: error
           include-hidden-files: true
           compression-level: 0
 
-  plugin-only-release-gate:
-    name: Official rc.2 plugin-only release gate
+  alpha-source-package-gate:
+    name: Source, pack, and latest DSH compatibility checkpoint
     if: always()
-    needs: [verify, rc2-acceptance]
+    needs: [verify, latest-dsh-compatibility]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Require every source and official-runtime lane
+      - name: Require every source and package lane
         env:
           VERIFY_RESULT: ${{ needs.verify.result }}
-          RC2_ACCEPTANCE_RESULT: ${{ needs.rc2-acceptance.result }}
+          COMPATIBILITY_RESULT: ${{ needs.latest-dsh-compatibility.result }}
         run: |
           test "$VERIFY_RESULT" = success
-          test "$RC2_ACCEPTANCE_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success

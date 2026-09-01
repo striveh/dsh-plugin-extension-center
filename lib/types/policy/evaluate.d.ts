@@ -1,6 +1,6 @@
 import type { CandidatePolicyInput, CandidatePolicyResult } from './types.ts';
 export declare const POLICY_REVISION: "extension-center-p0-policy-v2";
-export declare const SUPPORTED_DSH_VERSION: "0.1.1-rc.2";
+export declare const SUPPORTED_DSH_VERSION: "0.1.2-alpha.3";
 /**
  * Bind one raw authority delta to the exact admitted operation and scope.
  * @param input Candidate, authority-delta, operation, desired-state, and scope coordinates.

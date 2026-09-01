@@ -13,6 +13,7 @@ import { CapabilityAcquisitionService } from '../src/service/capability-service.
 import { IntentPlanService } from '../src/service/intent-plan-service.ts'
 import { FileOperationStore, FilePlanStore } from '../src/storage/index.ts'
 import { FileTaskAttemptStore } from '../src/task-attempt/index.ts'
+import { alphaPolicyCatalogFixture } from './support/alpha-catalog.ts'
 import { TEST_RECOVERY_EXECUTABLE_BINDING } from './support/recovery-binding.ts'
 import { testReviewEvidence } from './support/review-evidence.ts'
 
@@ -224,6 +225,9 @@ function service(
   plans: FilePlanStore,
   operations: FileOperationStore,
   hostOwners: HostOwners,
+  catalog: () => VerifiedCatalog = () => verifyBootstrapCatalog(
+    Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000,
+  ),
 ) {
   return new CapabilityAcquisitionService(
     state,
@@ -232,7 +236,7 @@ function service(
     plans,
     operations,
     hostOwners,
-    () => verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+    catalog,
   )
 }
 
@@ -603,7 +607,7 @@ describe('existing-first capability scope and durable continuation activation', 
       plans,
       new FileOperationStore(root),
       owners(new ContinuationOwner()),
-      () => verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+      alphaPolicyCatalogFixture,
       -1,
     )
     const resolution = await capability.resolve(
@@ -1030,7 +1034,7 @@ describe('existing-first capability scope and durable continuation activation', 
       plans,
       scopedInventory as never,
       hostOwners,
-      () => verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+      alphaPolicyCatalogFixture,
       managedPluginSnapshots(project),
       {
         mcpOptions: async candidateRef => [{ candidateRef, runtimeRef, version: '1.3.0' }],
@@ -1063,7 +1067,7 @@ describe('existing-first capability scope and durable continuation activation', 
       plans,
       operations,
       hostOwners,
-      () => verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000),
+      alphaPolicyCatalogFixture,
     )
     const execution = agent('mcp-agent', project, 'message-mcp-task')
     const resolution = await capability.resolve({
@@ -1136,7 +1140,7 @@ describe('existing-first capability scope and durable continuation activation', 
     await mkdir(project)
     const state = new CenterStateStore(root)
     await state.initialize()
-    const base = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const base = alphaPolicyCatalogFixture()
     const skill = base.envelope.entries.find(entry => entry.kind === 'skill')!
     const plugin = base.envelope.entries.find(entry => entry.kind === 'plugin')!
     const choiceCatalog: VerifiedCatalog = {
@@ -1444,7 +1448,7 @@ describe('existing-first capability scope and durable continuation activation', 
     const plans = new FilePlanStore(root, TEST_RECOVERY_EXECUTABLE_BINDING)
     const operations = new FileOperationStore(root)
     const hostOwners = owners(new ContinuationOwner())
-    const capability = service(state, plans, operations, hostOwners)
+    const capability = service(state, plans, operations, hostOwners, alphaPolicyCatalogFixture)
     const execution = agent('cancel-agent', project)
     const first = await capability.resolve(
       { ...need('documentation'), maximumAuthority: ['model-context', 'network'] },

@@ -107,7 +107,7 @@ export interface HostOwners {
 interface ServiceLookup {
     get(name: string): unknown;
 }
-/** Bind Center-owned lifecycles to the exact official rc.2 registries they use. */
+/** Bind Center-owned lifecycles to the exact official DSH registries they use. */
 export declare function bindHostOwners(lookup: ServiceLookup, internal: Readonly<{
     managedPlugins: ManagedPluginsOwner;
     mcpConnections: McpConnectionsOwner;

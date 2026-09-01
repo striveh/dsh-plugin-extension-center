@@ -87,7 +87,7 @@ function manifest(version = '0.0.0-development') {
     types: 'lib/types/index.d.ts',
     exports: { '.': { default: './lib/index.js' } },
     files: ['lib', 'cordis.patch.yml'],
-    engines: { dsh: '0.1.1-rc.2' },
+    engines: { dsh: '0.1.2-alpha.3' },
     dsh: { bundle: { patch: './cordis.patch.yml' } },
     dependencies: { pnpm: '11.21.0' },
     bundledDependencies: ['pnpm'],

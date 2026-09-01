@@ -15,12 +15,20 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  assertSourceBindingClosed,
+  comboUrlContainsClientBundle,
+  describeUnadmittedConnectionFrame,
   describeNetworkDestination,
   immutablePackageTreeDigest,
   isAdmittedBrowserRequest,
   isAdmittedBrowserWebSocket,
+  parseAuthenticatedLaunchUrl,
+  parseAdmittedConnectionFrame,
   parsePnpmRegistryIntegrity,
   parseReadyUrl,
+  readSourceBinding,
+  removedProfileEvidence,
+  removedProfileEvidenceError,
   runChecked,
   sanitizeDiagnostic,
   stopChild,
@@ -30,17 +38,17 @@ test('official Host identity binds one exact registry integrity and isolated roo
   const fixtureRoot = join(process.cwd(), '.official-host-fixture')
   const sourceRoot = join(process.cwd(), '.source-fixture')
   const lockfile = [
-    "  '@deepseek-ai/dsh@0.1.1-rc.2':",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
     `    resolution: {integrity: ${TARGET_DSH_REGISTRY_INTEGRITY}}`,
     '    hasBin: true',
     '',
   ].join('\n')
   assert.equal(
-    parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', '0.1.1-rc.2'),
+    parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', '0.1.2-alpha.3'),
     TARGET_DSH_REGISTRY_INTEGRITY,
   )
   assert.throws(
-    () => parsePnpmRegistryIntegrity(`${lockfile}${lockfile}`, '@deepseek-ai/dsh', '0.1.1-rc.2'),
+    () => parsePnpmRegistryIntegrity(`${lockfile}${lockfile}`, '@deepseek-ai/dsh', '0.1.2-alpha.3'),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-INTEGRITY',
   )
   assert.doesNotThrow(() => assertIsolatedOfficialHostPaths({
@@ -83,6 +91,29 @@ test('ready URL accepts only the canonical loopback Web origin', () => {
   )
 })
 
+test('authenticated launch URL accepts only one canonical in-memory token', () => {
+  const token = 'A'.repeat(43)
+  const launchUrl = `http://127.0.0.1:43127/?token=${token}`
+  assert.equal(parseAuthenticatedLaunchUrl(`booting\ndsh web: ${launchUrl}\n`), launchUrl)
+  for (const candidate of [
+    'http://127.0.0.1:43127/',
+    `http://127.0.0.1:43127/?token=${token}&token=${token}`,
+    `http://127.0.0.1:43127/?token=${token}&other=value`,
+    `http://localhost:43127/?token=${token}`,
+    `http://0.0.0.0:43127/?token=${token}`,
+    `http://127.0.0.1:43127/index.html?token=${token}`,
+    `http://user@127.0.0.1:43127/?token=${token}`,
+    `http://127.0.0.1:43127/?token=${token}#fragment`,
+    `http://127.0.0.1:43127/?token=${'A'.repeat(42)}`,
+  ]) {
+    assert.throws(
+      () => parseAuthenticatedLaunchUrl(`dsh web: ${candidate}`),
+      error => error instanceof AcceptanceFailure && error.code === 'STORE-UI-HOST-AUTH-URL',
+      candidate,
+    )
+  }
+})
+
 test('persisted network evidence drops URL values and credential assignments', () => {
   assert.equal(
     describeNetworkDestination('https://user:token@example.com:8443/private/canary?secret=value#fragment'),
@@ -102,6 +133,100 @@ test('browser network admission is exact-origin only', () => {
   assert.equal(isAdmittedBrowserWebSocket('ws://127.0.0.1:43127/rpc', origin), true)
   assert.equal(isAdmittedBrowserWebSocket('wss://example.com/rpc', origin), false)
   assert.equal(isAdmittedBrowserWebSocket('ws://127.0.0.1:43128/rpc', origin), false)
+})
+
+test('client combo request binds the exact package entry', () => {
+  const origin = 'http://127.0.0.1:43127'
+  assert.equal(
+    comboUrlContainsClientBundle(
+      `${origin}/plugins/??a/client.js,dsh-plugin-extension-center/client.js,b/client.js&rev=nonce`,
+      'dsh-plugin-extension-center',
+    ),
+    true,
+  )
+  assert.equal(
+    comboUrlContainsClientBundle(
+      `${origin}/plugins/??a/client.js,dsh-plugin-extension-center-other/client.js&rev=nonce`,
+      'dsh-plugin-extension-center',
+    ),
+    false,
+  )
+  assert.equal(
+    comboUrlContainsClientBundle(`${origin}/plugins/dsh-plugin-extension-center/client.js`, 'dsh-plugin-extension-center'),
+    false,
+  )
+})
+
+test('Connection frame parser admits only the official event stream', () => {
+  assert.deepEqual(
+    parseAdmittedConnectionFrame(JSON.stringify({
+      type: 'open',
+      streamId: 'stream-1',
+      endpoint: '$events',
+      payload: { args: {} },
+    })),
+    { type: 'open', streamId: 'stream-1', endpoint: '$events' },
+  )
+  assert.deepEqual(
+    parseAdmittedConnectionFrame(JSON.stringify({ type: 'cancel', streamId: 'stream-1' })),
+    { type: 'cancel', streamId: 'stream-1' },
+  )
+  for (const payload of [
+    Buffer.from('{}'),
+    'not-json',
+    JSON.stringify({ type: 'open', streamId: 'stream-1', endpoint: 'lifecycle/request', payload: { args: {} } }),
+    JSON.stringify({ type: 'open', streamId: 'stream-1', endpoint: '$events', payload: { args: { extra: true } } }),
+    JSON.stringify({ type: 'cancel', streamId: 'stream-1', extra: true }),
+  ]) {
+    assert.equal(parseAdmittedConnectionFrame(payload), null)
+  }
+  for (const endpoint of ['workspace/follow', 'session/control']) {
+    assert.deepEqual(
+      parseAdmittedConnectionFrame(JSON.stringify({
+        type: 'open', streamId: `stream-${endpoint}`, endpoint, payload: { args: {} },
+      })),
+      { type: 'open', streamId: `stream-${endpoint}`, endpoint },
+    )
+  }
+  assert.equal(describeUnadmittedConnectionFrame(Buffer.from('{}')), 'binary-frame')
+  assert.equal(
+    describeUnadmittedConnectionFrame(JSON.stringify({
+      type: 'open', streamId: 'stream-1', endpoint: 'lifecycle/request', payload: { args: {} },
+    })),
+    'other-stream-open-frame',
+  )
+})
+
+test('post-remove evidence rejects retained Profile, package, list, dump, or patch state', () => {
+  const packageName = 'dsh-plugin-extension-center'
+  const clean = removedProfileEvidence({
+    manifest: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+    packageName,
+    packagePresent: false,
+    listStdout: 'dsh-profile-web@0.0.0',
+    dumpStdout: '# == @deepseek-ai/dsh-web-app',
+    dumpStderr: '',
+  })
+  assert.equal(removedProfileEvidenceError(clean), null)
+  for (const input of [
+    { manifest: { dependencies: { [packageName]: 'file:artifact.tgz' }, dsh: { profile: { bundles: [] } } } },
+    { manifest: { dependencies: {}, dsh: { profile: { bundles: [packageName] } } } },
+    { packagePresent: true },
+    { listStdout: `dsh-profile-web@0.0.0\n${packageName}@0.2.0-alpha.1` },
+    { dumpStdout: `# == ${packageName}\n- id: center\n  name: ${packageName}` },
+    { dumpStderr: `patch: entry "${packageName}" not found` },
+  ]) {
+    const retained = removedProfileEvidence({
+      manifest: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+      packageName,
+      packagePresent: false,
+      listStdout: '',
+      dumpStdout: '',
+      dumpStderr: '',
+      ...input,
+    })
+    assert.match(removedProfileEvidenceError(retained) ?? '', /did not prove/u)
+  }
 })
 
 test('Store journey evidence classifies Center RPC from navigation start through context close', () => {
@@ -157,12 +282,269 @@ test('subprocess timeouts and child teardown are bounded', async () => {
   )
 
   const running = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-  await once(running, 'spawn')
-  await stopChild(running)
-  assert.notEqual(running.signalCode ?? running.exitCode, null)
+  try {
+    await once(running, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await stopChild(running)
+    assert.notEqual(running.signalCode ?? running.exitCode, null)
+  } finally {
+    await cleanupSpawnedChild(running, false)
+  }
 
   const exited = spawn(process.execPath, ['-e', 'process.kill(process.pid, "SIGTERM")'], { stdio: 'ignore' })
-  await once(exited, 'close')
-  await stopChild(exited)
-  assert.notEqual(exited.signalCode ?? exited.exitCode, null)
+  try {
+    await once(exited, 'close', { signal: AbortSignal.timeout(2_000) })
+    await stopChild(exited)
+    assert.notEqual(exited.signalCode ?? exited.exitCode, null)
+  } finally {
+    await cleanupSpawnedChild(exited, false)
+  }
+
+  const graceful = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => process.exit(0)); process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(graceful, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await once(graceful.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    const gracefulResult = await stopChild(graceful, {
+      requireRunning: true,
+      requireGraceful: true,
+      ownsProcessGroup: true,
+    })
+    assert.deepEqual(gracefulResult, {
+      wasRunning: true,
+      forced: false,
+      closeObserved: true,
+      processGroupStopped: process.platform === 'win32' ? null : true,
+      exitCode: 0,
+      signalCode: null,
+    })
+  } finally {
+    await cleanupSpawnedChild(graceful, process.platform !== 'win32')
+  }
+
+  const crashed = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' })
+  try {
+    await once(crashed, 'close', { signal: AbortSignal.timeout(2_000) })
+    await assert.rejects(
+      stopChild(crashed, { requireRunning: true, requireGraceful: true }),
+      /exited before runner-owned shutdown/u,
+    )
+  } finally {
+    await cleanupSpawnedChild(crashed, false)
+  }
 })
+
+test('strict child teardown kills a descendant that retains inherited stdout', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.stdout.write("descendant-ready\\n"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'inherit', 'ignore'] })`,
+    'process.on("SIGTERM", () => process.exit(0))',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+        gracefulTimeoutMs: 50,
+        killTimeoutMs: 1_000,
+      }),
+      /required SIGKILL during runner-owned shutdown/u,
+    )
+    assert.equal(parent.stdout.closed, true)
+    assertProcessGroupAbsent(parent.pid)
+  } finally {
+    await cleanupSpawnedChild(parent, true)
+  }
+})
+
+test('declared POSIX process-group ownership requires a detached group leader', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  try {
+    await once(child, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await assert.rejects(
+      stopChild(child, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+      }),
+      /did not own the declared POSIX process group/u,
+    )
+  } finally {
+    await cleanupSpawnedChild(child, false)
+  }
+})
+
+test('strict child teardown rejects when the direct parent closes but its process group remains live', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })`,
+    'descendant.once("message", () => process.stdout.write("descendant-ready\\n"))',
+    'process.on("SIGTERM", () => process.exit(0))',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+        gracefulTimeoutMs: 50,
+        killTimeoutMs: 1_000,
+      }),
+      /required SIGKILL during runner-owned shutdown/u,
+    )
+    assert.equal(parent.stdout.closed, true)
+    assertProcessGroupAbsent(parent.pid)
+  } finally {
+    await cleanupSpawnedChild(parent, true)
+  }
+})
+
+test('strict child teardown cleans a live process group after the direct parent already closed', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })`,
+    'descendant.once("message", () => { process.stdout.write("descendant-ready\\n"); setImmediate(() => process.exit(0)) })',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const close = once(parent, 'close', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
+    await close
+    assert.doesNotThrow(() => process.kill(-parent.pid, 0))
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+        killTimeoutMs: 1_000,
+      }),
+      /exited before runner-owned shutdown/u,
+    )
+    assertProcessGroupAbsent(parent.pid)
+  } finally {
+    await cleanupSpawnedChild(parent, true)
+  }
+})
+
+test('source binding rejects dirty state and every committed or acceptance-program drift', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-center-source-binding-'))
+  const runnerPath = join(root, 'acceptance', 'store-only', 'run.mjs')
+  const environment = { ...process.env }
+  try {
+    await mkdir(join(root, 'acceptance', 'store-only'), { recursive: true })
+    await Promise.all([
+      writeFile(runnerPath, 'export {}\n'),
+      writeFile(join(root, 'acceptance', 'store-only', 'support.mjs'), 'export {}\n'),
+      writeFile(join(root, 'acceptance', 'store-only', 'journey-evidence.mjs'), 'export {}\n'),
+      writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n'),
+    ])
+    await runChecked('git', ['init', '--quiet'], { cwd: root, env: environment })
+    await runChecked('git', ['add', '.'], { cwd: root, env: environment })
+    await runChecked('git', [
+      '-c', 'user.name=Compatibility Test',
+      '-c', 'user.email=compatibility@example.invalid',
+      'commit', '--quiet', '-m', 'fixture',
+    ], { cwd: root, env: environment })
+    const before = await readSourceBinding({ projectRoot: root, runnerPath, environment })
+    assert.equal(before.clean, true)
+    assert.doesNotThrow(() => assertSourceBindingClosed(before, { ...before }))
+    for (const field of ['commit', 'tree', 'runnerSha256', 'supportSha256', 'journeyEvidenceSha256', 'lockfileSha256']) {
+      const changed = {
+        ...before,
+        [field]: field === 'commit' || field === 'tree' ? 'f'.repeat(40) : 'f'.repeat(64),
+      }
+      assert.throws(
+        () => assertSourceBindingClosed(before, changed),
+        error => error instanceof AcceptanceFailure
+          && error.code === 'STORE-UI-SOURCE-DRIFT'
+          && error.message.includes(field),
+      )
+    }
+    await writeFile(runnerPath, 'export const changed = true\n')
+    const dirty = await readSourceBinding({ projectRoot: root, runnerPath, environment })
+    assert.equal(dirty.clean, false)
+    assert.throws(
+      () => assertSourceBindingClosed(before, dirty),
+      error => error instanceof AcceptanceFailure
+        && error.code === 'STORE-UI-SOURCE-DRIFT'
+        && error.message.includes('worktree')
+        && error.message.includes('runnerSha256'),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+function assertProcessGroupAbsent(pid) {
+  assert.throws(
+    () => process.kill(-pid, 0),
+    error => error?.code === 'ESRCH',
+  )
+}
+
+async function cleanupSpawnedChild(child, ownsProcessGroup) {
+  if (child.pid === undefined) return
+  const closeAlreadyObserved = (child.exitCode !== null || child.signalCode !== null)
+    && child.stdio.every(stream => stream === null || stream.closed === true)
+  const close = closeAlreadyObserved
+    ? Promise.resolve()
+    : once(child, 'close', { signal: AbortSignal.timeout(2_000) }).then(() => {})
+  if (ownsProcessGroup && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+      child.kill('SIGKILL')
+    }
+  } else {
+    child.kill('SIGKILL')
+  }
+  await close
+  if (!ownsProcessGroup || process.platform === 'win32') return
+  const deadline = Date.now() + 2_000
+  while (true) {
+    try {
+      process.kill(-child.pid, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') return
+      throw error
+    }
+    if (Date.now() >= deadline) throw new Error('test process group remained live after cleanup SIGKILL')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
+  }
+}

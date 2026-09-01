@@ -321,7 +321,7 @@ export function bindControlledAbaSetupTransition(input) {
     operationId,
     profileId,
     packageName,
-    officialCliPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
+    officialCliPackage: '@deepseek-ai/dsh@0.1.2-alpha.3',
     action: 'official-cli-remove',
     transition: 'B-to-A',
     stateAfterRestartRequired: Object.freeze({
@@ -616,11 +616,11 @@ async function verifyOfficialCli(command, packageRoot, cwd, env, timeoutMs) {
   }
   const canonicalPackageRoot = await realpath(resolve(packageRoot))
   const manifest = JSON.parse(await readFile(join(canonicalPackageRoot, 'package.json'), 'utf8'))
-  if (manifest.name !== '@deepseek-ai/dsh' || manifest.version !== '0.1.1-rc.2' || manifest.bin?.dsh !== 'lib/bin.js') {
-    fail('P0-CONTROLLED-ABA-OFFICIAL-CLI', 'independent CLI does not belong to official DSH 0.1.1-rc.2')
+  if (manifest.name !== '@deepseek-ai/dsh' || manifest.version !== '0.1.2-alpha.3' || manifest.bin?.dsh !== 'lib/bin.js') {
+    fail('P0-CONTROLLED-ABA-OFFICIAL-CLI', 'independent CLI does not belong to official DSH 0.1.2-alpha.3')
   }
   const version = await runCommand(canonicalCommand, ['--version'], { cwd, env, timeoutMs })
-  if (version.exitCode !== 0 || version.signal !== null || version.stdout.trim() !== '0.1.1-rc.2') {
+  if (version.exitCode !== 0 || version.signal !== null || version.stdout.trim() !== '0.1.2-alpha.3') {
     fail('P0-CONTROLLED-ABA-OFFICIAL-CLI', 'independent official DSH CLI version probe failed')
   }
   return canonicalCommand
@@ -1012,7 +1012,7 @@ export async function induceControlledPluginInstallAba(input) {
       supervisorExecutionDigest: lease.executionDigest,
       supervisorDispatchedAtMs: lease.dispatchedAtMs,
       hostStoppedDuringIndependentRemove: true,
-      officialCliPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
+      officialCliPackage: '@deepseek-ai/dsh@0.1.2-alpha.3',
       setupTransition,
       stateA,
       stateAtLeaseStop,

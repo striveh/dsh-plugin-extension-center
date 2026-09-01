@@ -23,6 +23,7 @@ import { HostInventoryService } from '../src/service/inventory-service.ts'
 import { IntentPlanService } from '../src/service/intent-plan-service.ts'
 import type { RpcJson } from '../src/service/rpc-contract.ts'
 import { FilePlanStore } from '../src/storage/index.ts'
+import { alphaPolicyCatalogFixture } from './support/alpha-catalog.ts'
 import { TEST_RECOVERY_EXECUTABLE_BINDING } from './support/recovery-binding.ts'
 
 const roots: string[] = []
@@ -571,7 +572,7 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
     roots.push(root)
     const store = new CenterStateStore(root)
     await store.initialize()
-    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const catalog = alphaPolicyCatalogFixture()
     const entry = catalog.envelope.entries.find(candidate => candidate.kind === 'mcp')!
     const runtime = httpRuntime(entry.candidateRef)
     const owner = new HttpOwner()
@@ -627,7 +628,7 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
       continuationId: null,
       targetKey: operation('target', 'restore', 'disabled').plan.targetKey,
       configuration: {},
-    }, 'loopback-browser')
+    }, 'authenticated-browser-session')
     expect(preview.plan.content.fences.ownerRevision).toBe(`mcp:${String(removed.revision)}`)
 
     const storedIntent = await store.getIntent(preview.intentId)
@@ -645,7 +646,7 @@ describe('preprovisioned Streamable HTTPS MCP lifecycle', () => {
       continuationId: null,
       targetKey: operation('wrong-target', 'restore', 'disabled').plan.targetKey,
       configuration: {},
-    }, 'loopback-browser')).rejects.toThrow('exact retained restore target is unavailable')
+    }, 'authenticated-browser-session')).rejects.toThrow('exact retained restore target is unavailable')
     const fixture = operation('restore', 'restore', 'disabled')
     const plannedRestore = {
       ...fixture,

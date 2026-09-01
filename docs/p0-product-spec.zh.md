@@ -1,14 +1,14 @@
 # 统一扩展中心 P0 产品规格
 
-状态：P0 产品与验收规范基线，2026-08-28
+状态：扩展产品规格，2026-09-01。当前完成门禁是最新版官方 DSH 兼容；下述 child extension 可写生命周期与公开 Release 证据属于未来、非阻断门禁。
 
 [English](p0-product-spec.md) | 中文
 
-正在验证的兼容性目标：未经修改的官方 DeepSeek Harness `0.1.1-rc.2` Release，对应 commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`。
+兼容性目标：未经修改的官方 DeepSeek Harness 源码 tag `dsh-v0.1.2-alpha.3`，对应 commit `dd6322d604e00eec1ba5e0c8541159906a21094a`。Center 以 GitHub 托管的确定性 tarball 分发，并通过官方通用 Plugin CLI 安装；Center 不需要发布到 npm。Stable Center `0.1.0` 证据仍是历史证据，只适用于官方 DSH `0.1.1-rc.2`。
 
 扩展中心是独立发布的 DSH Bundle。它的 Host 代码、Web Client、准入目录、发现、plan、grant、journal、receipt、验证、恢复编排与持久化续行 claim 都由本仓库交付，不修改官方 DSH。扩展中心自身与每个已准入 child Plugin Bundle，无论是 Host-only 还是 Host+Client，都只能通过官方 `dsh plugin --profile <profile> ...` CLI 安装、更新、降级和卸载。扩展中心可以暂存并保留准确 archive，但绝不直接写 Profile package-manager 状态。实现边界见[纯插件架构](plugin-only-architecture.zh.md)，发现模型的来源证据见[能力发现与扩展商店研究](capability-rag-research.zh.md)。
 
-公开分支是开发输入，不是 Release evidence。某个版本声明下述完整官方 rc.2 生命周期、恢复、浏览器、确定性 Agent 与 Release provenance gate 前，它的准确 packed artifact 必须逐项通过。稳定 P0 Agent 门禁使用官方 DSH Replay，只替换模型响应这一条边；官方 Agent、Session、Tool dispatch、扩展中心受管 Skill、continuation 与 receipt 路径仍正常运行。Live provider 运行是非阻塞 advisory compatibility smoke，不是 P0 硬要求，也不能替代确定性证据。公开 Release 安装、Pages 目录部署与刷新，以及已完成 CI 平台主张只在对应准确版本 receipt 通过后成立。
+当前完成门禁使用官方通用 Plugin CLI 安装准确 packed artifact，运行真实 Host 与 Web Client Store 路径，再用同一 CLI 卸载，并证明官方 DSH package tree 与隔离安装 tree 未变化。下述 child extension 可写生命周期、恢复、确定性 Agent 续行、公开 Release 与 Pages 部署仍是扩展产品路线，不能从兼容 receipt 推导出来。历史 stable 证据继续只适用于其记录的官方 DSH 版本。
 
 ## Problem
 
@@ -36,7 +36,7 @@ P0 成功意味着非专业用户能针对每项动作回答五个问题：
 ## 产品与仓库边界
 
 - 产品只存在于本仓库，并以一个 packed Host+Web Client Bundle 发布。
-- 兼容性目标是已发布官方 rc.2 artifact，不是源码 checkout 或修改过的 package。
+- 兼容性目标是准确官方 DSH `0.1.2-alpha.3`；验收通过官方 CLI 把确定性 packed Center 安装到隔离的官方 Host，而不是使用 checkout 或修改过的 package。
 - 对每个已准入 child Plugin Bundle，扩展中心暂存并锁定准确 archive，拥有 operation evidence。只有官方 Plugin CLI 可以写入 Profile dependency、lock 数据、`node_modules`、Bundle membership 与 package-membership Loader row；纯配置通过官方 Loader 替换受管 row。扩展中心绝不直接写 package-manager 位置。
 - 受管 MCP connection 是扩展中心自有 desired-state record，用于挂载官方 MCP Client。
 - 受管 Skill 是扩展中心自有文件与记录，通过官方 Skill registry 投影。
@@ -58,7 +58,7 @@ P0 成功意味着非专业用户能针对每项动作回答五个问题：
 4. 返回 `use-existing`、`management-required`、`acquisition-candidate`、`choice-required`、`no-eligible-candidate`、`discovery-unavailable` 或 `external-only`。
 5. 确定性证据产生一个实质性赢家时，Agent 可以选择它，并且只用 opaque id 发起 plan request；否则要求用户从最多三个合格候选中选择。
 6. Host 内的扩展中心根据相同 candidate、当前 inventory、target scope、policy、catalog revision 与 integrity 重新解析，再生成计划。任何请求提供的 target key 都必须在读取受管状态前准确等于 candidate、profile、scope 与 extension 的规范 identity。
-7. 用户在 loopback Client 中审查准确计划并单次授权；Agent 无法调用确认动作。
+7. 用户在已认证的 DSH Web 浏览器会话中审查准确计划并单次决定；Agent 无法调用决定动作。
 8. 扩展中心执行已批准的类型化操作，并验证匹配的官方 observation。每个已准入 child Plugin Bundle 的 package membership 变更只能委托给 plan 绑定的准确官方 Plugin CLI 动作；纯配置在同一个 Host 进程中使用 plan 绑定的官方 Loader row replacement。
 9. 扩展中心消费一个任务绑定的 continuation claim，并向原 Session 派发一次续行。需要重启的 Plugin 会保持 pending，直到后续官方 Host boot 验证所选官方 Profile dependency 与声明 consumer。
 10. 只有新能力真实用于原任务且任务级 observable 通过后，才记录任务完成。
@@ -69,7 +69,7 @@ P0 成功意味着非专业用户能针对每项动作回答五个问题：
 2. 根据扩展类型、能力、发布者、来源类别、平台、scope、权限、生命周期完整性和配置就绪度搜索和筛选一份已验证目录。
 3. 使用目录提供的标准化事实比较不超过三个候选。发布者文案和社区文本只是转义后的审查数据，绝不是指令。
 4. 预览准确动作计划及其权限变化。
-5. 在 loopback Client 中单次确认。
+5. 在已认证的 DSH Web Client 中单次决定。
 6. 把变更、重启要求、验证和恢复状态作为不同步骤观察。
 7. 检查内容寻址 receipt 与准确 runtime evidence。
 8. 从“已安装”管理结果。商店来源的动作永远不创建 task continuation claim。
@@ -144,7 +144,7 @@ UI 绝不把 package presence 或 durable record 转成泛化的“已安装且�
 
 扩展中心复核一个 plan 时只读取一份 catalog snapshot。实时 catalog 与 owner revision 在一次性消费 decision 完成前始终是必需 fence。消费完成后，不可变 plan、operation authorization、持久 intent payload、journal 与 provider snapshot 成为 provider 执行和恢复依据；catalog rollover 或候选删除不能阻断回滚。即使失败 operation 的 intent 已不可用，终态 receipt 补全与锁释放仍使用已消费 plan、authorization 与终态 journal；task continuation bookkeeping 会从 intent payload 单独重试。Plugin rollback 完成顺序固定为准确恢复状态验证、终态 receipt 持久化、临时 absent-state proof 删除与 target lock 释放。启动恢复在 receipt 发布前 provider proof 不可用时保留锁，在 receipt 已持久化后完成 proof 清理或解锁。
 
-Loopback Client 在签发绑定候选的 decision 前展示计划。Grant 必须保密、未过期、一次性使用，并绑定准确 plan digest、target、action、scope、inventory revision 与 decision identity。拒绝与取消是终态事实，不能被静默重试。
+已认证 DSH Web Client 在签发绑定候选的 decision 前展示计划。请求不携带秘密 grant，也不能证明真人身份；Connection 已经执行 Host/Origin/Fetch-Site 信任检查和浏览器会话 cookie 认证。扩展中心重新检查 plan expiry、准确 digest、target、action、scope、inventory revision 与 decision identity，再一次性消费产生的 operation authorization。拒绝与取消是终态事实，不能被静默重试。
 
 每个 target 只有一个扩展中心 operation owner 和一个单调 revision。对 `managedPlugins`，该 owner 覆盖 plan、journal、receipt、retained archive、recovery selection 与 evidence；官方 Profile package manager 仍是 Plugin 物理 owner：
 
@@ -167,7 +167,7 @@ Operation journal append-only 且 hash-linked。终态 receipt 绑定 plan diges
 
 每个 operation 在变更前记录 absent-state 或 managed-version rollback point。Package 会把无依赖、hash-pinned recovery module 复制到带版本的扩展中心状态目录。扩展中心或 Web 无法加载时，用户停止 DSH，并通过 `node` 调用该准确 module 和 Center operation id。
 
-恢复绑定 schema v5 内含 official-execution binding v2，并固定 recovery bytes、canonical Center root、canonical Node executable/版本/digest、process-group supervisor、私有 bundled `pnpm@11.21.0` 的 SRI/tree/entrypoint/shim/POSIX shell，以及准确官方 rc.2 package/entrypoint/已安装 production-dependency closure、`hostHome` 与 timeout。正常执行和独立恢复都会验证全部 pin、拒绝 Profile package-manager execution control，并使用 minimal environment。对已安装 Profile，扩展中心严格解析变更前的准确 `package.json`、`pnpm-lock.yaml`、`node_modules/.modules.yaml` 与引用的已安装 package manifest，再把合成的 owner-only pnpm 11 abbreviated/full registry metadata 写入 content-addressed generation。其绑定 identity 覆盖 Profile digest、现有 canonical store、生成文件、cache manifest 与固定 pnpm runtime。Plugin provider recovery snapshot 携带该 binding，因此正常 rollback 与独立 break-glass 使用并重新验证同一 generation。Cache 物料缺失、被更改、经由 symlink 替换或与 binding 不匹配时，会在下一次官方 CLI Profile 写入前 fail closed。执行期保持 offline 且禁用 lifecycle script；生成的 metadata 不是网络预热，也不能提供不可用的 package byte。只有同时没有 lock 与 `node_modules` 安装的 Profile 才使用扩展中心私有的 per-Profile store。Supervisor 会在 timeout 或 parent 丢失（包括 parent `SIGKILL`）时终止 mutation process group；live execution record 会阻止 lease recovery，直到该 group 消失。该 mutation 与 recovery 路径在 Windows 上 fail closed。恢复过程还会验证 journal chain、current pointer、plan evidence、provider snapshot 与 retained archive。它可以直接恢复扩展中心自有 MCP、Skill 与 continuation 状态。Center 或 Host 无法启动时，已准入 child Plugin Bundle rollback 只调用已绑定官方 Plugin CLI 恢复准确 Profile before-state，验证结果后才提交 Center state。Provider apply 是 ambiguity threshold：dispatch 开始后，mutation recovery 无法证明结果时，操作必须以准确 target lock 保持 `recovery-required`。准确 rc.0 pnpm 11.7.0 version/SRI pair 只允许 durable reader 读取；未完成历史（包括只有 journal 前 reservation 的已消费 plan）保持锁定，只显示不可执行的隔离提示。Owner 初始化前，还必须把已进入 apply 且持有 provider snapshot 的 retired failed Plugin journal 与 Center 和原始 owner sidecar projection 对比；准确持久 operation reference 同样被隔离，缺少准确锁时阻止可写激活。当前执行、显式恢复、owner reconciliation 与独立 break-glass 都会在 provider 或进程活动前拒绝 retired pair；未知或混合 pair 按 corruption 失败。Recovery 绝不直接写 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row。下一次正常启动官方 DSH 后，必须验证所选 Profile dependency 与声明 consumer，恢复终态证据才有效。
+恢复绑定 schema v5 内含 official-execution binding v2，并固定 recovery bytes、canonical Center root、canonical Node executable/版本/digest、process-group supervisor、私有 bundled `pnpm@11.21.0` 的 SRI/tree/entrypoint/shim/POSIX shell，以及准确官方 DSH `0.1.2-alpha.3` package/entrypoint/已安装 production-dependency closure、`hostHome` 与 timeout。正常执行和独立恢复都会验证全部 pin、拒绝 Profile package-manager execution control，并使用 minimal environment。对已安装 Profile，扩展中心严格解析变更前的准确 `package.json`、`pnpm-lock.yaml`、`node_modules/.modules.yaml` 与引用的已安装 package manifest，再把合成的 owner-only pnpm 11 abbreviated/full registry metadata 写入 content-addressed generation。其绑定 identity 覆盖 Profile digest、现有 canonical store、生成文件、cache manifest 与固定 pnpm runtime。Plugin provider recovery snapshot 携带该 binding，因此正常 rollback 与独立 break-glass 使用并重新验证同一 generation。Cache 物料缺失、被更改、经由 symlink 替换或与 binding 不匹配时，会在下一次官方 CLI Profile 写入前 fail closed。执行期保持 offline 且禁用 lifecycle script；生成的 metadata 不是网络预热，也不能提供不可用的 package byte。只有同时没有 lock 与 `node_modules` 安装的 Profile 才使用扩展中心私有的 per-Profile store。Supervisor 会在 timeout 或 parent 丢失（包括 parent `SIGKILL`）时终止 mutation process group；live execution record 会阻止 lease recovery，直到该 group 消失。该 mutation 与 recovery 路径在 Windows 上 fail closed。恢复过程还会验证 journal chain、current pointer、plan evidence、provider snapshot 与 retained archive。它可以直接恢复扩展中心自有 MCP、Skill 与 continuation 状态。Center 或 Host 无法启动时，已准入 child Plugin Bundle rollback 只调用已绑定官方 Plugin CLI 恢复准确 Profile before-state，验证结果后才提交 Center state。Provider apply 是 ambiguity threshold：dispatch 开始后，mutation recovery 无法证明结果时，操作必须以准确 target lock 保持 `recovery-required`。准确 rc.0 pnpm 11.7.0 version/SRI pair 只允许 durable reader 读取；未完成历史（包括只有 journal 前 reservation 的已消费 plan）保持锁定，只显示不可执行的隔离提示。Owner 初始化前，还必须把已进入 apply 且持有 provider snapshot 的 retired failed Plugin journal 与 Center 和原始 owner sidecar projection 对比；准确持久 operation reference 同样被隔离，缺少准确锁时阻止可写激活。当前执行、显式恢复、owner reconciliation 与独立 break-glass 都会在 provider 或进程活动前拒绝 retired pair；未知或混合 pair 按 corruption 失败。Recovery 绝不直接写 Profile dependency、lock 数据、`node_modules`、Bundle membership 或 Loader row。下一次正常启动官方 DSH 后，必须验证所选 Profile dependency 与声明 consumer，恢复终态证据才有效。
 
 ## 信任与安全规则
 
@@ -180,16 +180,16 @@ Operation journal append-only 且 hash-linked。终态 receipt 绑定 plan diges
 - Artifact acquisition 会拒绝 initial URL 和 redirect URL 中的所有 IPv4 与 IPv6 literal。Hostname、DNS 变化与 MCP Tool result 始终不可信；该 URL 检查不解析域名，也不声称防御 DNS rebinding。Network authority 必须显式且准确。
 - Recovery 与正常 mutation 共享同一 ownership manifest。它们不能写出扩展中心自有 root 与 MCP/Skill registration；每个已准入 child Plugin Bundle 的 package membership 变更只由官方 Plugin CLI 执行，纯配置则使用官方 Loader。
 
-## 官方 rc.2 扩展点
+## 官方 DSH 0.1.2-alpha.3 扩展点
 
-Bundle 只消费已发布 rc.2 行为：
+Bundle 只消费准确官方 DSH `0.1.2-alpha.3` 暴露的公开行为：
 
 - 官方 `dsh plugin --profile` CLI，用于每个已准入 child Plugin Bundle 的 package 变更；
 - Cordis Loader 的观测与公开配置方法，用于验证 Profile-managed Plugin contribution；
 - 随 effect 释放的 `ctx.tools` 与 `ctx.skills` registration；
 - 用于准入 MCP connection runtime 的 `@deepseek-ai/dsh-mcp-client`；
 - 用于续行的官方 Agent、Session 与持久化服务；
-- loopback `@deepseek-ai/dsh-client-connection` RPC 与 `dsh.client` Web Bundle declaration。
+- 经 Connection 认证的 `@deepseek-ai/dsh-client-connection` 浏览器 RPC channel 与 `dsh.client` Web Bundle declaration；Release 验收使用默认绑定 loopback 的官方 Web Profile。
 
 扩展中心 service 与 operation owner 是产品内部实现，不是新增官方 DSH Service Definition。扩展中心自有 MCP 与 Skill contribution 随其 fiber 释放；每个已准入 child Plugin Bundle 继续归官方 Profile package manager 管理，直到已批准官方 CLI 动作改变它。
 
@@ -206,17 +206,17 @@ Bundle 只消费已发布 rc.2 行为：
 - 把 legacy `profileTransactions`、本地 DSH HEAD、六个上游 Host owner 或 Host PR fixture 当作产品前置条件；它们只能作为拒绝用例。
 - 声称任意第三方代码安全，或把获取成功当成任务成功。
 
-## 验收路径
+## 扩展验收路线
 
-实现和发布按顺序收集证据，后续 gate 不会豁免前面的失败。
+Gate A 是当前兼容完成路径。Gate B 到 Gate E 是未来产品生命周期与公开 Release 证据，明确不阻断当前独立插件兼容声明。在扩展路线内部，后续 gate 不会豁免前面的失败。
 
 ### Gate A——准确 Artifact 与官方 Host
 
 1. 从干净且审查过的 commit 构建，并提交确定性 `lib/` 产物。
 2. 打包两次并要求 bytes 与 SHA-256 完全一致；检查每个 archive entry，拒绝 lifecycle script 或未声明 executable。
-3. 在准确 `main` push 上，要求 Node 22 CI job 上传该确定性 tarball、`SHA256SUMS` 与一份自摘要 attestation，并绑定 source commit、run id/attempt、packed manifest、bundled pnpm tree 与 artifact 坐标。
-4. 通过固定 GitHub API 与最多一次准入的 GitHub Actions 或 Azure Blob storage redirect 下载准确 Actions artifact。必须验证声明的 Actions archive digest，并要求有界 ZIP 只包含 tarball、`SHA256SUMS` 与 attestation。
-5. 只使用官方 `dsh@0.1.1-rc.2`，通过官方 CLI 把已 attested tarball 安装到隔离的 DSH、Agents、workspace 与 home 目录。
+3. 在本地兼容证据中，把确定性 tarball 与 packed manifest 绑定到准确 source commit、runner digest、lockfile digest 与 artifact SHA-256。
+4. CI upload/download、archive digest 与 run identity 交叉绑定属于可选扩展公开 Release provenance，不阻断当前兼容门禁。
+5. 只使用准确官方 `dsh@0.1.2-alpha.3`，通过官方 CLI 把准确 Center tarball 安装到隔离的 DSH、Agents、workspace 与 home 目录；不要求 Center npm 坐标。
 6. 记录官方 package identity 与已审计 commit；拒绝 source checkout、workspace import、patched package、相邻仓库和未打包 Center code。
 7. 通过已发布入口启动真实 Host 与 browser Client。
 
@@ -242,8 +242,8 @@ Bundle 只消费已发布 rc.2 行为：
 ### Gate D——恢复与原任务续行
 
 1. 分别在 material selection 前、selection 后但 runtime verification 前、verification 后但 receipt publication 前、restart reconciliation 期间和 recovery 期间注入故障。
-2. 在 Center 或 Host 无法启动时运行 schema-v5 hash-pinned break-glass module；证明其 official-execution binding v2 验证 Node、supervisor、私有 bundled pnpm，以及已绑定官方 rc.2 package tree、production closure、entrypoint 与 `hostHome`，调用准确官方 Plugin CLI 回滚到已准入 absent-state 或 retained-version before-state，验证 Profile 结果后才提交 Center state，并在任一 binding、executable、journal、pointer、plan、Profile revision 或 archive drift 时失败，绝不直接写 Profile 状态。
-3. 通过官方 Agent 启动任务，并使用官方 DSH Replay 确定性制造能力缺口与模型 tool-call 序列。Replay 只能替换模型响应；能力解析、loopback 授权、operation 执行、Session log、Tool dispatch、已获取 Skill 的使用、continuation 与 receipt evidence 必须走真实官方路径。证明一次 continuation 到达原 Session。
+2. 在 Center 或 Host 无法启动时运行 schema-v5 hash-pinned break-glass module；证明其 official-execution binding v2 验证 Node、supervisor、私有 bundled pnpm，以及已绑定官方 DSH `0.1.2-alpha.3` package tree、production closure、entrypoint 与 `hostHome`，调用准确官方 Plugin CLI 回滚到已准入 absent-state 或 retained-version before-state，验证 Profile 结果后才提交 Center state，并在任一 binding、executable、journal、pointer、plan、Profile revision 或 archive drift 时失败，绝不直接写 Profile 状态。
+3. 通过官方 Agent 启动任务，并使用官方 DSH Replay 确定性制造能力缺口与模型 tool-call 序列。Replay 只能替换模型响应；能力解析、已认证浏览器决定、operation 执行、Session log、Tool dispatch、已获取 Skill 的使用、continuation 与 receipt evidence 必须走真实官方路径。证明一次 continuation 到达原 Session。
 4. 对 Plugin 重启官方 Host，证明 durable claim 只在 selected consumer 可见后被消费。
 5. 证明 denial、cancellation、supersession、wrong Session、replay、failed verification 与 Store-originated operation 都不能 dispatch continuation。
 6. 使用已获取能力，并单独记录 task-level observable。
@@ -267,7 +267,7 @@ Unit 与 integration test 至少覆盖：
 - 独立 Plugin/MCP/Skill inventory projection 与 stale observation handling；
 - 扩展中心 archive、官方 Profile dependency 与已安装 byte、Loader、restart、MCP handshake/Tool、Skill registry 与 continuation evidence codec；
 - journal hash chain、checkpoint、receipt binding、rollback selection、retained-version limit 与 cleanup；
-- loopback origin、session、CSRF、replay、timeout、disconnect、cancellation、teardown 与 sensitive-data redaction；
+- 官方 Web Profile 的 loopback 绑定；Host/Origin/Fetch-Site/media type 拒绝；缺失、过期或 authority 不匹配的浏览器 cookie；replay、timeout、disconnect、cancellation、teardown 与 sensitive-data redaction；
 - packed artifact 上的 Host/Client protocol compatibility。
 
 ## Fault injection
@@ -285,7 +285,7 @@ Unit 与 integration test 至少覆盖：
 
 只有下列陈述全部成立时才可发布 P0：
 
-- 一个 packed artifact 通过官方 rc.2 CLI 安装和卸载，且不修改官方 DSH 代码。
+- 一个 packed artifact 通过准确官方 DSH `0.1.2-alpha.3` CLI 安装和卸载，且不修改官方 DSH 代码。
 - 商店与 Agent 获取使用同一份准入目录和同一条 policy path。
 - 发现来源可见、来源事实新鲜，线索不能绕过准入。
 - Plugin、MCP、Skill 都覆盖发现、安装、配置、准确更新、runtime verification、卸载与恢复；启用/禁用按类型如实呈现。
@@ -308,8 +308,8 @@ Unit 与 integration test 至少覆盖：
 - **Prompt 或 description injection：**只向 Agent 暴露标准化目录事实，把不可信 prose 作为转义后的 review data。
 - **生命周期漂移：**动作绑定 owner revision，每次 mutation 与 restart 后验证官方 runtime observation。
 - **所有权重叠：**遇到外来或已漂移官方 Profile dependency、已安装 bytes、Loader contribution、registry winner 或扩展中心 archive 时 fail closed。
-- **外部 CLI 并发：**rc.2 不向扩展中心提供 lock 或 compare-and-swap token。受控 ABA lane 证明一个对抗性顺序能够安全失败；receipt 不能被泛化为覆盖所有可能的进程交错。
+- **外部 CLI 并发：**官方 DSH `0.1.2-alpha.3` CLI 不向扩展中心提供 lock 或 compare-and-swap token。受控 ABA lane 证明一个对抗性顺序能够安全失败；receipt 不能被泛化为覆盖所有可能的进程交错。
 - **重启歧义：**需要重启的 Plugin package operation 及其 continuation claim 保持 pending，直到后续 boot 观察准确 consumer；纯配置只有在同 Host Loader 验证后才完成。
 - **恢复损坏：**固定独立 executable 与每个 journal/material digest；不依赖损坏 runtime。
 - **虚假任务成功：**分别记录 acquisition、runtime visibility、capability use 与 task outcome。
-- **Host 版本漂移：**兼容性以准确 Release 证据为准；patched 或 moving source tree 的结果不能扩大官方 rc.2 声明。
+- **Host 版本漂移：**兼容性以准确版本证据为准；patched 或 moving source tree 的结果不能扩大官方 DSH `0.1.2-alpha.3` 声明。

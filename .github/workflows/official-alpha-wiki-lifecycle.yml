@@ -1,0 +1,144 @@
+name: Produce latest-official-DSH Wiki Skill lifecycle receipt
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: official-alpha-wiki-lifecycle-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  lifecycle:
+    name: Run exact official DSH source and authenticated lifecycle
+    if: >-
+      github.repository == 'striveh/dsh-plugin-extension-center'
+      && github.ref == 'refs/heads/main'
+      && github.ref_protected == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: catalog-release
+    steps:
+      - name: Check out exact protected-main Center source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Validate protected-main coordinates
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+      - name: Install locked Center dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build exact Center source
+        run: |
+          pnpm run build
+          git diff --exit-code -- lib
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+      - name: Require exact packaged revision 11 predecessor
+        run: node acceptance/alpha-catalog/preflight.mjs
+      - name: Check out exact official DSH source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: dd6322d604e00eec1ba5e0c8541159906a21094a
+          path: .artifacts/official-dsh
+          fetch-depth: 1
+          fetch-tags: true
+          persist-credentials: false
+      - name: Verify exact official DSH tag and source identity
+        run: |
+          test "$(git -C .artifacts/official-dsh rev-parse HEAD)" = dd6322d604e00eec1ba5e0c8541159906a21094a
+          git -C .artifacts/official-dsh tag --points-at HEAD | grep -Fx dsh-v0.1.2-alpha.3
+          test "$(node -p 'require("./.artifacts/official-dsh/apps/cli/package.json").version')" = 0.1.2-alpha.3
+          test -z "$(git -C .artifacts/official-dsh status --porcelain=v1 --untracked-files=no)"
+      - name: Install and build exact official DSH source
+        run: |
+          pnpm --dir .artifacts/official-dsh install --frozen-lockfile
+          pnpm --dir .artifacts/official-dsh run build
+          test -f .artifacts/official-dsh/apps/cli/lib/bin.js
+          test -z "$(git -C .artifacts/official-dsh status --porcelain=v1 --untracked-files=no)"
+      - name: Install isolated Chromium runtime
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Prepare development-only signed lifecycle catalog
+        env:
+          CATALOG_SIGNING_PRIVATE_KEY: ${{ secrets.CATALOG_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          lifecycle_root="$RUNNER_TEMP/official-alpha-wiki-lifecycle-input"
+          mkdir -m 700 "$lifecycle_root"
+          signing_key="$(mktemp "$RUNNER_TEMP/dsh-extension-center-alpha-lifecycle-key.XXXXXX")"
+          trap 'rm -f "$signing_key"' EXIT
+          printf '%s' "$CATALOG_SIGNING_PRIVATE_KEY" > "$signing_key"
+          unset CATALOG_SIGNING_PRIVATE_KEY
+          node scripts/prepare-alpha-catalog-admission.mjs lifecycle-candidate \
+            --previous catalog/public/plugins.json \
+            --private-key "$signing_key" \
+            --out "$lifecycle_root/plugins.json" \
+            --evidence-out "$lifecycle_root/evidence.json"
+      - name: Create isolated loopback TLS identity
+        run: |
+          umask 077
+          tls_root="$RUNNER_TEMP/official-alpha-wiki-lifecycle-tls"
+          mkdir -m 700 "$tls_root"
+          openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+            -subj /CN=127.0.0.1 \
+            -addext subjectAltName=IP:127.0.0.1 \
+            -keyout "$tls_root/server-key.pem" \
+            -out "$tls_root/server-cert.pem"
+          chmod 600 "$tls_root/server-key.pem" "$tls_root/server-cert.pem"
+      - name: Run authenticated official-alpha lifecycle
+        env:
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          umask 077
+          receipt_root="$RUNNER_TEMP/official-alpha-wiki-lifecycle-receipt"
+          mkdir -m 700 "$receipt_root"
+          node acceptance/alpha-catalog/run.mjs \
+            --dsh-source-root "$GITHUB_WORKSPACE/.artifacts/official-dsh" \
+            --center-source-root "$GITHUB_WORKSPACE" \
+            --center-commit "$GITHUB_SHA" \
+            --catalog "$RUNNER_TEMP/official-alpha-wiki-lifecycle-input/plugins.json" \
+            --catalog-evidence "$RUNNER_TEMP/official-alpha-wiki-lifecycle-input/evidence.json" \
+            --tls-certificate "$RUNNER_TEMP/official-alpha-wiki-lifecycle-tls/server-cert.pem" \
+            --tls-private-key "$RUNNER_TEMP/official-alpha-wiki-lifecycle-tls/server-key.pem" \
+            --receipt "$receipt_root/receipt.json" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Verify the sole canonical secret-free receipt
+        run: |
+          receipt_root="$RUNNER_TEMP/official-alpha-wiki-lifecycle-receipt"
+          test -f "$receipt_root/receipt.json"
+          test ! -L "$receipt_root/receipt.json"
+          test "$(find "$receipt_root" -mindepth 1 | wc -l | tr -d ' ')" = 1
+          RECEIPT_PATH="$receipt_root/receipt.json" node --input-type=module <<'NODE'
+          import { readFile } from 'node:fs/promises'
+          import { canonicalJson } from './acceptance/full-p0/receipt-binding.mjs'
+          import { assertSecretFreeAlphaLifecycleReceipt } from './acceptance/alpha-catalog/support.mjs'
+          const bytes = await readFile(process.env.RECEIPT_PATH)
+          const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+          const receipt = JSON.parse(text)
+          assertSecretFreeAlphaLifecycleReceipt(receipt)
+          if (text !== `${canonicalJson(receipt)}\n`) throw new Error('receipt is not one canonical JSON line')
+          NODE
+      - name: Upload canonical lifecycle receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: official-alpha-wiki-lifecycle-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/official-alpha-wiki-lifecycle-receipt/receipt.json
+          if-no-files-found: error
+          include-hidden-files: false
+          compression-level: 0
+          retention-days: 7

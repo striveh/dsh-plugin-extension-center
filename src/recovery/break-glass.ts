@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { closeSync, constants, fsyncSync, openSync, writeFileSync } from 'node:fs'
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -37,7 +37,7 @@ const PROCESS_GROUP_QUIESCENCE_MS = 5_000
 const PROCESS_GROUP_POLL_MS = 10
 const SUPERVISOR_CHILD_OUTCOME_BYTES = 4_096
 const OFFICIAL_DSH_PACKAGE = '@deepseek-ai/dsh'
-const OFFICIAL_DSH_VERSION = '0.1.1-rc.2'
+const OFFICIAL_DSH_VERSION = '0.1.2-alpha.3'
 const PNPM_11_PACKAGE_MANAGER = /^pnpm@11\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/u
@@ -76,7 +76,7 @@ interface OfficialDshDependencyBinding {
 interface OfficialDshRecoveryBinding {
   readonly schemaVersion: 2
   readonly packageName: '@deepseek-ai/dsh'
-  readonly packageVersion: '0.1.1-rc.2'
+  readonly packageVersion: '0.1.2-alpha.3'
   readonly packageRoot: string
   readonly packageTreeSha256: string
   readonly productionDependencies: readonly OfficialDshDependencyBinding[]
@@ -700,6 +700,15 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
+function syncDirectorySync(path: string): void {
+  const descriptor = openSync(path, constants.O_RDONLY)
+  try {
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
 async function ensureRealDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 })
   const canonical = await realpath(path)
@@ -1231,7 +1240,7 @@ async function verifyOfficialDsh(binding: OfficialDshRecoveryBinding): Promise<v
     failure('official DSH recovery package manifest is invalid JSON')
   }
   if (!isRecord(manifest) || manifest.name !== OFFICIAL_DSH_PACKAGE || manifest.version !== OFFICIAL_DSH_VERSION
-    || !isRecord(manifest.bin) || typeof manifest.bin.dsh !== 'string') {
+    || !isRecord(manifest.bin) || manifest.bin.dsh !== 'lib/bin.js') {
     failure('official DSH recovery package identity changed')
   }
   const declared = await realpath(resolve(packageRoot, manifest.bin.dsh))
@@ -1645,6 +1654,22 @@ function executionDispatch(record: RecoveryExecutionRecord): RecoveryExecutionDi
   })
 }
 
+function writeExecutionDispatch(record: RecoveryExecutionDispatchRecord): void {
+  if (constants.O_NOFOLLOW === undefined) failure('official DSH recovery execution dispatch cannot exclude symlinks')
+  const descriptor = openSync(
+    record.path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  )
+  try {
+    writeFileSync(descriptor, `${canonicalJson(record.value)}\n`, 'utf8')
+    fsyncSync(descriptor)
+  } finally {
+    closeSync(descriptor)
+  }
+  syncDirectorySync(dirname(record.path))
+}
+
 async function clearExecutionRecord(
   record: Readonly<{ path: string; value: unknown }>,
   label: string,
@@ -1713,7 +1738,6 @@ async function runOfficialDsh(
     let exitObserved = false
     let dispatchSettled = false
     let executionWrite: Promise<void> = Promise.resolve()
-    let dispatchWrite: Promise<void> = Promise.resolve()
     let resolveDispatch!: () => void
     let rejectDispatch!: (cause: unknown) => void
     const dispatchPromise = new Promise<void>((accept, reject) => {
@@ -1791,12 +1815,13 @@ async function runOfficialDsh(
             }
             const candidate = executionDispatch(record)
             durableRecords.dispatch = candidate
-            dispatchWrite = writeExclusive(candidate.path, candidate.value).then(() => {
+            try {
+              writeExecutionDispatch(candidate)
               durableRecords.dispatchDurable = true
-              if (!closeObserved) resolveDispatch()
-            }, cause => {
+              resolveDispatch()
+            } catch (cause: unknown) {
               rejectDispatch(new Error('official DSH recovery supervisor start dispatch could not be recorded', { cause }))
-            })
+            }
           })
         } catch (cause: unknown) {
           rejectDispatch(new Error('official DSH recovery supervisor start dispatch failed', { cause }))
@@ -1835,7 +1860,6 @@ async function runOfficialDsh(
     }
     const supervisorOutcome = await closePromise
     await executionWrite
-    await dispatchWrite
     const pid = child.pid
     processGroupQuiescent = pid === undefined || await waitForProcessGroupQuiescence(pid)
     if (!processGroupQuiescent) {

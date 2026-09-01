@@ -25,7 +25,7 @@ export declare function installRecoveryExecutable(input: InstallRecoveryExecutab
 /**
  * Materialize the built package's standalone CLI and private toolchain below the durable root.
  * @param root Center-owned durable root outside official Profile files.
- * @param officialDsh Exact installed official rc.2 CLI and Harness home.
+ * @param officialDsh Exact official 0.1.2-alpha.3 startup entrypoint and Harness home.
  * @returns Exact executable binding embedded in every consumed operation.
  */
 export declare function installPackagedRecoveryExecutable(root: string, officialDsh: InstallRecoveryExecutableInput['officialDsh']): Promise<RecoveryExecutableBinding>;

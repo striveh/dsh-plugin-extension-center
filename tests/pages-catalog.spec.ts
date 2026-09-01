@@ -59,13 +59,22 @@ describe('GitHub Pages signed catalog projection', () => {
     })).rejects.toThrow('runtime download bound')
   })
 
-  it('binds the committed public document to the exact next signed bootstrap revision', async () => {
+  it('binds the committed public document to the packaged tip or its exact signed successor', async () => {
     const body = await readFile('catalog/public/plugins.json', 'utf8')
     const document = JSON.parse(body) as {
       envelope: typeof BOOTSTRAP_CATALOG_ENVELOPE
       signatures: typeof BOOTSTRAP_CATALOG_SIGNATURES
     }
     expect(body).toBe(`${canonicalJson(document)}\n`)
+    const packaged = {
+      envelope: BOOTSTRAP_CATALOG_ENVELOPE,
+      signatures: BOOTSTRAP_CATALOG_SIGNATURES,
+    }
+    if (document.envelope.revision === BOOTSTRAP_CATALOG_ENVELOPE.revision) {
+      expect(document).toEqual(packaged)
+      expect(canonicalSha256(document)).toBe(canonicalSha256(packaged))
+      return
+    }
     expect(document.envelope.revision).toBe(BOOTSTRAP_CATALOG_ENVELOPE.revision + 1)
     expect(document.envelope.previousRevisionDigest).toBe(canonicalSha256(BOOTSTRAP_CATALOG_ENVELOPE))
     expect(verifyCatalog(
@@ -128,55 +137,4 @@ describe('GitHub Pages signed catalog projection', () => {
     expect(await readFile('site/.gitignore', 'utf8')).toBe('plugins.json\n')
   })
 
-  it('requires exact previous post-publication evidence for every update release', async () => {
-    const workflowText = await readFile('.github/workflows/post-publication-evidence.yml', 'utf8')
-    const workflow = parse(workflowText)
-    expect(workflow.on.workflow_dispatch.inputs.previous_commit.default).toBe('')
-    expect(workflow.on.workflow_dispatch.inputs.previous_evidence_run_id.default).toBe('')
-    expect(workflow.permissions).toEqual({ actions: 'read', contents: 'read' })
-    expect(workflow.jobs['verify-publication'].if).toBe(
-      "github.ref == 'refs/heads/main' && github.ref_protected == true",
-    )
-    expect(workflow.jobs['verify-publication'].steps[0].with.ref).toBe('${{ github.sha }}')
-    expect(workflowText).not.toContain('ref: ${{ inputs.commit }}')
-    expect(workflowText).toContain('test "$(git rev-parse HEAD)" = "$VERIFIER_COMMIT"')
-    expect(workflowText).toContain('test "$GITHUB_REF_PROTECTED" = \'true\'')
-    expect(workflowText).toContain('git merge-base --is-ancestor "$EXPECTED_COMMIT" "$VERIFIER_COMMIT"')
-    expect(workflowText).toContain('--commit "$VERIFIER_COMMIT"')
-    expect(workflowText).toContain('--verifier-github-ci .artifacts/acceptance/github-ci/verifier.json')
-    expect(workflowText).toContain('--verifier-commit "$VERIFIER_COMMIT"')
-    expect(workflowText).toContain('--verifier-run-id "$VERIFIER_RUN_ID"')
-    expect(workflowText).toContain('--verifier-run-attempt "$VERIFIER_RUN_ATTEMPT"')
-    expect(workflowText).toContain('actions/runs/${PREVIOUS_EVIDENCE_RUN_ID}')
-    expect(workflowText).toContain('post-publication-evidence-${PREVIOUS_COMMIT}-${previous_attempt}')
-    expect(workflowText).toContain('--previous-release-ready "$PREVIOUS_RELEASE_READY"')
-    expect(workflowText).toContain('--previous-verifier-github-ci "$PREVIOUS_VERIFIER_GITHUB_CI"')
-    expect(workflowText).toContain('--previous-evidence-run-id "$PREVIOUS_EVIDENCE_RUN_ID"')
-    expect(workflowText).toContain("find .artifacts/previous-post-publication -type f -path '*/github-ci/verifier.json'")
-    expect(workflowText).toContain("find .artifacts/previous-post-publication -type f -path '*/github-ci/current.json'")
-    expect(workflowText).toContain('git merge-base --is-ancestor "$previous_head_sha" "$EXPECTED_COMMIT"')
-    expect(workflowText).toContain('.evidence.githubCi.sha256 == $target_sha')
-    expect(workflowText).toContain('cp "$previous_target" .artifacts/acceptance/github-ci/previous.json')
-    expect(workflowText).toContain('.verifier.commit == $verifier_commit')
-    expect(workflowText).toContain('.verifier.runId == $evidence_run_id')
-    expect(workflowText).toContain('.verifier.runAttempt == $evidence_run_attempt')
-    expect(workflowText).toContain('.verifier.refProtected == true')
-    expect(workflowText).toContain('.evidence.verifierGithubCi.sha256 == $verifier_sha')
-    expect(workflowText).toContain('.run.headSha == $commit')
-    expect(workflowText).toContain('.receiptDigest == $receipt_digest')
-    const pnpmBindingStep = workflow.jobs['verify-publication'].steps.find(
-      (step: { name?: string }) => step.name === 'Resolve immutable pnpm binding',
-    ) as { run?: string } | undefined
-    expect(pnpmBindingStep?.run?.split('\n')[0]).toBe(
-      'node scripts/resolve-pnpm-binding.mjs node_modules/pnpm/bin/pnpm.mjs > .artifacts/pnpm-binding.json',
-    )
-    expect(pnpmBindingStep?.run).not.toContain('command -v pnpm')
-    expect(workflowText).not.toMatch(/pnpm run test:[^\n]* --(?:[ \t]|$)/mu)
-    expect(workflowText).not.toContain('secrets.')
-    const actions = [...workflowText.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map(match => match[1])
-    expect(actions.every(action => /^[^@\s]+@[0-9a-f]{40}$/u.test(action!))).toBe(true)
-
-    const discoveryWorkflow = await readFile('.github/workflows/catalog-discovery.yml', 'utf8')
-    expect(discoveryWorkflow).not.toMatch(/pnpm run test:[^\n]* --(?:[ \t]|$)/mu)
-  })
 })

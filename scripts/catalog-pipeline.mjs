@@ -19,7 +19,16 @@ import {
 
 const COMMUNITY_URL = 'https://awesome-dsh-plugin.com/plugins.json'
 const MCP_REGISTRY_ORIGIN = 'https://registry.modelcontextprotocol.io'
-const GITHUB_SKILL_SEARCH_URL = 'https://api.github.com/search/repositories?q=topic%3Aagent-skill&sort=updated&order=desc&per_page=100&page=1'
+const GITHUB_SKILL_SEARCHES = Object.freeze([
+  Object.freeze({
+    sourceId: 'github-agent-skill-search',
+    url: 'https://api.github.com/search/repositories?q=topic%3Aagent-skill&sort=updated&order=desc&per_page=100&page=1',
+  }),
+  Object.freeze({
+    sourceId: 'github-agent-skills-search',
+    url: 'https://api.github.com/search/repositories?q=topic%3Aagent-skills&sort=updated&order=desc&per_page=100&page=1',
+  }),
+])
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 const MAX_INPUT_BYTES = 16 * 1024 * 1024
 const PACKAGE_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
@@ -200,8 +209,10 @@ async function discover(options) {
     if (typeof next !== 'string' || next.length > 1_024 || next.trim() !== next) fail('MCP Registry returned an invalid cursor')
     cursor = next
   }
-  const github = await responseJson(GITHUB_SKILL_SEARCH_URL)
-  sources.push(discoverGithubSkillRepositories(github, GITHUB_SKILL_SEARCH_URL, now))
+  for (const search of GITHUB_SKILL_SEARCHES) {
+    const github = await responseJson(search.url)
+    sources.push(discoverGithubSkillRepositories(github, search.url, now, search.sourceId))
+  }
   const report = Object.freeze({
     schemaVersion: 1,
     generatedAt: now,

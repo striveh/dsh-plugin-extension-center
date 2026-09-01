@@ -1,7 +1,7 @@
 /** Wire and catalog contracts shared by the Extension Center Host and Web Client. */
 /** Current private RPC protocol version. */
 export declare const EXTENSION_CENTER_PROTOCOL_VERSION: 1;
-/** Logical loopback-only Connection channel owned by this plugin. */
+/** Logical Connection-authenticated browser RPC channel owned by this plugin. */
 export declare const EXTENSION_CENTER_RPC_CHANNEL: "/dsh-extension-center";
 /** Supported extension kinds. */
 export type ExtensionKind = 'plugin' | 'mcp' | 'skill';
@@ -30,7 +30,7 @@ export interface CatalogSource {
 /** Compatibility evidence for the exact supported Host. */
 export interface CatalogCompatibility {
     readonly status: 'compatible' | 'review-required';
-    readonly dsh: '0.1.1-rc.2';
+    readonly dsh: '0.1.1-rc.2' | '0.1.2-alpha.3';
     readonly platforms: readonly ('darwin' | 'linux' | 'windows')[];
     readonly detail: LocalizedText;
 }

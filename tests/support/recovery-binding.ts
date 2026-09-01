@@ -45,7 +45,7 @@ export const TEST_RECOVERY_EXECUTABLE_BINDING: RecoveryExecutableBinding = Objec
   officialDsh: Object.freeze({
     schemaVersion: 2,
     packageName: '@deepseek-ai/dsh',
-    packageVersion: '0.1.1-rc.2',
+    packageVersion: '0.1.2-alpha.3',
     packageRoot: centerRoot,
     packageTreeSha256: digest(executablePath),
     productionDependencies: Object.freeze([]),

@@ -179,12 +179,12 @@ export class CenterMcpConnectionIdempotencyError extends Error {
   }
 }
 
-/** Official rc.2 cannot enforce the Center's no-redirect HTTP admission rule. */
+/** The official MCP Client does not expose a redirect-forbidden HTTP policy. */
 export class CenterMcpHttpUnsupportedError extends Error {
   readonly code = 'MCP_HTTP_REDIRECT_GUARD_UNAVAILABLE'
 
   constructor() {
-    super('Streamable HTTP MCP is unavailable because official DSH rc.2 cannot enforce the required redirect-forbidden policy')
+    super('Streamable HTTP MCP is unavailable because the official MCP Client cannot enforce the required redirect-forbidden policy')
     this.name = 'CenterMcpHttpUnsupportedError'
   }
 }

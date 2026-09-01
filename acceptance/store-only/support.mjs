@@ -3,17 +3,17 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from 'node:fs/promises'
 import { join, relative, resolve, sep } from 'node:path'
 
-/** Exact published, unmodified Host package used by the Store UI acceptance. */
-export const TARGET_DSH_VERSION = '0.1.1-rc.2'
+/** Exact latest tagged, unmodified Host package used by compatibility acceptance. */
+export const TARGET_DSH_VERSION = '0.1.2-alpha.3'
 
 /** Registry integrity of the exact published Host package admitted by both packed lanes. */
-export const TARGET_DSH_REGISTRY_INTEGRITY = 'sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg=='
+export const TARGET_DSH_REGISTRY_INTEGRITY = 'sha512-VvATzYmQ4LMJREJ9e2POKksSHRfqP3y9pghplLBaQBuw2BqfbC0mQUVsaPwxe4wlcpj+riEgn8OJB01YnpF+3A=='
 
 /** Registry used to resolve the independently installed official Host. */
 export const OFFICIAL_NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 /** Source commit from which the exact published Host contract was audited. */
-export const TARGET_DSH_COMMIT = 'b150a551b8d465e31e418e1b2eaf5e79bbb7d28e'
+export const TARGET_DSH_COMMIT = 'dd6322d604e00eec1ba5e0c8541159906a21094a'
 
 /** Stable failure when the packed Client does not expose the Store entry. */
 export const STORE_UI_SURFACE_MISSING = 'STORE-UI-SURFACE-MISSING'
@@ -172,6 +172,74 @@ export function isAdmittedBrowserWebSocket(requestUrl, webOrigin) {
   return new URL(requestUrl).origin === expected.origin
 }
 
+/** Return whether one initial combo-script request contains the exact client bundle. */
+export function comboUrlContainsClientBundle(requestUrl, packageName) {
+  const url = new URL(requestUrl)
+  if (url.pathname !== '/plugins/' || !url.search.startsWith('??')) return false
+  const resources = url.search.slice(2).split('&', 1)[0]?.split(',') ?? []
+  return resources.includes(`${packageName}/client.js`)
+}
+
+/**
+ * Parse the only browser-to-Host WebSocket messages admitted during read-only Store acceptance.
+ * @param {string | Buffer} payload Playwright frame payload.
+ * @returns {{type: 'open', streamId: string, endpoint: string} | {type: 'cancel', streamId: string} | null} Exact official Connection frame, or null.
+ */
+export function parseAdmittedConnectionFrame(payload) {
+  if (typeof payload !== 'string') return null
+  let value
+  try {
+    value = JSON.parse(payload)
+  } catch {
+    return null
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const keys = Object.keys(value).sort()
+  if (value.type === 'cancel'
+    && keys.length === 2
+    && keys[0] === 'streamId'
+    && keys[1] === 'type'
+    && typeof value.streamId === 'string'
+    && value.streamId.length > 0) {
+    return { type: 'cancel', streamId: value.streamId }
+  }
+  if (value.type !== 'open'
+    || keys.length !== 4
+    || keys[0] !== 'endpoint'
+    || keys[1] !== 'payload'
+    || keys[2] !== 'streamId'
+    || keys[3] !== 'type'
+    || typeof value.streamId !== 'string'
+    || value.streamId.length === 0
+    || !['$events', 'workspace/follow', 'session/control'].includes(value.endpoint)
+    || typeof value.payload !== 'object'
+    || value.payload === null
+    || Array.isArray(value.payload)
+    || Object.keys(value.payload).length !== 1
+    || typeof value.payload.args !== 'object'
+    || value.payload.args === null
+    || Array.isArray(value.payload.args)
+    || Object.keys(value.payload.args).length !== 0) {
+    return null
+  }
+  return { type: 'open', streamId: value.streamId, endpoint: value.endpoint }
+}
+
+/** Describe only the closed wire category of a rejected frame without retaining ids or payload data. */
+export function describeUnadmittedConnectionFrame(payload) {
+  if (typeof payload !== 'string') return 'binary-frame'
+  let value
+  try {
+    value = JSON.parse(payload)
+  } catch {
+    return 'non-json-text-frame'
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'non-object-json-frame'
+  if (value.type === 'open') return value.endpoint === '$events' ? 'invalid-events-open-frame' : 'other-stream-open-frame'
+  if (value.type === 'cancel') return 'invalid-or-unowned-cancel-frame'
+  return 'unknown-json-frame'
+}
+
 /**
  * Reduce a network target to a value-free destination for persisted evidence.
  * @param {string} target URL or CONNECT authority.
@@ -226,6 +294,67 @@ export function parseReadyUrl(output) {
 }
 
 /**
+ * Parse the one-time authenticated launch URL announced by current official DSH Web.
+ * @param {string} output Combined DSH stdout and stderr.
+ * @returns {string} Exact in-memory launch URL, including its one-time token.
+ */
+export function parseAuthenticatedLaunchUrl(output) {
+  const match = /dsh web: (http:\/\/[^\s]+)/u.exec(output)
+  if (match?.[1] === undefined) {
+    throw new AcceptanceFailure(
+      'STORE-UI-HOST-AUTH-URL',
+      'official Web Host did not announce its authenticated launch URL',
+    )
+  }
+  const url = new URL(match[1])
+  const tokens = url.searchParams.getAll('token')
+  if (url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || url.port === ''
+    || url.pathname !== '/'
+    || url.username !== ''
+    || url.password !== ''
+    || url.hash !== ''
+    || [...url.searchParams.keys()].some(name => name !== 'token')
+    || tokens.length !== 1
+    || !/^[A-Za-z0-9_-]{43}$/u.test(tokens[0])) {
+    throw new AcceptanceFailure(
+      'STORE-UI-HOST-AUTH-URL',
+      'official Web Host announced an invalid authenticated loopback launch URL',
+    )
+  }
+  return url.href
+}
+
+/**
+ * Derive every independent post-remove absence check from persisted CLI and Profile state.
+ * @param {{manifest: object, packageName: string, packagePresent: boolean, listStdout: string, dumpStdout: string, dumpStderr: string}} input Observed post-remove state.
+ * @returns {{profileDependencyAbsent: boolean, profileBundleAbsent: boolean, profilePackageAbsent: boolean, pluginListAbsent: boolean, bundleLayerAbsent: boolean, dumpHasNoPatchResidue: boolean}} Closed evidence fields.
+ */
+export function removedProfileEvidence(input) {
+  const manifest = input.manifest
+  return Object.freeze({
+    profileDependencyAbsent: manifest.dependencies?.[input.packageName] === undefined,
+    profileBundleAbsent: !manifest.dsh?.profile?.bundles?.includes(input.packageName),
+    profilePackageAbsent: !input.packagePresent,
+    pluginListAbsent: !input.listStdout.includes(input.packageName),
+    bundleLayerAbsent: !input.dumpStdout.includes(`# == ${input.packageName}`)
+      && !input.dumpStdout.includes(`name: ${input.packageName}`)
+      && !input.dumpStdout.includes(`name: '${input.packageName}'`),
+    dumpHasNoPatchResidue: !input.dumpStderr.includes(input.packageName)
+      && !input.dumpStderr.includes('patch: entry'),
+  })
+}
+
+/** Return the first retained post-remove state, or null when all independent checks pass. */
+export function removedProfileEvidenceError(evidence) {
+  for (const [field, absent] of Object.entries(evidence)) {
+    if (absent !== true) return `official Plugin CLI did not prove ${field}`
+  }
+  return null
+}
+
+/**
  * Run a bounded subprocess and retain both output streams.
  * @param {string} command Executable path.
  * @param {string[]} args Exact argv.
@@ -256,9 +385,9 @@ export function runChecked(command, args, options) {
     }
     const timeoutTimer = setTimeout(() => {
       timedOut = true
-      signalChildTree(child, 'SIGTERM')
+      signalChildTree(child, 'SIGTERM', true)
       forceTimer = setTimeout(() => {
-        signalChildTree(child, 'SIGKILL')
+        signalChildTree(child, 'SIGKILL', true)
         rejectTimer = setTimeout(() => {
           child.stdout.destroy()
           child.stderr.destroy()
@@ -285,14 +414,14 @@ export function runChecked(command, args, options) {
   })
 }
 
-/** Signal the exact spawned process group on POSIX, or the child on Windows. */
-function signalChildTree(child, signal) {
-  if (process.platform !== 'win32' && child.pid !== undefined) {
+/** Signal an explicitly owned spawned process group on POSIX, or only the direct child. */
+function signalChildTree(child, signal, ownsProcessGroup) {
+  if (ownsProcessGroup && process.platform !== 'win32' && child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal)
       return
     } catch (error) {
-      if (error?.code === 'ESRCH') return
+      if (error?.code !== 'ESRCH') throw error
     }
   }
   child.kill(signal)
@@ -349,23 +478,86 @@ export function waitForReadyUrl(child, output, timeoutMs = 90_000) {
 /**
  * Stop a child process and wait for its close event.
  * @param {import('node:child_process').ChildProcess | undefined} child Process to stop.
- * @returns {Promise<void>} Completion after graceful or forced termination.
+ * @param {{requireRunning?: boolean, requireGraceful?: boolean, ownsProcessGroup?: boolean, gracefulTimeoutMs?: number, killTimeoutMs?: number}} [options] Passing-lane shutdown requirements; ownsProcessGroup is valid only for a detached POSIX spawn.
+ * @returns {Promise<{wasRunning: boolean, forced: boolean, closeObserved: boolean, processGroupStopped: boolean | null, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence; process-group state is unavailable on Windows.
  */
-export async function stopChild(child) {
-  if (child === undefined || child.exitCode !== null || child.signalCode !== null) return
-  const gracefulClose = waitForChildClose(child, 8_000)
-  child.kill('SIGTERM')
-  if (await gracefulClose) return
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const forcedClose = waitForChildClose(child, 2_000)
-  child.kill('SIGKILL')
-  if (await forcedClose || child.exitCode !== null || child.signalCode !== null) return
-  throw new Error('spawned DSH Web process did not terminate after SIGKILL')
+export async function stopChild(child, options = {}) {
+  const ownsProcessGroup = options.ownsProcessGroup === true && process.platform !== 'win32'
+  if (child === undefined) {
+    if (options.requireRunning === true) throw new Error('spawned DSH Web process was absent before shutdown')
+    return { wasRunning: false, forced: false, closeObserved: false, processGroupStopped: null, exitCode: null, signalCode: null }
+  }
+  if (child.exitCode !== null || child.signalCode !== null) {
+    const closeObserved = childCloseAlreadyObserved(child)
+    const processGroupStopped = childProcessGroupStopped(child, ownsProcessGroup)
+    let forcedEvidence = { closeObserved, processGroupStopped }
+    if (!closeObserved || processGroupStopped === false) {
+      forcedEvidence = await forceChildTreeClose(child, ownsProcessGroup, options.killTimeoutMs ?? 2_000)
+    }
+    if (options.requireRunning === true) throw new Error('spawned DSH Web process exited before runner-owned shutdown')
+    return {
+      wasRunning: false,
+      forced: !closeObserved || processGroupStopped === false,
+      ...forcedEvidence,
+      exitCode: child.exitCode,
+      signalCode: child.signalCode,
+    }
+  }
+  if (ownsProcessGroup && childProcessGroupStopped(child, true) === true) {
+    throw new Error('spawned DSH Web process did not own the declared POSIX process group')
+  }
+  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 8_000
+  const gracefulClose = waitForChildClose(child, gracefulTimeoutMs)
+  const gracefulProcessGroup = waitForChildProcessGroupStop(child, ownsProcessGroup, gracefulTimeoutMs)
+  signalChildTree(child, 'SIGTERM', ownsProcessGroup)
+  const [closeObserved, processGroupStopped] = await Promise.all([gracefulClose, gracefulProcessGroup])
+  if (closeObserved && processGroupStopped !== false) {
+    const result = {
+      wasRunning: true,
+      forced: false,
+      closeObserved: true,
+      processGroupStopped,
+      exitCode: child.exitCode,
+      signalCode: child.signalCode,
+    }
+    if (options.requireGraceful === true && (result.exitCode !== 0 || result.signalCode !== null)) {
+      throw new Error(`spawned DSH Web process did not close gracefully (${result.signalCode ?? String(result.exitCode)})`)
+    }
+    return result
+  }
+  const forcedEvidence = await forceChildTreeClose(child, ownsProcessGroup, options.killTimeoutMs ?? 2_000)
+  if (options.requireGraceful === true) throw new Error('spawned DSH Web process required SIGKILL during runner-owned shutdown')
+  return {
+    wasRunning: true,
+    forced: true,
+    ...forcedEvidence,
+    exitCode: child.exitCode,
+    signalCode: child.signalCode,
+  }
 }
 
-/** Wait a bounded interval for a child close event without losing an already terminal state. */
+/** Return whether the direct child and each owned stdio stream have reached terminal state. */
+function childCloseAlreadyObserved(child) {
+  return (child.exitCode !== null || child.signalCode !== null)
+    && child.stdio.every(stream => stream === null || stream.closed === true)
+}
+
+/** Return POSIX process-group quiescence, or null where the platform cannot observe it. */
+function childProcessGroupStopped(child, ownsProcessGroup) {
+  if (!ownsProcessGroup || process.platform === 'win32' || child.pid === undefined) return null
+  try {
+    process.kill(-child.pid, 0)
+    return false
+  } catch (error) {
+    if (error?.code === 'ESRCH') return true
+    if (error?.code === 'EPERM') return false
+    throw error
+  }
+}
+
+/** Wait a bounded interval for the child and its inherited stdio handles to close. */
 function waitForChildClose(child, timeoutMs) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  if (childCloseAlreadyObserved(child)) return Promise.resolve(true)
   return new Promise(resolveClose => {
     const onClose = () => {
       clearTimeout(timer)
@@ -379,6 +571,93 @@ function waitForChildClose(child, timeoutMs) {
   })
 }
 
+/** Wait until the exact POSIX process group is absent, or return null on Windows. */
+async function waitForChildProcessGroupStop(child, ownsProcessGroup, timeoutMs) {
+  if (!ownsProcessGroup || process.platform === 'win32' || child.pid === undefined) return null
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const stopped = childProcessGroupStopped(child, true)
+    if (stopped !== false) return stopped
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return false
+    await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(10, remaining)))
+  }
+}
+
+/** Force the spawned process group down and require both direct close and group quiescence. */
+async function forceChildTreeClose(child, ownsProcessGroup, timeoutMs) {
+  const forcedClose = waitForChildClose(child, timeoutMs)
+  const forcedProcessGroup = waitForChildProcessGroupStop(child, ownsProcessGroup, timeoutMs)
+  signalChildTree(child, 'SIGKILL', ownsProcessGroup)
+  const [closeObserved, processGroupStopped] = await Promise.all([forcedClose, forcedProcessGroup])
+  if (!closeObserved) throw new Error('spawned DSH Web process did not close after SIGKILL')
+  if (processGroupStopped === false) throw new Error('spawned DSH Web process group remained live after SIGKILL')
+  return { closeObserved: true, processGroupStopped }
+}
+
+/**
+ * Read the committed source and acceptance-program identity used by one compatibility run.
+ * @param {{projectRoot: string, runnerPath: string, environment: NodeJS.ProcessEnv}} input Repository and runner coordinates.
+ * @returns {Promise<{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}>} Immutable source binding.
+ */
+export async function readSourceBinding({ projectRoot, runnerPath, environment }) {
+  const [commitResult, treeResult, statusResult, runnerBytes, supportBytes, journeyEvidenceBytes, lockfileBytes] = await Promise.all([
+    runChecked('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['rev-parse', '--verify', 'HEAD^{tree}'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    readFile(runnerPath),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'support.mjs')),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'journey-evidence.mjs')),
+    readFile(join(projectRoot, 'pnpm-lock.yaml')),
+  ])
+  const commit = commitResult.stdout.trim()
+  const tree = treeResult.stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'repository HEAD was not one exact commit')
+  }
+  if (!/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-TREE', 'repository HEAD tree was not one exact Git tree')
+  }
+  return Object.freeze({
+    commit,
+    tree,
+    clean: statusResult.stdout.length === 0,
+    runnerSha256: createHash('sha256').update(runnerBytes).digest('hex'),
+    supportSha256: createHash('sha256').update(supportBytes).digest('hex'),
+    journeyEvidenceSha256: createHash('sha256').update(journeyEvidenceBytes).digest('hex'),
+    lockfileSha256: createHash('sha256').update(lockfileBytes).digest('hex'),
+  })
+}
+
+/**
+ * Reject any source or acceptance-program drift across the complete Store journey.
+ * @param {{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}} before Binding captured before packing.
+ * @param {{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}} after Binding captured after teardown.
+ */
+export function assertSourceBindingClosed(before, after) {
+  const fields = ['commit', 'tree', 'runnerSha256', 'supportSha256', 'journeyEvidenceSha256', 'lockfileSha256']
+  const changed = fields.filter(field => before[field] !== after[field])
+  if (!after.clean || changed.length > 0) {
+    const detail = [
+      ...(!after.clean ? ['worktree'] : []),
+      ...changed,
+    ].join(', ')
+    throw new AcceptanceFailure('STORE-UI-SOURCE-DRIFT', `repository source changed during acceptance: ${detail}`)
+  }
+}
+
 function isInside(root, path) {
   const offset = relative(root, path)
   return offset === '' || offset !== '..' && !offset.startsWith(`..${sep}`)
@@ -387,20 +666,21 @@ function isInside(root, path) {
 async function hashImmutableTree(root, path, hash) {
   const info = await lstat(path)
   const name = relative(root, path).replaceAll('\\', '/') || '.'
+  const mode = (info.mode & 0o7777).toString(8)
   if (info.isSymbolicLink()) {
-    hash.update(`link:${name}:${await readlink(path)}\0`)
+    hash.update(`link:${name}:${mode}:${await readlink(path)}\0`)
     return
   }
   if (info.isFile()) {
-    hash.update(`file:${name}:${String(info.size)}\0`)
+    hash.update(`file:${name}:${mode}:${String(info.size)}\0`)
     hash.update(await readFile(path))
     return
   }
   if (!info.isDirectory()) {
-    hash.update(`other:${name}\0`)
+    hash.update(`other:${name}:${mode}\0`)
     return
   }
-  hash.update(`dir:${name}\0`)
+  hash.update(`dir:${name}:${mode}\0`)
   const entries = (await readdir(path, { withFileTypes: true }))
     .sort((left, right) => left.name.localeCompare(right.name))
   for (const entry of entries) await hashImmutableTree(root, join(path, entry.name), hash)

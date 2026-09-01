@@ -7,6 +7,7 @@ import type { ImmutablePlan } from '../src/plans/index.ts'
 import { CAPABILITY_RESOLVER_CANDIDATES } from '../src/resolver-candidates.ts'
 import { IntentPlanService, resolveDesiredState } from '../src/service/intent-plan-service.ts'
 import type { RpcJson } from '../src/service/rpc-contract.ts'
+import { alphaPolicyCatalogFixture } from './support/alpha-catalog.ts'
 
 function version(enabled: boolean): ManagedVersion {
   return {
@@ -63,7 +64,7 @@ describe('intent plan desired state', () => {
   })
 
   it('rejects an install targetKey that is not the exact candidate identity before managed-state access', async () => {
-    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const catalog = alphaPolicyCatalogFixture()
     const entry = catalog.envelope.entries.find(candidate => candidate.kind === 'plugin')!
     let managedReads = 0
     let planWrites = 0
@@ -104,7 +105,7 @@ describe('intent plan desired state', () => {
       continuationId: null,
       targetKey: 'plugin:web:profile:web:another-plugin',
       configuration: {},
-    }, 'loopback-browser', 1_000)).rejects.toThrow('targetKey does not bind')
+    }, 'authenticated-browser-session', 1_000)).rejects.toThrow('targetKey does not bind')
     expect(managedReads).toBe(0)
     expect(planWrites).toBe(0)
   })
@@ -330,7 +331,7 @@ describe('intent plan desired state', () => {
   })
 
   it('plans Plugin configure as an exact same-Host Loader replacement and rejects restart or activation drift', async () => {
-    const catalog = verifyBootstrapCatalog(Date.parse(BOOTSTRAP_CATALOG_ENVELOPE.issuedAt) + 1_000)
+    const catalog = alphaPolicyCatalogFixture()
     const rollover = {
       ...catalog,
       envelope: { ...catalog.envelope, revision: catalog.envelope.revision + 1, entries: [] },
@@ -455,7 +456,7 @@ describe('intent plan desired state', () => {
       continuationId: null,
       targetKey,
       configuration,
-    }, 'loopback-browser', 1_000)
+    }, 'authenticated-browser-session', 1_000)
     expect(preview.plan.content.restartRequired).toBe(false)
     expect(preview.plan.content.reviewEvidence).toMatchObject({
       kind: 'plugin',

@@ -1,7 +1,7 @@
 import type { OfficialDshRecoveryBinding } from '../../plans/types.ts';
 import { type ProfileMetadataCacheBinding } from '../../recovery/profile-metadata-cache.ts';
 import type { ManagedPluginCli } from './types.ts';
-/** Official rc.2 Plugin CLI adapter bound to one private, hash-pinned execution toolchain. */
+/** Official Plugin CLI adapter bound to one private, hash-pinned execution toolchain. */
 export declare class OfficialDshPluginCli implements ManagedPluginCli {
     private readonly binding;
     constructor(binding: OfficialDshRecoveryBinding);

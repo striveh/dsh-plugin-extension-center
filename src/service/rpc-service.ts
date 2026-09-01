@@ -251,7 +251,10 @@ function currentCapabilities(input: HostRpcServices): HostCapabilityProjection {
   return input.capabilities ?? hostCapabilities(input.owners)
 }
 
-/** Create the strict loopback-only management handler; carrier authority is not accepted from payloads. */
+/**
+ * Create the strict authenticated management handler. Connection applies request trust and
+ * browser-session authentication before dispatch; payloads cannot claim carrier authority.
+ */
 export function createHostRpcHandler(source: HostRpcServicesSource): ConnectionRpcHandler {
   return async (endpoint, payload, outerSignal) => {
     const input = typeof source === 'function' ? source() : source
@@ -295,7 +298,10 @@ export function createHostRpcHandler(source: HostRpcServicesSource): ConnectionR
           } }
         }
         case 'intent/preview':
-          return { ok: true, value: await input.intentPlans.preview(previewRequest(payload), 'loopback-browser') }
+          return {
+            ok: true,
+            value: await input.intentPlans.preview(previewRequest(payload), 'authenticated-browser-session'),
+          }
         case 'plan/get': {
           const state = await input.plans.load(planGet(payload) as `sha256:${string}`) ?? null
           return { ok: true, value: { protocolVersion: HOST_RPC_PROTOCOL_VERSION, state } }

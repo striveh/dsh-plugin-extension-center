@@ -1,0 +1,125 @@
+name: Prepare official-alpha catalog admission
+
+on:
+  workflow_dispatch:
+    inputs:
+      lifecycle_run_id:
+        description: Successful official-alpha Wiki Skill lifecycle workflow run id
+        required: true
+        type: string
+      lifecycle_run_attempt:
+        description: Exact successful lifecycle workflow run attempt
+        required: true
+        type: string
+      lifecycle_receipt_sha256:
+        description: Canonical sha256 digest of the downloaded lifecycle receipt file
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: catalog-alpha-admission
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Verify evidence and sign exact r11 to r12 proposal
+    if: >-
+      github.repository == 'striveh/dsh-plugin-extension-center'
+      && github.ref == 'refs/heads/main'
+      && github.ref_protected == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: catalog-release
+    steps:
+      - name: Check out protected main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Validate dispatch coordinates
+        env:
+          LIFECYCLE_RUN_ID: ${{ inputs.lifecycle_run_id }}
+          LIFECYCLE_RUN_ATTEMPT: ${{ inputs.lifecycle_run_attempt }}
+          LIFECYCLE_RECEIPT_SHA256: ${{ inputs.lifecycle_receipt_sha256 }}
+        run: |
+          case "$LIFECYCLE_RUN_ID" in *[!0-9]*|'') exit 1 ;; esac
+          case "$LIFECYCLE_RUN_ATTEMPT" in *[!0-9]*|'') exit 1 ;; esac
+          case "$LIFECYCLE_RECEIPT_SHA256" in sha256:[0-9a-f][0-9a-f]*) ;; *) exit 1 ;; esac
+          test "${#LIFECYCLE_RECEIPT_SHA256}" = 71
+      - name: Download exact lifecycle evidence artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: official-alpha-wiki-lifecycle-${{ inputs.lifecycle_run_id }}-attempt-${{ inputs.lifecycle_run_attempt }}
+          path: .artifacts/catalog-alpha-admission/lifecycle
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.lifecycle_run_id }}
+      - name: Verify exact lifecycle receipt file
+        env:
+          LIFECYCLE_RECEIPT_SHA256: ${{ inputs.lifecycle_receipt_sha256 }}
+        run: |
+          test -f .artifacts/catalog-alpha-admission/lifecycle/receipt.json
+          test ! -L .artifacts/catalog-alpha-admission/lifecycle/receipt.json
+          test "$(find .artifacts/catalog-alpha-admission/lifecycle -mindepth 1 | wc -l | tr -d ' ')" = 1
+          test "sha256:$(sha256sum .artifacts/catalog-alpha-admission/lifecycle/receipt.json | cut -d ' ' -f 1)" = "$LIFECYCLE_RECEIPT_SHA256"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build admission verifier without signing material
+        run: pnpm run build
+      - name: Prepare signed entry-changing proposal
+        env:
+          CATALOG_SIGNING_PRIVATE_KEY: ${{ secrets.CATALOG_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CENTER_SOURCE_COMMIT: ${{ github.sha }}
+          LIFECYCLE_RECEIPT_SHA256: ${{ inputs.lifecycle_receipt_sha256 }}
+        run: |
+          umask 077
+          signing_key="$(mktemp "$RUNNER_TEMP/dsh-extension-center-alpha-catalog-key.XXXXXX")"
+          trap 'rm -f "$signing_key"' EXIT
+          printf '%s' "$CATALOG_SIGNING_PRIVATE_KEY" > "$signing_key"
+          unset CATALOG_SIGNING_PRIVATE_KEY
+          node scripts/prepare-alpha-catalog-admission.mjs admit \
+            --previous catalog/public/plugins.json \
+            --center-source-commit "$CENTER_SOURCE_COMMIT" \
+            --lifecycle-receipt .artifacts/catalog-alpha-admission/lifecycle/receipt.json \
+            --lifecycle-receipt-sha256 "$LIFECYCLE_RECEIPT_SHA256" \
+            --private-key "$signing_key" \
+            --out .artifacts/catalog-alpha-admission/plugins.json \
+            --evidence-out .artifacts/catalog-alpha-admission/evidence.json
+      - name: Verify exact proposal coordinates
+        run: |
+          test "$(jq -er '.envelope.revision' .artifacts/catalog-alpha-admission/plugins.json)" = 12
+          test "$(jq -er '.envelope.previousRevisionDigest' .artifacts/catalog-alpha-admission/plugins.json)" = sha256:0ef63a409773a3604b80f04bdf8b577b7706306e0e77c954719620b4b71e2466
+          test "$(jq -er '.envelope.entries | length' .artifacts/catalog-alpha-admission/plugins.json)" = 2
+          test "$(jq -er '[.envelope.entries[].compatibility.dsh] | unique == ["0.1.2-alpha.3"]' .artifacts/catalog-alpha-admission/plugins.json)" = true
+          test "$(jq -er '.kind' .artifacts/catalog-alpha-admission/evidence.json)" = official-dsh-alpha-entry-changing-catalog-admission
+          test "$(jq -er '.status' .artifacts/catalog-alpha-admission/evidence.json)" = prepared-for-review
+          test "$(jq -er '.notProven == ["public-github-artifact-installation", "public-catalog-deployment"]' .artifacts/catalog-alpha-admission/evidence.json)" = true
+          sha256sum \
+            .artifacts/catalog-alpha-admission/plugins.json \
+            .artifacts/catalog-alpha-admission/evidence.json \
+            > .artifacts/catalog-alpha-admission/SHA256SUMS
+      - name: Upload signed proposal for pull-request review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: official-alpha-catalog-r12-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            .artifacts/catalog-alpha-admission/plugins.json
+            .artifacts/catalog-alpha-admission/evidence.json
+            .artifacts/catalog-alpha-admission/SHA256SUMS
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 7
