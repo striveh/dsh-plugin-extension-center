@@ -282,37 +282,57 @@ test('subprocess timeouts and child teardown are bounded', async () => {
   )
 
   const running = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-  await once(running, 'spawn')
-  await stopChild(running)
-  assert.notEqual(running.signalCode ?? running.exitCode, null)
+  try {
+    await once(running, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await stopChild(running)
+    assert.notEqual(running.signalCode ?? running.exitCode, null)
+  } finally {
+    await cleanupSpawnedChild(running, false)
+  }
 
   const exited = spawn(process.execPath, ['-e', 'process.kill(process.pid, "SIGTERM")'], { stdio: 'ignore' })
-  await once(exited, 'close')
-  await stopChild(exited)
-  assert.notEqual(exited.signalCode ?? exited.exitCode, null)
+  try {
+    await once(exited, 'close', { signal: AbortSignal.timeout(2_000) })
+    await stopChild(exited)
+    assert.notEqual(exited.signalCode ?? exited.exitCode, null)
+  } finally {
+    await cleanupSpawnedChild(exited, false)
+  }
 
   const graceful = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => process.exit(0)); process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
     detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'ignore'],
   })
-  await once(graceful, 'spawn')
-  await once(graceful.stdout, 'data')
-  const gracefulResult = await stopChild(graceful, { requireRunning: true, requireGraceful: true })
-  assert.deepEqual(gracefulResult, {
-    wasRunning: true,
-    forced: false,
-    closeObserved: true,
-    processGroupStopped: process.platform === 'win32' ? null : true,
-    exitCode: 0,
-    signalCode: null,
-  })
+  try {
+    await once(graceful, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await once(graceful.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    const gracefulResult = await stopChild(graceful, {
+      requireRunning: true,
+      requireGraceful: true,
+      ownsProcessGroup: true,
+    })
+    assert.deepEqual(gracefulResult, {
+      wasRunning: true,
+      forced: false,
+      closeObserved: true,
+      processGroupStopped: process.platform === 'win32' ? null : true,
+      exitCode: 0,
+      signalCode: null,
+    })
+  } finally {
+    await cleanupSpawnedChild(graceful, process.platform !== 'win32')
+  }
 
   const crashed = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' })
-  await once(crashed, 'close')
-  await assert.rejects(
-    stopChild(crashed, { requireRunning: true, requireGraceful: true }),
-    /exited before runner-owned shutdown/u,
-  )
+  try {
+    await once(crashed, 'close', { signal: AbortSignal.timeout(2_000) })
+    await assert.rejects(
+      stopChild(crashed, { requireRunning: true, requireGraceful: true }),
+      /exited before runner-owned shutdown/u,
+    )
+  } finally {
+    await cleanupSpawnedChild(crashed, false)
+  }
 })
 
 test('strict child teardown kills a descendant that retains inherited stdout', {
@@ -337,6 +357,7 @@ test('strict child teardown kills a descendant that retains inherited stdout', {
       stopChild(parent, {
         requireRunning: true,
         requireGraceful: true,
+        ownsProcessGroup: true,
         gracefulTimeoutMs: 50,
         killTimeoutMs: 1_000,
       }),
@@ -345,11 +366,30 @@ test('strict child teardown kills a descendant that retains inherited stdout', {
     assert.equal(parent.stdout.closed, true)
     assertProcessGroupAbsent(parent.pid)
   } finally {
-    await cleanupDetachedChild(parent)
+    await cleanupSpawnedChild(parent, true)
   }
 })
 
-test('strict child teardown rejects a closed parent while its process group remains live', {
+test('declared POSIX process-group ownership requires a detached group leader', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  try {
+    await once(child, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    await assert.rejects(
+      stopChild(child, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+      }),
+      /did not own the declared POSIX process group/u,
+    )
+  } finally {
+    await cleanupSpawnedChild(child, false)
+  }
+})
+
+test('strict child teardown rejects when the direct parent closes but its process group remains live', {
   skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
 }, async () => {
   const descendantCode = 'process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000)'
@@ -372,6 +412,7 @@ test('strict child teardown rejects a closed parent while its process group rema
       stopChild(parent, {
         requireRunning: true,
         requireGraceful: true,
+        ownsProcessGroup: true,
         gracefulTimeoutMs: 50,
         killTimeoutMs: 1_000,
       }),
@@ -380,7 +421,43 @@ test('strict child teardown rejects a closed parent while its process group rema
     assert.equal(parent.stdout.closed, true)
     assertProcessGroupAbsent(parent.pid)
   } finally {
-    await cleanupDetachedChild(parent)
+    await cleanupSpawnedChild(parent, true)
+  }
+})
+
+test('strict child teardown cleans a live process group after the direct parent already closed', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })`,
+    'descendant.once("message", () => { process.stdout.write("descendant-ready\\n"); setImmediate(() => process.exit(0)) })',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const close = once(parent, 'close', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
+    await close
+    assert.doesNotThrow(() => process.kill(-parent.pid, 0))
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        ownsProcessGroup: true,
+        killTimeoutMs: 1_000,
+      }),
+      /exited before runner-owned shutdown/u,
+    )
+    assertProcessGroupAbsent(parent.pid)
+  } finally {
+    await cleanupSpawnedChild(parent, true)
   }
 })
 
@@ -440,20 +517,25 @@ function assertProcessGroupAbsent(pid) {
   )
 }
 
-async function cleanupDetachedChild(child) {
+async function cleanupSpawnedChild(child, ownsProcessGroup) {
   if (child.pid === undefined) return
   const closeAlreadyObserved = (child.exitCode !== null || child.signalCode !== null)
     && child.stdio.every(stream => stream === null || stream.closed === true)
   const close = closeAlreadyObserved
     ? Promise.resolve()
     : once(child, 'close', { signal: AbortSignal.timeout(2_000) }).then(() => {})
-  try {
-    process.kill(-child.pid, 'SIGKILL')
-  } catch (error) {
-    if (error?.code !== 'ESRCH') throw error
+  if (ownsProcessGroup && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+      child.kill('SIGKILL')
+    }
+  } else {
     child.kill('SIGKILL')
   }
   await close
+  if (!ownsProcessGroup || process.platform === 'win32') return
   const deadline = Date.now() + 2_000
   while (true) {
     try {

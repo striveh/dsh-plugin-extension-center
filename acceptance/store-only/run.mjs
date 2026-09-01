@@ -540,6 +540,7 @@ try {
   receipt.observations.webShutdown = await stopChild(webChild, {
     requireRunning: true,
     requireGraceful: true,
+    ownsProcessGroup: true,
   })
   webChild = undefined
   receipt.inputs.packageManagerOfflineRemovalRequested = true
@@ -639,7 +640,7 @@ try {
       storeJourney.finish()
     }],
     ['browser', async () => { if (browser !== undefined && browser.isConnected()) await browser.close() }],
-    ['dsh-web-process', async () => { await stopChild(webChild) }],
+    ['dsh-web-process', async () => { await stopChild(webChild, { ownsProcessGroup: true }) }],
     ['deny-proxy', async () => { await stopProxy(proxy) }],
     ['web-log', async () => { await writeFile(join(evidenceRoot, 'web.log'), sanitizeDiagnostic(webOutput.value)) }],
     ['temporary-home', async () => {

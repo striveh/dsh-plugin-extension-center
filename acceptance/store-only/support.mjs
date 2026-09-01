@@ -385,9 +385,9 @@ export function runChecked(command, args, options) {
     }
     const timeoutTimer = setTimeout(() => {
       timedOut = true
-      signalChildTree(child, 'SIGTERM')
+      signalChildTree(child, 'SIGTERM', true)
       forceTimer = setTimeout(() => {
-        signalChildTree(child, 'SIGKILL')
+        signalChildTree(child, 'SIGKILL', true)
         rejectTimer = setTimeout(() => {
           child.stdout.destroy()
           child.stderr.destroy()
@@ -414,9 +414,9 @@ export function runChecked(command, args, options) {
   })
 }
 
-/** Signal the exact spawned process group on POSIX, or the child on Windows. */
-function signalChildTree(child, signal) {
-  if (process.platform !== 'win32' && child.pid !== undefined) {
+/** Signal an explicitly owned spawned process group on POSIX, or only the direct child. */
+function signalChildTree(child, signal, ownsProcessGroup) {
+  if (ownsProcessGroup && process.platform !== 'win32' && child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal)
       return
@@ -478,20 +478,21 @@ export function waitForReadyUrl(child, output, timeoutMs = 90_000) {
 /**
  * Stop a child process and wait for its close event.
  * @param {import('node:child_process').ChildProcess | undefined} child Process to stop.
- * @param {{requireRunning?: boolean, requireGraceful?: boolean, gracefulTimeoutMs?: number, killTimeoutMs?: number}} [options] Passing-lane shutdown requirements.
+ * @param {{requireRunning?: boolean, requireGraceful?: boolean, ownsProcessGroup?: boolean, gracefulTimeoutMs?: number, killTimeoutMs?: number}} [options] Passing-lane shutdown requirements; ownsProcessGroup is valid only for a detached POSIX spawn.
  * @returns {Promise<{wasRunning: boolean, forced: boolean, closeObserved: boolean, processGroupStopped: boolean | null, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence; process-group state is unavailable on Windows.
  */
 export async function stopChild(child, options = {}) {
+  const ownsProcessGroup = options.ownsProcessGroup === true && process.platform !== 'win32'
   if (child === undefined) {
     if (options.requireRunning === true) throw new Error('spawned DSH Web process was absent before shutdown')
     return { wasRunning: false, forced: false, closeObserved: false, processGroupStopped: null, exitCode: null, signalCode: null }
   }
   if (child.exitCode !== null || child.signalCode !== null) {
     const closeObserved = childCloseAlreadyObserved(child)
-    const processGroupStopped = childProcessGroupStopped(child)
+    const processGroupStopped = childProcessGroupStopped(child, ownsProcessGroup)
     let forcedEvidence = { closeObserved, processGroupStopped }
     if (!closeObserved || processGroupStopped === false) {
-      forcedEvidence = await forceChildTreeClose(child, options.killTimeoutMs ?? 2_000)
+      forcedEvidence = await forceChildTreeClose(child, ownsProcessGroup, options.killTimeoutMs ?? 2_000)
     }
     if (options.requireRunning === true) throw new Error('spawned DSH Web process exited before runner-owned shutdown')
     return {
@@ -502,10 +503,13 @@ export async function stopChild(child, options = {}) {
       signalCode: child.signalCode,
     }
   }
+  if (ownsProcessGroup && childProcessGroupStopped(child, true) === true) {
+    throw new Error('spawned DSH Web process did not own the declared POSIX process group')
+  }
   const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 8_000
   const gracefulClose = waitForChildClose(child, gracefulTimeoutMs)
-  const gracefulProcessGroup = waitForChildProcessGroupStop(child, gracefulTimeoutMs)
-  signalChildTree(child, 'SIGTERM')
+  const gracefulProcessGroup = waitForChildProcessGroupStop(child, ownsProcessGroup, gracefulTimeoutMs)
+  signalChildTree(child, 'SIGTERM', ownsProcessGroup)
   const [closeObserved, processGroupStopped] = await Promise.all([gracefulClose, gracefulProcessGroup])
   if (closeObserved && processGroupStopped !== false) {
     const result = {
@@ -521,7 +525,7 @@ export async function stopChild(child, options = {}) {
     }
     return result
   }
-  const forcedEvidence = await forceChildTreeClose(child, options.killTimeoutMs ?? 2_000)
+  const forcedEvidence = await forceChildTreeClose(child, ownsProcessGroup, options.killTimeoutMs ?? 2_000)
   if (options.requireGraceful === true) throw new Error('spawned DSH Web process required SIGKILL during runner-owned shutdown')
   return {
     wasRunning: true,
@@ -539,8 +543,8 @@ function childCloseAlreadyObserved(child) {
 }
 
 /** Return POSIX process-group quiescence, or null where the platform cannot observe it. */
-function childProcessGroupStopped(child) {
-  if (process.platform === 'win32' || child.pid === undefined) return null
+function childProcessGroupStopped(child, ownsProcessGroup) {
+  if (!ownsProcessGroup || process.platform === 'win32' || child.pid === undefined) return null
   try {
     process.kill(-child.pid, 0)
     return false
@@ -568,11 +572,11 @@ function waitForChildClose(child, timeoutMs) {
 }
 
 /** Wait until the exact POSIX process group is absent, or return null on Windows. */
-async function waitForChildProcessGroupStop(child, timeoutMs) {
-  if (process.platform === 'win32' || child.pid === undefined) return null
+async function waitForChildProcessGroupStop(child, ownsProcessGroup, timeoutMs) {
+  if (!ownsProcessGroup || process.platform === 'win32' || child.pid === undefined) return null
   const deadline = Date.now() + timeoutMs
   while (true) {
-    const stopped = childProcessGroupStopped(child)
+    const stopped = childProcessGroupStopped(child, true)
     if (stopped !== false) return stopped
     const remaining = deadline - Date.now()
     if (remaining <= 0) return false
@@ -581,10 +585,10 @@ async function waitForChildProcessGroupStop(child, timeoutMs) {
 }
 
 /** Force the spawned process group down and require both direct close and group quiescence. */
-async function forceChildTreeClose(child, timeoutMs) {
+async function forceChildTreeClose(child, ownsProcessGroup, timeoutMs) {
   const forcedClose = waitForChildClose(child, timeoutMs)
-  const forcedProcessGroup = waitForChildProcessGroupStop(child, timeoutMs)
-  signalChildTree(child, 'SIGKILL')
+  const forcedProcessGroup = waitForChildProcessGroupStop(child, ownsProcessGroup, timeoutMs)
+  signalChildTree(child, 'SIGKILL', ownsProcessGroup)
   const [closeObserved, processGroupStopped] = await Promise.all([forcedClose, forcedProcessGroup])
   if (!closeObserved) throw new Error('spawned DSH Web process did not close after SIGKILL')
   if (processGroupStopped === false) throw new Error('spawned DSH Web process group remained live after SIGKILL')
