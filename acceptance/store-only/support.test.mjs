@@ -15,6 +15,7 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  assertSourceBindingClosed,
   comboUrlContainsClientBundle,
   describeUnadmittedConnectionFrame,
   describeNetworkDestination,
@@ -25,6 +26,7 @@ import {
   parseAdmittedConnectionFrame,
   parsePnpmRegistryIntegrity,
   parseReadyUrl,
+  readSourceBinding,
   removedProfileEvidence,
   removedProfileEvidenceError,
   runChecked,
@@ -300,6 +302,7 @@ test('subprocess timeouts and child teardown are bounded', async () => {
     wasRunning: true,
     forced: false,
     closeObserved: true,
+    processGroupStopped: process.platform === 'win32' ? null : true,
     exitCode: 0,
     signalCode: null,
   })
@@ -326,9 +329,10 @@ test('strict child teardown kills a descendant that retains inherited stdout', {
     detached: true,
     stdio: ['ignore', 'pipe', 'ignore'],
   })
-  await once(parent, 'spawn')
-  await once(parent.stdout, 'data')
   try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
     await assert.rejects(
       stopChild(parent, {
         requireRunning: true,
@@ -339,15 +343,126 @@ test('strict child teardown kills a descendant that retains inherited stdout', {
       /required SIGKILL during runner-owned shutdown/u,
     )
     assert.equal(parent.stdout.closed, true)
-    assert.throws(
-      () => process.kill(-parent.pid, 0),
-      error => error?.code === 'ESRCH',
-    )
+    assertProcessGroupAbsent(parent.pid)
   } finally {
-    try {
-      process.kill(-parent.pid, 'SIGKILL')
-    } catch (error) {
-      if (error?.code !== 'ESRCH') throw error
-    }
+    await cleanupDetachedChild(parent)
   }
 })
+
+test('strict child teardown rejects a closed parent while its process group remains live', {
+  skip: process.platform === 'win32' ? 'POSIX process-group regression' : false,
+}, async () => {
+  const descendantCode = 'process.on("SIGTERM", () => {}); process.send("ready"); setInterval(() => {}, 1000)'
+  const parentCode = [
+    'const { spawn } = require("node:child_process")',
+    `const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })`,
+    'descendant.once("message", () => process.stdout.write("descendant-ready\\n"))',
+    'process.on("SIGTERM", () => process.exit(0))',
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  const parent = spawn(process.execPath, ['-e', parentCode], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  try {
+    await once(parent, 'spawn', { signal: AbortSignal.timeout(2_000) })
+    const [ready] = await once(parent.stdout, 'data', { signal: AbortSignal.timeout(2_000) })
+    assert.match(ready.toString(), /descendant-ready/u)
+    await assert.rejects(
+      stopChild(parent, {
+        requireRunning: true,
+        requireGraceful: true,
+        gracefulTimeoutMs: 50,
+        killTimeoutMs: 1_000,
+      }),
+      /required SIGKILL during runner-owned shutdown/u,
+    )
+    assert.equal(parent.stdout.closed, true)
+    assertProcessGroupAbsent(parent.pid)
+  } finally {
+    await cleanupDetachedChild(parent)
+  }
+})
+
+test('source binding rejects dirty state and every committed or acceptance-program drift', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-center-source-binding-'))
+  const runnerPath = join(root, 'acceptance', 'store-only', 'run.mjs')
+  const environment = { ...process.env }
+  try {
+    await mkdir(join(root, 'acceptance', 'store-only'), { recursive: true })
+    await Promise.all([
+      writeFile(runnerPath, 'export {}\n'),
+      writeFile(join(root, 'acceptance', 'store-only', 'support.mjs'), 'export {}\n'),
+      writeFile(join(root, 'acceptance', 'store-only', 'journey-evidence.mjs'), 'export {}\n'),
+      writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n'),
+    ])
+    await runChecked('git', ['init', '--quiet'], { cwd: root, env: environment })
+    await runChecked('git', ['add', '.'], { cwd: root, env: environment })
+    await runChecked('git', [
+      '-c', 'user.name=Compatibility Test',
+      '-c', 'user.email=compatibility@example.invalid',
+      'commit', '--quiet', '-m', 'fixture',
+    ], { cwd: root, env: environment })
+    const before = await readSourceBinding({ projectRoot: root, runnerPath, environment })
+    assert.equal(before.clean, true)
+    assert.doesNotThrow(() => assertSourceBindingClosed(before, { ...before }))
+    for (const field of ['commit', 'tree', 'runnerSha256', 'supportSha256', 'journeyEvidenceSha256', 'lockfileSha256']) {
+      const changed = {
+        ...before,
+        [field]: field === 'commit' || field === 'tree' ? 'f'.repeat(40) : 'f'.repeat(64),
+      }
+      assert.throws(
+        () => assertSourceBindingClosed(before, changed),
+        error => error instanceof AcceptanceFailure
+          && error.code === 'STORE-UI-SOURCE-DRIFT'
+          && error.message.includes(field),
+      )
+    }
+    await writeFile(runnerPath, 'export const changed = true\n')
+    const dirty = await readSourceBinding({ projectRoot: root, runnerPath, environment })
+    assert.equal(dirty.clean, false)
+    assert.throws(
+      () => assertSourceBindingClosed(before, dirty),
+      error => error instanceof AcceptanceFailure
+        && error.code === 'STORE-UI-SOURCE-DRIFT'
+        && error.message.includes('worktree')
+        && error.message.includes('runnerSha256'),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+function assertProcessGroupAbsent(pid) {
+  assert.throws(
+    () => process.kill(-pid, 0),
+    error => error?.code === 'ESRCH',
+  )
+}
+
+async function cleanupDetachedChild(child) {
+  if (child.pid === undefined) return
+  const closeAlreadyObserved = (child.exitCode !== null || child.signalCode !== null)
+    && child.stdio.every(stream => stream === null || stream.closed === true)
+  const close = closeAlreadyObserved
+    ? Promise.resolve()
+    : once(child, 'close', { signal: AbortSignal.timeout(2_000) }).then(() => {})
+  try {
+    process.kill(-child.pid, 'SIGKILL')
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error
+    child.kill('SIGKILL')
+  }
+  await close
+  const deadline = Date.now() + 2_000
+  while (true) {
+    try {
+      process.kill(-child.pid, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') return
+      throw error
+    }
+    if (Date.now() >= deadline) throw new Error('test process group remained live after cleanup SIGKILL')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10))
+  }
+}

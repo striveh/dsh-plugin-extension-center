@@ -479,44 +479,76 @@ export function waitForReadyUrl(child, output, timeoutMs = 90_000) {
  * Stop a child process and wait for its close event.
  * @param {import('node:child_process').ChildProcess | undefined} child Process to stop.
  * @param {{requireRunning?: boolean, requireGraceful?: boolean, gracefulTimeoutMs?: number, killTimeoutMs?: number}} [options] Passing-lane shutdown requirements.
- * @returns {Promise<{wasRunning: boolean, forced: boolean, closeObserved: boolean, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence.
+ * @returns {Promise<{wasRunning: boolean, forced: boolean, closeObserved: boolean, processGroupStopped: boolean | null, exitCode: number | null, signalCode: NodeJS.Signals | null}>} Terminal process evidence; process-group state is unavailable on Windows.
  */
 export async function stopChild(child, options = {}) {
   if (child === undefined) {
     if (options.requireRunning === true) throw new Error('spawned DSH Web process was absent before shutdown')
-    return { wasRunning: false, forced: false, closeObserved: false, exitCode: null, signalCode: null }
+    return { wasRunning: false, forced: false, closeObserved: false, processGroupStopped: null, exitCode: null, signalCode: null }
   }
   if (child.exitCode !== null || child.signalCode !== null) {
-    let forced = false
-    if (!childCloseAlreadyObserved(child)) {
-      const forcedClose = waitForChildClose(child, options.killTimeoutMs ?? 2_000)
-      signalChildTree(child, 'SIGKILL')
-      if (!await forcedClose) throw new Error('spawned DSH Web process did not close after SIGKILL')
-      forced = true
+    const closeObserved = childCloseAlreadyObserved(child)
+    const processGroupStopped = childProcessGroupStopped(child)
+    let forcedEvidence = { closeObserved, processGroupStopped }
+    if (!closeObserved || processGroupStopped === false) {
+      forcedEvidence = await forceChildTreeClose(child, options.killTimeoutMs ?? 2_000)
     }
     if (options.requireRunning === true) throw new Error('spawned DSH Web process exited before runner-owned shutdown')
-    return { wasRunning: false, forced, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
+    return {
+      wasRunning: false,
+      forced: !closeObserved || processGroupStopped === false,
+      ...forcedEvidence,
+      exitCode: child.exitCode,
+      signalCode: child.signalCode,
+    }
   }
-  const gracefulClose = waitForChildClose(child, options.gracefulTimeoutMs ?? 8_000)
+  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 8_000
+  const gracefulClose = waitForChildClose(child, gracefulTimeoutMs)
+  const gracefulProcessGroup = waitForChildProcessGroupStop(child, gracefulTimeoutMs)
   signalChildTree(child, 'SIGTERM')
-  if (await gracefulClose) {
-    const result = { wasRunning: true, forced: false, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
+  const [closeObserved, processGroupStopped] = await Promise.all([gracefulClose, gracefulProcessGroup])
+  if (closeObserved && processGroupStopped !== false) {
+    const result = {
+      wasRunning: true,
+      forced: false,
+      closeObserved: true,
+      processGroupStopped,
+      exitCode: child.exitCode,
+      signalCode: child.signalCode,
+    }
     if (options.requireGraceful === true && (result.exitCode !== 0 || result.signalCode !== null)) {
       throw new Error(`spawned DSH Web process did not close gracefully (${result.signalCode ?? String(result.exitCode)})`)
     }
     return result
   }
-  const forcedClose = waitForChildClose(child, options.killTimeoutMs ?? 2_000)
-  signalChildTree(child, 'SIGKILL')
-  if (!await forcedClose) throw new Error('spawned DSH Web process did not close after SIGKILL')
+  const forcedEvidence = await forceChildTreeClose(child, options.killTimeoutMs ?? 2_000)
   if (options.requireGraceful === true) throw new Error('spawned DSH Web process required SIGKILL during runner-owned shutdown')
-  return { wasRunning: true, forced: true, closeObserved: true, exitCode: child.exitCode, signalCode: child.signalCode }
+  return {
+    wasRunning: true,
+    forced: true,
+    ...forcedEvidence,
+    exitCode: child.exitCode,
+    signalCode: child.signalCode,
+  }
 }
 
 /** Return whether the direct child and each owned stdio stream have reached terminal state. */
 function childCloseAlreadyObserved(child) {
   return (child.exitCode !== null || child.signalCode !== null)
     && child.stdio.every(stream => stream === null || stream.closed === true)
+}
+
+/** Return POSIX process-group quiescence, or null where the platform cannot observe it. */
+function childProcessGroupStopped(child) {
+  if (process.platform === 'win32' || child.pid === undefined) return null
+  try {
+    process.kill(-child.pid, 0)
+    return false
+  } catch (error) {
+    if (error?.code === 'ESRCH') return true
+    if (error?.code === 'EPERM') return false
+    throw error
+  }
 }
 
 /** Wait a bounded interval for the child and its inherited stdio handles to close. */
@@ -533,6 +565,93 @@ function waitForChildClose(child, timeoutMs) {
     }, timeoutMs)
     child.once('close', onClose)
   })
+}
+
+/** Wait until the exact POSIX process group is absent, or return null on Windows. */
+async function waitForChildProcessGroupStop(child, timeoutMs) {
+  if (process.platform === 'win32' || child.pid === undefined) return null
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const stopped = childProcessGroupStopped(child)
+    if (stopped !== false) return stopped
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return false
+    await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(10, remaining)))
+  }
+}
+
+/** Force the spawned process group down and require both direct close and group quiescence. */
+async function forceChildTreeClose(child, timeoutMs) {
+  const forcedClose = waitForChildClose(child, timeoutMs)
+  const forcedProcessGroup = waitForChildProcessGroupStop(child, timeoutMs)
+  signalChildTree(child, 'SIGKILL')
+  const [closeObserved, processGroupStopped] = await Promise.all([forcedClose, forcedProcessGroup])
+  if (!closeObserved) throw new Error('spawned DSH Web process did not close after SIGKILL')
+  if (processGroupStopped === false) throw new Error('spawned DSH Web process group remained live after SIGKILL')
+  return { closeObserved: true, processGroupStopped }
+}
+
+/**
+ * Read the committed source and acceptance-program identity used by one compatibility run.
+ * @param {{projectRoot: string, runnerPath: string, environment: NodeJS.ProcessEnv}} input Repository and runner coordinates.
+ * @returns {Promise<{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}>} Immutable source binding.
+ */
+export async function readSourceBinding({ projectRoot, runnerPath, environment }) {
+  const [commitResult, treeResult, statusResult, runnerBytes, supportBytes, journeyEvidenceBytes, lockfileBytes] = await Promise.all([
+    runChecked('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['rev-parse', '--verify', 'HEAD^{tree}'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    runChecked('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+      cwd: projectRoot,
+      env: environment,
+      timeoutMs: 30_000,
+    }),
+    readFile(runnerPath),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'support.mjs')),
+    readFile(join(projectRoot, 'acceptance', 'store-only', 'journey-evidence.mjs')),
+    readFile(join(projectRoot, 'pnpm-lock.yaml')),
+  ])
+  const commit = commitResult.stdout.trim()
+  const tree = treeResult.stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(commit)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'repository HEAD was not one exact commit')
+  }
+  if (!/^[0-9a-f]{40}$/u.test(tree)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-TREE', 'repository HEAD tree was not one exact Git tree')
+  }
+  return Object.freeze({
+    commit,
+    tree,
+    clean: statusResult.stdout.length === 0,
+    runnerSha256: createHash('sha256').update(runnerBytes).digest('hex'),
+    supportSha256: createHash('sha256').update(supportBytes).digest('hex'),
+    journeyEvidenceSha256: createHash('sha256').update(journeyEvidenceBytes).digest('hex'),
+    lockfileSha256: createHash('sha256').update(lockfileBytes).digest('hex'),
+  })
+}
+
+/**
+ * Reject any source or acceptance-program drift across the complete Store journey.
+ * @param {{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}} before Binding captured before packing.
+ * @param {{commit: string, tree: string, clean: boolean, runnerSha256: string, supportSha256: string, journeyEvidenceSha256: string, lockfileSha256: string}} after Binding captured after teardown.
+ */
+export function assertSourceBindingClosed(before, after) {
+  const fields = ['commit', 'tree', 'runnerSha256', 'supportSha256', 'journeyEvidenceSha256', 'lockfileSha256']
+  const changed = fields.filter(field => before[field] !== after[field])
+  if (!after.clean || changed.length > 0) {
+    const detail = [
+      ...(!after.clean ? ['worktree'] : []),
+      ...changed,
+    ].join(', ')
+    throw new AcceptanceFailure('STORE-UI-SOURCE-DRIFT', `repository source changed during acceptance: ${detail}`)
+  }
 }
 
 function isInside(root, path) {
