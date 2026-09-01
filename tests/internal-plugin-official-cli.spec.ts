@@ -1,9 +1,11 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
+import fs from 'node:fs'
 import { createRequire } from 'node:module'
+import { syncBuiltinESMExports } from 'node:module'
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OfficialDshPluginCli } from '../src/internal/plugin/index.ts'
@@ -19,6 +21,7 @@ const originalDshHome = process.env.DSH_HOME
 const originalNodeOptions = process.env.NODE_OPTIONS
 const originalNodePath = process.env.NODE_PATH
 const originalPath = process.env.PATH
+let restoreFsPromisesRename: (() => void) | undefined
 const PROFILE_WORKSPACE = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n'
 const INSTALLED_DSH_MANIFEST_PATH = require.resolve('@deepseek-ai/dsh/package.json')
 const INSTALLED_DSH_VERSION = (JSON.parse(await readFile(INSTALLED_DSH_MANIFEST_PATH, 'utf8')) as { version?: unknown }).version
@@ -93,6 +96,8 @@ async function bindFixture(
 }
 
 afterEach(async () => {
+  restoreFsPromisesRename?.()
+  restoreFsPromisesRename = undefined
   if (originalDshHome === undefined) delete process.env.DSH_HOME
   else process.env.DSH_HOME = originalDshHome
   if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS
@@ -684,6 +689,85 @@ describe('official DSH Plugin CLI adapter', () => {
     })).rejects.toThrow('mutation and recovery are unsupported on Windows')
     await expect(readdir(centerRoot)).resolves.toEqual([])
   })
+
+  it('converges concurrent private toolchain installation on one verified generation', async () => {
+    const fixture = await officialCli()
+    const centerRoot = await mkdtemp(join(tmpdir(), 'extension-concurrent-toolchain-'))
+    const pnpmRoot = await mkdtemp(join(tmpdir(), 'extension-pnpm-fixture-'))
+    roots.push(centerRoot, pnpmRoot)
+    await mkdir(join(pnpmRoot, 'bin'))
+    await writeFile(join(pnpmRoot, 'package.json'), JSON.stringify({
+      name: 'pnpm',
+      version: '11.21.0',
+      bin: { pnpm: 'bin/pnpm.mjs' },
+    }))
+    await writeFile(join(pnpmRoot, 'bin', 'pnpm.mjs'), '#!/usr/bin/env node\n')
+
+    const originalRename = fs.promises.rename
+    let renameArrivals = 0
+    let releaseRenames!: () => void
+    let barrierTimer: ReturnType<typeof setTimeout> | undefined
+    const bothRenamesArrived = new Promise<void>((accept, reject) => {
+      releaseRenames = () => {
+        if (barrierTimer !== undefined) clearTimeout(barrierTimer)
+        accept()
+      }
+      barrierTimer = setTimeout(() => reject(new Error('concurrent pnpm publication barrier timed out')), 5_000)
+    })
+    const restoreRename = () => {
+      fs.promises.rename = originalRename
+      syncBuiltinESMExports()
+    }
+    restoreFsPromisesRename = restoreRename
+    try {
+      fs.promises.rename = async (source, destination) => {
+        if (basename(String(source)).startsWith('.pnpm-') && basename(String(destination)) === 'pnpm') {
+          renameArrivals += 1
+          if (renameArrivals === 2) releaseRenames()
+          await bothRenamesArrived
+        }
+        return await originalRename(source, destination)
+      }
+      syncBuiltinESMExports()
+      const concurrentInstaller = await import(
+        `${pathToFileURL(resolve(process.cwd(), 'lib/recovery/install.js')).href}?race=${randomUUID()}`
+      ) as typeof import('../src/recovery/install.ts')
+      const input = {
+        root: centerRoot,
+        packageVersion: '0.0.0-test',
+        cliPath: resolve(process.cwd(), 'lib/recovery/break-glass.js'),
+        supervisorPath: resolve(process.cwd(), 'lib/recovery/supervisor.js'),
+        pnpmManifestPath: join(pnpmRoot, 'package.json'),
+        officialDsh: {
+          entrypointPath: fixture.entrypoint,
+          hostHome: fixture.hostHome,
+          timeoutMs: 5_000,
+        },
+      } as const
+      const [leftResult, rightResult] = await Promise.allSettled([
+        concurrentInstaller.installRecoveryExecutable(input),
+        concurrentInstaller.installRecoveryExecutable(input),
+      ])
+      expect(renameArrivals).toBe(2)
+      if (leftResult.status !== 'fulfilled' || rightResult.status !== 'fulfilled') {
+        throw new AggregateError(
+          [leftResult, rightResult]
+            .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+            .map(result => result.reason),
+          'concurrent private toolchain installation did not converge',
+        )
+      }
+      const left = leftResult.value
+      const right = rightResult.value
+      expect(right.officialDsh.pnpm).toEqual(left.officialDsh.pnpm)
+      await expect(readdir(dirname(left.officialDsh.pnpm.packageRoot)))
+        .resolves.not.toEqual(expect.arrayContaining([expect.stringMatching(/^\.pnpm-/u)]))
+    } finally {
+      if (barrierTimer !== undefined) clearTimeout(barrierTimer)
+      restoreRename()
+      restoreFsPromisesRename = undefined
+    }
+  }, 15_000)
 
   it('rejects Profile-local package-manager execution controls before invoking DSH', async () => {
     const fixture = await officialCli()

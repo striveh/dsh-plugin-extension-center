@@ -393,11 +393,16 @@ async function installPrivateToolchain(input: Readonly<{
     const temporary = join(generation, `.pnpm-${randomUUID()}`)
     try {
       await copyPackageTree(pnpmSourceRoot, temporary)
-      await rename(temporary, pnpmPackageRoot)
+      try {
+        await rename(temporary, pnpmPackageRoot)
+      } catch (cause: unknown) {
+        const code = (cause as NodeJS.ErrnoException).code
+        if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw cause
+      }
       await syncDirectory(generation)
-    } catch (cause: unknown) {
+    } finally {
       await rm(temporary, { recursive: true, force: true })
-      throw cause
+      await syncDirectory(generation)
     }
   }
   if (await packageTreeSha256(pnpmPackageRoot, true) !== pnpmSourceDigest) {
