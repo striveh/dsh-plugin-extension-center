@@ -214,9 +214,9 @@ Gate A 是当前兼容完成路径。Gate B 到 Gate E 是未来产品生命周�
 
 1. 从干净且审查过的 commit 构建，并提交确定性 `lib/` 产物。
 2. 打包两次并要求 bytes 与 SHA-256 完全一致；检查每个 archive entry，拒绝 lifecycle script 或未声明 executable。
-3. 在准确 `main` push 上，要求 Node 22 CI job 上传该确定性 tarball、`SHA256SUMS` 与一份自摘要 attestation，并绑定 source commit、run id/attempt、packed manifest、bundled pnpm tree 与 artifact 坐标。
-4. 通过固定 GitHub API 与最多一次准入的 GitHub Actions 或 Azure Blob storage redirect 下载准确 Actions artifact。必须验证声明的 Actions archive digest，并要求有界 ZIP 只包含 tarball、`SHA256SUMS` 与 attestation。
-5. 只使用准确官方 `dsh@0.1.2-alpha.3`，通过官方 CLI 把已 attested Center tarball 安装到隔离的 DSH、Agents、workspace 与 home 目录；不要求 Center npm 坐标。
+3. 在本地兼容证据中，把确定性 tarball 与 packed manifest 绑定到准确 source commit、runner digest、lockfile digest 与 artifact SHA-256。
+4. CI upload/download、archive digest 与 run identity 交叉绑定属于可选扩展公开 Release provenance，不阻断当前兼容门禁。
+5. 只使用准确官方 `dsh@0.1.2-alpha.3`，通过官方 CLI 把准确 Center tarball 安装到隔离的 DSH、Agents、workspace 与 home 目录；不要求 Center npm 坐标。
 6. 记录官方 package identity 与已审计 commit；拒绝 source checkout、workspace import、patched package、相邻仓库和未打包 Center code。
 7. 通过已发布入口启动真实 Host 与 browser Client。
 

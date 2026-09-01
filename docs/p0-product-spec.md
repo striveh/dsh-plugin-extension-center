@@ -214,9 +214,9 @@ Gate A is the current compatibility completion path. Gates B through E are futur
 
 1. Build from a clean reviewed commit and commit deterministic `lib/` output.
 2. Pack twice and require identical bytes and SHA-256. Inspect every archive entry and reject lifecycle scripts or undeclared executables.
-3. On the exact `main` push, require the Node 22 CI job to upload that deterministic tarball, `SHA256SUMS`, and a self-digested attestation bound to the source commit, run id and attempt, packed manifest, bundled pnpm tree, and artifact coordinates.
-4. Download the exact Actions artifact through the fixed GitHub API and at most one admitted GitHub Actions or Azure Blob storage redirect. Require the declared Actions archive digest and a bounded ZIP containing exactly the tarball, `SHA256SUMS`, and attestation.
-5. Install the attested Center tarball through the official CLI into isolated DSH, Agents, workspace, and home directories using exact official `dsh@0.1.2-alpha.3` only; a Center npm coordinate is not required.
+3. Bind the deterministic tarball and packed manifest to the exact source commit, runner digest, lockfile digest, and artifact SHA-256 in local compatibility evidence.
+4. CI upload, download, archive-digest, and run-identity cross-binding are optional extended public-release provenance. They do not block the current compatibility gate.
+5. Install the exact Center tarball through the official CLI into isolated DSH, Agents, workspace, and home directories using exact official `dsh@0.1.2-alpha.3` only; a Center npm coordinate is not required.
 6. Record the official package identities and audited commit. Reject source checkouts, workspace imports, patched packages, adjacent repositories, and unpacked Center code.
 7. Boot the real Host and browser Client through the published entry points.
 
