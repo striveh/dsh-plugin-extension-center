@@ -3,9 +3,9 @@ import { lstat, mkdir, open, rename } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { canonicalJson, canonicalSha256 } from '../full-p0/receipt-binding.mjs'
 
-export const DSH_VERSION = '0.1.2-alpha.1'
-export const DSH_TAG = 'dsh-v0.1.2-alpha.1'
-export const DSH_COMMIT = 'cd5ef8148158c3a752a658978873241fdf8e2bbc'
+export const DSH_VERSION = '0.1.2-alpha.3'
+export const DSH_TAG = 'dsh-v0.1.2-alpha.3'
+export const DSH_COMMIT = 'dd6322d604e00eec1ba5e0c8541159906a21094a'
 export const CENTER_REPOSITORY = 'striveh/dsh-plugin-extension-center'
 export const LIFECYCLE_WORKFLOW = '.github/workflows/official-alpha-wiki-lifecycle.yml'
 export const ACCEPTANCE_ID = 'P0-OFFICIAL-ALPHA-WIKI-SKILL-LIFECYCLE'
@@ -21,7 +21,7 @@ const MANAGED_REVISION = /^center:[1-9][0-9]*$/u
 const CONFIGURATION_INITIAL_DIGEST = canonicalSha256({ modelInvocable: true, userInvocable: true, projectRoot: null })
 const CONFIGURATION_CONFIGURED_DIGEST = canonicalSha256({ modelInvocable: true, userInvocable: false, projectRoot: null })
 const NOT_PROVEN = Object.freeze([
-  'ordinary-user-registry-installation',
+  'public-github-artifact-installation',
   'public-catalog-deployment',
 ])
 const EXPECTED_SEQUENCE = Object.freeze([

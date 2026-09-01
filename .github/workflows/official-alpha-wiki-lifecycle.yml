@@ -1,4 +1,4 @@
-name: Produce official-alpha Wiki Skill lifecycle receipt
+name: Produce latest-official-DSH Wiki Skill lifecycle receipt
 
 on:
   workflow_dispatch: {}
@@ -52,16 +52,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: cd5ef8148158c3a752a658978873241fdf8e2bbc
+          ref: dd6322d604e00eec1ba5e0c8541159906a21094a
           path: .artifacts/official-dsh
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
       - name: Verify exact official DSH tag and source identity
         run: |
-          test "$(git -C .artifacts/official-dsh rev-parse HEAD)" = cd5ef8148158c3a752a658978873241fdf8e2bbc
-          git -C .artifacts/official-dsh tag --points-at HEAD | grep -Fx dsh-v0.1.2-alpha.1
-          test "$(node -p 'require("./.artifacts/official-dsh/apps/cli/package.json").version')" = 0.1.2-alpha.1
+          test "$(git -C .artifacts/official-dsh rev-parse HEAD)" = dd6322d604e00eec1ba5e0c8541159906a21094a
+          git -C .artifacts/official-dsh tag --points-at HEAD | grep -Fx dsh-v0.1.2-alpha.3
+          test "$(node -p 'require("./.artifacts/official-dsh/apps/cli/package.json").version')" = 0.1.2-alpha.3
           test -z "$(git -C .artifacts/official-dsh status --porcelain=v1 --untracked-files=no)"
       - name: Install and build exact official DSH source
         run: |

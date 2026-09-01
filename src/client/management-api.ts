@@ -1222,7 +1222,7 @@ function receiptPlanEvidence(value: unknown, subject: string): OperationReceipt[
     'timeoutMs', 'node',
   ])
   if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
-    || officialDsh.packageVersion !== '0.1.2-alpha.1') {
+    || officialDsh.packageVersion !== '0.1.2-alpha.3') {
     fail(`${subject}.recoveryExecutable.officialDsh identity`)
   }
   for (const field of ['entrypointPath', 'hostHome', 'packageRoot', 'supervisorPath'] as const) {

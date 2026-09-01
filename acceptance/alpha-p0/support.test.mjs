@@ -146,8 +146,8 @@ function productIdentity() {
   return {
     officialDsh: {
       packageName: '@deepseek-ai/dsh',
-      version: '0.1.2-alpha.1',
-      sourceCommit: 'cd5ef8148158c3a752a658978873241fdf8e2bbc',
+      version: '0.1.2-alpha.3',
+      sourceCommit: 'dd6322d604e00eec1ba5e0c8541159906a21094a',
       registry: 'https://registry.npmjs.org/',
       integrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`,
     },

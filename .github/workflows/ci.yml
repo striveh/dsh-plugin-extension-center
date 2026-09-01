@@ -43,7 +43,7 @@ jobs:
         run: pnpm test
       - name: Verify committed distribution artifacts
         run: git diff --exit-code -- lib
-      - name: Verify deterministic publication artifact
+      - name: Verify deterministic packed artifact
         run: pnpm run verify:pack
       - name: Upload exact-commit deterministic pack
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.node-version == '22.19.0'
@@ -58,14 +58,52 @@ jobs:
           include-hidden-files: true
           compression-level: 0
 
-  alpha-source-package-gate:
-    name: Alpha package contract checkpoint
-    if: always()
+  latest-dsh-compatibility:
+    name: Latest official DSH packed-plugin compatibility
     needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+          run_install: false
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install isolated Chromium runtime
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Prove standard packed-plugin install and Host plus Client boot
+        run: pnpm run test:compat:latest
+      - name: Upload exact compatibility evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: latest-dsh-compatibility-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/acceptance/store-only
+          if-no-files-found: error
+          include-hidden-files: true
+          compression-level: 0
+
+  alpha-source-package-gate:
+    name: Source, pack, and latest DSH compatibility checkpoint
+    if: always()
+    needs: [verify, latest-dsh-compatibility]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every source and package lane
         env:
           VERIFY_RESULT: ${{ needs.verify.result }}
-        run: test "$VERIFY_RESULT" = success
+          COMPATIBILITY_RESULT: ${{ needs.latest-dsh-compatibility.result }}
+        run: |
+          test "$VERIFY_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success

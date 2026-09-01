@@ -16,7 +16,7 @@ const phases = Object.freeze([
   'recovery-required',
 ])
 
-/** Exact fault cases required in the official rc.2 receipt and composite release gate. */
+/** Exact fault cases required in the latest official DSH receipt and composite release gate. */
 export const REQUIRED_FAULT_MATRIX_CASE_IDS = Object.freeze([
   'enospc/journal-event-before-write',
   'partial-current/rejected',

@@ -14,11 +14,17 @@ import {
   STORE_UI_SURFACE_MISSING,
   TARGET_DSH_COMMIT,
   TARGET_DSH_VERSION,
+  comboUrlContainsClientBundle,
+  describeUnadmittedConnectionFrame,
   describeNetworkDestination,
   immutablePackageTreeDigest,
   installOfficialDshHost,
   isAdmittedBrowserRequest,
   isAdmittedBrowserWebSocket,
+  parseAuthenticatedLaunchUrl,
+  parseAdmittedConnectionFrame,
+  removedProfileEvidence,
+  removedProfileEvidenceError,
   runChecked,
   sanitizeDiagnostic,
   stopChild,
@@ -43,17 +49,27 @@ const MCP_CANDIDATE_REFS = new Set([
 const receipt = {
   schemaVersion: 5,
   acceptanceId: 'STORE-UI-01',
-  proofScope: 'official-rc2-unmodified-host-offline-store-ui',
+  proofScope: 'latest-official-dsh-unmodified-host-offline-store-ui',
   p0Status: 'pending',
+  source: {
+    commit: null,
+    worktreeCleanAtPack: null,
+    runnerSha256: null,
+    lockfileSha256: null,
+  },
   target: {
     dshPackage: `@deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
     auditedSourceCommit: TARGET_DSH_COMMIT,
     hostModification: 'none',
-    installation: 'official-dsh-plugin-add',
+    installation: 'official-dsh-plugin-add-and-remove',
     version: null,
     registry: null,
     registryIntegrity: null,
     packageTreeDigest: null,
+    packageTreeDigestBefore: null,
+    packageTreeDigestAfter: null,
+    hostInstallTreeDigestBefore: null,
+    hostInstallTreeDigestAfter: null,
     os: process.platform,
     arch: process.arch,
     nodeVersion: process.version,
@@ -75,10 +91,15 @@ const receipt = {
     secretCanaryInjectedBeforeFiltering: true,
     secretCanaryPassedToChild: null,
     catalogModeRequested: 'packaged-bootstrap-offline',
+    packageManagerOfflineRemovalRequested: false,
     profileCatalogOverrideWritten: false,
+    acceptanceOverlayWritten: false,
   },
   observations: {
     bundleLayerObserved: false,
+    authenticatedLaunchUrlObserved: false,
+    authenticatedRedirectToCleanOriginObserved: false,
+    authenticatedSessionCookieObserved: false,
     clientGraphEntryObserved: false,
     clientBundleRequestObserved: false,
     onboardingActions: [],
@@ -92,6 +113,9 @@ const receipt = {
     approvalSubmissionObserved: false,
     lifecycleMutationSubmissionObserved: false,
     webSocketFramesSentDuringInteraction: 0,
+    admittedConnectionWebSocketFrames: [],
+    forbiddenConnectionWebSocketFrames: [],
+    connectionStreamOpenObserved: false,
     firstLevelButtonSemanticsObserved: false,
     namedDialogObserved: false,
     availableLifecycleEntries: [],
@@ -116,8 +140,18 @@ const receipt = {
     unavailableLifecycleEntries: [],
     centerStateUnchangedDuringStoreJourney: false,
     hostStateUnchangedDuringStoreInteraction: false,
+    officialCliRemovalObserved: false,
+    bundleLayerAbsentAfterRemoval: false,
+    profileDependencyAbsentAfterRemoval: false,
+    profileBundleAbsentAfterRemoval: false,
+    profilePackageAbsentAfterRemoval: false,
+    pluginListAbsentAfterRemoval: false,
+    removedDumpStderrClean: false,
+    webShutdown: null,
     officialDshPackageTreeUnchanged: false,
+    officialHostInstallTreeUnchanged: false,
     secretCanaryAbsentFromEvidence: false,
+    authTokenAbsentFromEvidence: false,
   },
 }
 
@@ -127,8 +161,10 @@ let browser
 let context
 let page
 let proxy
+let browserLaunchToken
 let webOutput = { value: '' }
 const storeJourney = createStoreJourneyWindow()
+const openConnectionStreams = new Map()
 
 try {
   await rm(evidenceRoot, { recursive: true, force: true })
@@ -171,6 +207,31 @@ try {
   }
   const sourceManifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
   assertNoPackageLifecycleScripts(sourceManifest, 'source')
+  const sourceCommit = await runChecked('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: projectRoot,
+    env: baseEnv,
+    timeoutMs: 30_000,
+  })
+  const normalizedSourceCommit = sourceCommit.stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(normalizedSourceCommit)) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'repository HEAD was not one exact commit')
+  }
+  if (process.env.GITHUB_SHA !== undefined && process.env.GITHUB_SHA !== normalizedSourceCommit) {
+    throw new AcceptanceFailure('STORE-UI-SOURCE-COMMIT', 'GitHub workflow commit did not match repository HEAD')
+  }
+  const sourceStatus = await runChecked('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+    cwd: projectRoot,
+    env: baseEnv,
+    timeoutMs: 30_000,
+  })
+  const [runnerBytes, lockfileBytes] = await Promise.all([
+    readFile(fileURLToPath(import.meta.url)),
+    readFile(join(projectRoot, 'pnpm-lock.yaml')),
+  ])
+  receipt.source.commit = normalizedSourceCommit
+  receipt.source.worktreeCleanAtPack = sourceStatus.stdout.length === 0
+  receipt.source.runnerSha256 = createHash('sha256').update(runnerBytes).digest('hex')
+  receipt.source.lockfileSha256 = createHash('sha256').update(lockfileBytes).digest('hex')
   receipt.phase = 'installing-official-host'
   const officialHost = await installOfficialDshHost({
     hostRoot,
@@ -183,6 +244,8 @@ try {
   receipt.target.registry = officialHost.registry
   receipt.target.registryIntegrity = officialHost.registryIntegrity
   receipt.target.packageTreeDigest = officialHost.packageTreeDigest
+  receipt.target.packageTreeDigestBefore = officialHost.packageTreeDigest
+  receipt.target.hostInstallTreeDigestBefore = await immutablePackageTreeDigest(hostRoot)
 
   receipt.phase = 'packing-extension-center'
   await runChecked('pnpm', ['pack', '--pack-destination', packRoot], {
@@ -233,7 +296,8 @@ try {
     env: runtimeEnv,
     timeoutMs: 120_000,
   })
-  await writeFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), [
+  const acceptancePatch = join(tempRoot, 'extension-center.acceptance.patch.yml')
+  await writeFile(acceptancePatch, [
     '- id: dsh-plugin-extension-center',
     '  config:',
     '    maximumArtifactRedirects: 1',
@@ -242,14 +306,15 @@ try {
     '      - release-assets.githubusercontent.com',
     '',
   ].join('\n'))
-  receipt.inputs.profileCatalogOverrideWritten = true
+  receipt.inputs.acceptanceOverlayWritten = true
   receipt.phase = 'composing-offline-profile'
-  const dump = await runChecked(dshBin, ['--profile', 'web', '--dump-config'], {
+  const dump = await runChecked(dshBin, ['--profile', 'web', '--patch', acceptancePatch, '--dump-config'], {
     cwd: workspace,
     env: runtimeEnv,
     timeoutMs: 60_000,
   })
   await writeFile(join(evidenceRoot, 'dump-config.txt'), sanitizeDiagnostic(dump.stdout))
+  await writeFile(join(evidenceRoot, 'dump-config.stderr.txt'), sanitizeDiagnostic(dump.stderr))
   receipt.observations.bundleLayerObserved = dump.stdout.includes('# == dsh-plugin-extension-center')
     && dump.stdout.includes('name: dsh-plugin-extension-center')
   receipt.observations.packagedBootstrapCatalogOnlyObserved = !dump.stdout.includes('catalogTrustedUrl:')
@@ -261,12 +326,19 @@ try {
   }
 
   receipt.phase = 'starting-official-web-profile'
-  webChild = spawn(dshBin, ['web', '--no-open', '--port', '0'], {
+  webChild = spawn(dshBin, ['web', '--patch', acceptancePatch, '--no-open', '--port', '0'], {
     cwd: workspace,
+    detached: process.platform !== 'win32',
     env: runtimeEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const webOrigin = await waitForReadyUrl(webChild, webOutput)
+  const webLaunchUrl = parseAuthenticatedLaunchUrl(webOutput.value)
+  browserLaunchToken = new URL(webLaunchUrl).searchParams.get('token') ?? undefined
+  if (new URL(webLaunchUrl).origin !== webOrigin) {
+    throw new AcceptanceFailure('STORE-UI-HOST-AUTH-URL', 'authenticated launch URL did not match the announced loopback origin')
+  }
+  receipt.observations.authenticatedLaunchUrlObserved = true
   const appendOutput = chunk => { webOutput.value += chunk.toString() }
   webChild.stdout?.on('data', appendOutput)
   webChild.stderr?.on('data', appendOutput)
@@ -299,7 +371,8 @@ try {
           }
         }
       }
-      if (url.pathname === '/plugins/dsh-plugin-extension-center/client.js') {
+      if (request.resourceType() === 'script'
+        && comboUrlContainsClientBundle(requestUrl, 'dsh-plugin-extension-center')) {
         receipt.observations.clientBundleRequestObserved = true
       }
       await route.continue()
@@ -319,8 +392,26 @@ try {
   })
   page = await context.newPage()
   page.on('websocket', websocket => {
-    websocket.on('framesent', () => {
-      if (storeJourney.isActive()) receipt.observations.webSocketFramesSentDuringInteraction += 1
+    websocket.on('framesent', frame => {
+      if (!storeJourney.isActive()) return
+      receipt.observations.webSocketFramesSentDuringInteraction += 1
+      const admitted = parseAdmittedConnectionFrame(frame.payload)
+      if (admitted?.type === 'open') {
+        openConnectionStreams.set(admitted.streamId, admitted.endpoint)
+        receipt.observations.admittedConnectionWebSocketFrames.push(`open:${admitted.endpoint}`)
+        if (admitted.endpoint === '$events') receipt.observations.connectionStreamOpenObserved = true
+        return
+      }
+      const cancelledEndpoint = admitted?.type === 'cancel'
+        ? openConnectionStreams.get(admitted.streamId)
+        : undefined
+      if (admitted?.type === 'cancel'
+        && cancelledEndpoint !== undefined
+        && openConnectionStreams.delete(admitted.streamId)) {
+        receipt.observations.admittedConnectionWebSocketFrames.push(`cancel:${cancelledEndpoint}`)
+        return
+      }
+      receipt.observations.forbiddenConnectionWebSocketFrames.push(describeUnadmittedConnectionFrame(frame.payload))
     })
   })
   page.on('pageerror', error => receipt.observations.consoleFailures.push(sanitizeDiagnostic(`pageerror: ${error.message}`)))
@@ -332,7 +423,21 @@ try {
   const centerStateRoot = join(dshHome, 'extension-center')
   const centerStateBefore = await mutableHostStateDigest([centerStateRoot])
   storeJourney.start()
-  await page.goto(webOrigin, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+  await page.goto(webLaunchUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+  if (page.url() !== `${webOrigin}/`) {
+    throw new AcceptanceFailure('STORE-UI-HOST-AUTH-REDIRECT', 'authenticated launch did not redirect to the clean Web origin')
+  }
+  receipt.observations.authenticatedRedirectToCleanOriginObserved = true
+  const sessionCookies = (await context.cookies(webOrigin)).filter(cookie =>
+    cookie.domain === '127.0.0.1'
+      && cookie.path === '/'
+      && cookie.httpOnly
+      && cookie.sameSite === 'Strict'
+      && !cookie.secure)
+  if (sessionCookies.length !== 1) {
+    throw new AcceptanceFailure('STORE-UI-HOST-AUTH-COOKIE', 'authenticated launch did not establish one secure-attribute loopback session cookie')
+  }
+  receipt.observations.authenticatedSessionCookieObserved = true
   await page.locator('body').waitFor({ state: 'visible', timeout: 30_000 })
   await page.waitForFunction(
     pluginId => globalThis.__DSH_BOOT__?.entries?.some(entry => entry.id === pluginId) === true,
@@ -342,6 +447,9 @@ try {
   receipt.observations.clientGraphEntryObserved = true
   if (!receipt.observations.clientBundleRequestObserved) {
     throw new AcceptanceFailure('STORE-UI-CLIENT-BUNDLE-REQUEST', 'the real browser did not request the packed Extension Center client bundle')
+  }
+  if (!receipt.observations.connectionStreamOpenObserved) {
+    throw new AcceptanceFailure('STORE-UI-CONNECTION-STREAM', 'the authenticated real Client did not open the official Connection event stream')
   }
   await dismissHostOnboarding(page, receipt.observations.onboardingActions)
   await captureBrowserEvidence(page)
@@ -412,11 +520,6 @@ try {
   }
   assertCleanRuntimeObservations(receipt.observations)
   await captureBrowserEvidence(page)
-  receipt.observations.officialDshPackageTreeUnchanged = await immutablePackageTreeDigest(officialHost.packageRoot)
-    === officialHost.packageTreeDigest
-  if (!receipt.observations.officialDshPackageTreeUnchanged) {
-    throw new AcceptanceFailure('STORE-UI-OFFICIAL-HOST-MODIFIED', 'Store UI journey changed the official DSH package tree')
-  }
   await context.close()
   context = undefined
   storeJourney.finish()
@@ -429,6 +532,75 @@ try {
   receipt.observations.hostStateUnchangedDuringStoreInteraction = mutableStateBefore === mutableStateAfter
   if (!receipt.observations.hostStateUnchangedDuringStoreInteraction) {
     throw new AcceptanceFailure('STORE-UI-HOST-STATE-MUTATED', 'opening, inspecting, dismissing, and closing the Store UI changed mutable Host state')
+  }
+  receipt.phase = 'removing-extension-center'
+  receipt.observations.webShutdown = await stopChild(webChild, {
+    requireRunning: true,
+    requireGraceful: true,
+  })
+  webChild = undefined
+  receipt.inputs.packageManagerOfflineRemovalRequested = true
+  const remove = await runChecked(dshBin, [
+    'plugin', '--profile', 'web', 'remove', 'dsh-plugin-extension-center',
+  ], {
+    cwd: workspace,
+    env: { ...runtimeEnv, PNPM_CONFIG_OFFLINE: 'true' },
+    timeoutMs: 120_000,
+  })
+  receipt.observations.officialCliRemovalObserved = true
+  await Promise.all([
+    writeFile(join(evidenceRoot, 'remove.stdout.txt'), sanitizeDiagnostic(remove.stdout)),
+    writeFile(join(evidenceRoot, 'remove.stderr.txt'), sanitizeDiagnostic(remove.stderr)),
+  ])
+  const profileRoot = join(dshHome, 'profiles', 'web')
+  const removedList = await runChecked(dshBin, ['plugin', '--profile', 'web', 'list', '--depth', '0'], {
+    cwd: workspace,
+    env: runtimeEnv,
+    timeoutMs: 60_000,
+  })
+  const removedDump = await runChecked(dshBin, ['--profile', 'web', '--dump-config'], {
+    cwd: workspace,
+    env: runtimeEnv,
+    timeoutMs: 60_000,
+  })
+  const removedManifest = JSON.parse(await readFile(join(profileRoot, 'package.json'), 'utf8'))
+  const removalEvidence = removedProfileEvidence({
+    manifest: removedManifest,
+    packageName: 'dsh-plugin-extension-center',
+    packagePresent: await pathExists(join(profileRoot, 'node_modules', 'dsh-plugin-extension-center')),
+    listStdout: removedList.stdout,
+    dumpStdout: removedDump.stdout,
+    dumpStderr: removedDump.stderr,
+  })
+  receipt.observations.profileDependencyAbsentAfterRemoval = removalEvidence.profileDependencyAbsent
+  receipt.observations.profileBundleAbsentAfterRemoval = removalEvidence.profileBundleAbsent
+  receipt.observations.profilePackageAbsentAfterRemoval = removalEvidence.profilePackageAbsent
+  receipt.observations.pluginListAbsentAfterRemoval = removalEvidence.pluginListAbsent
+  receipt.observations.bundleLayerAbsentAfterRemoval = removalEvidence.bundleLayerAbsent
+  receipt.observations.removedDumpStderrClean = removalEvidence.dumpStderrClean
+  await Promise.all([
+    writeFile(join(evidenceRoot, 'removed-plugin-list.stdout.txt'), sanitizeDiagnostic(removedList.stdout)),
+    writeFile(join(evidenceRoot, 'removed-plugin-list.stderr.txt'), sanitizeDiagnostic(removedList.stderr)),
+    writeFile(join(evidenceRoot, 'removed-dump-config.txt'), sanitizeDiagnostic(removedDump.stdout)),
+    writeFile(join(evidenceRoot, 'removed-dump-config.stderr.txt'), sanitizeDiagnostic(removedDump.stderr)),
+    writeFile(join(evidenceRoot, 'removed-profile-manifest.json'), `${JSON.stringify(removedManifest, null, 2)}\n`),
+  ])
+  const removalEvidenceFailure = removedProfileEvidenceError(removalEvidence)
+  if (removalEvidenceFailure !== null) {
+    throw new AcceptanceFailure(
+      'STORE-UI-OFFICIAL-REMOVE',
+      removalEvidenceFailure,
+    )
+  }
+  receipt.target.packageTreeDigestAfter = await immutablePackageTreeDigest(officialHost.packageRoot)
+  receipt.target.hostInstallTreeDigestAfter = await immutablePackageTreeDigest(hostRoot)
+  receipt.observations.officialDshPackageTreeUnchanged = receipt.target.packageTreeDigestAfter
+    === receipt.target.packageTreeDigestBefore
+  receipt.observations.officialHostInstallTreeUnchanged = receipt.target.hostInstallTreeDigestAfter
+    === receipt.target.hostInstallTreeDigestBefore
+  if (!receipt.observations.officialDshPackageTreeUnchanged
+    || !receipt.observations.officialHostInstallTreeUnchanged) {
+    throw new AcceptanceFailure('STORE-UI-OFFICIAL-HOST-MODIFIED', 'Plugin install, Host boot, or removal changed the official DSH package or install tree')
   }
   assertCleanRuntimeObservations(receipt.observations)
   receipt.phase = 'complete'
@@ -481,8 +653,22 @@ try {
   let postShutdownFailure
   try {
     assertCleanRuntimeObservations(receipt.observations)
-    await assertCanaryAbsentFromEvidence(evidenceRoot, SECRET_CANARY)
+    await assertSensitiveValueAbsentFromEvidence(
+      evidenceRoot,
+      SECRET_CANARY,
+      'STORE-UI-SECRET-EVIDENCE',
+      'secret canary',
+    )
     receipt.observations.secretCanaryAbsentFromEvidence = true
+    if (browserLaunchToken !== undefined) {
+      await assertSensitiveValueAbsentFromEvidence(
+        evidenceRoot,
+        browserLaunchToken,
+        'STORE-UI-AUTH-EVIDENCE',
+        'browser launch token',
+      )
+    }
+    receipt.observations.authTokenAbsentFromEvidence = true
   } catch (finalEvidenceError) {
     postShutdownFailure = finalEvidenceError
   }
@@ -516,7 +702,7 @@ try {
 }
 
 if (receipt.status === 'passed') {
-  process.stdout.write(`STORE-UI-01 official rc.2 unmodified-Host Store UI passed; evidence: ${evidenceRoot}\n`)
+  process.stdout.write(`STORE-UI-01 latest official DSH unmodified-Host Store UI passed; evidence: ${evidenceRoot}\n`)
 } else {
   process.stderr.write(`${receipt.failure?.message ?? 'Store acceptance failed'}\n`)
   process.stderr.write(`status=${receipt.status}; evidence=${evidenceRoot}\n`)
@@ -629,11 +815,11 @@ function assertCleanRuntimeObservations(observations) {
     || observations.planPreviewSubmissionObserved
     || observations.approvalSubmissionObserved
     || observations.lifecycleMutationSubmissionObserved
-    || observations.webSocketFramesSentDuringInteraction > 0
+    || observations.forbiddenConnectionWebSocketFrames.length > 0
   ) {
     throw new AcceptanceFailure(
       STORE_UI_EXTERNAL_NETWORK_OBSERVED,
-      `offline UI smoke observed ${String(observations.hostProxyRequests.length)} Host proxy requests, ${String(observations.browserExternalRequests.length)} external browser requests, ${String(observations.browserExternalWebSockets.length)} external browser WebSockets, ${String(observations.forbiddenWriteRequestsDuringInteraction.length)} forbidden write requests, plan preview=${String(observations.planPreviewSubmissionObserved)}, approval=${String(observations.approvalSubmissionObserved)}, lifecycle mutation=${String(observations.lifecycleMutationSubmissionObserved)}, and ${String(observations.webSocketFramesSentDuringInteraction)} interaction WebSocket frames`,
+      `offline UI smoke observed ${String(observations.hostProxyRequests.length)} Host proxy requests, ${String(observations.browserExternalRequests.length)} external browser requests, ${String(observations.browserExternalWebSockets.length)} external browser WebSockets, ${String(observations.forbiddenWriteRequestsDuringInteraction.length)} forbidden write requests, plan preview=${String(observations.planPreviewSubmissionObserved)}, approval=${String(observations.approvalSubmissionObserved)}, lifecycle mutation=${String(observations.lifecycleMutationSubmissionObserved)}, and ${String(observations.forbiddenConnectionWebSocketFrames.length)} unadmitted Connection frames`,
     )
   }
   if (observations.consoleFailures.length > 0) {
@@ -703,6 +889,17 @@ function hasExactKeys(value, expected) {
   const actual = Object.keys(value).sort()
   const sorted = [...expected].sort()
   return actual.length === sorted.length && actual.every((key, index) => key === sorted[index])
+}
+
+/** Return whether one exact path exists without following a final symlink. */
+async function pathExists(path) {
+  try {
+    await lstat(path)
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
 }
 
 /** Settle an asynchronous finalizer within a fixed evidence-writing deadline. */
@@ -916,9 +1113,9 @@ async function assertStoreDefaultShell(activePage, observations) {
     ['Host dependency', 'Runtime dependency', 'node >=18', 'Required'],
   ])
   await assertComparisonRowContains(comparison, 'Compatibility evidence', [
-    ['Compatible with rc.2', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'one bounded SKILL.md'],
-    ['Compatible with rc.2', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'release declares and tests the exact DSH'],
-    ['Compatible with rc.2', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'exposes stdio'],
+    ['Compatible', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'one bounded SKILL.md'],
+    ['Compatible', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'release declares and tests the exact DSH'],
+    ['Compatible', 'DSH 0.1.1-rc.2', 'darwin/linux/windows', 'exposes stdio'],
   ])
   await assertComparisonRowContains(comparison, 'Target scopes', [
     ['User', 'Project'], ['Web Profile'], ['Web Profile'],
@@ -1155,17 +1352,17 @@ async function hashMutableTree(root, path, hash) {
   for (const entry of entries) await hashMutableTree(root, join(path, entry.name), hash)
 }
 
-/** Prove the fixed input canary is absent from every persisted evidence byte. */
-async function assertCanaryAbsentFromEvidence(directory, canary) {
-  const canaryBytes = Buffer.from(canary)
+/** Prove one sensitive in-memory value is absent from every persisted evidence byte. */
+async function assertSensitiveValueAbsentFromEvidence(directory, value, code, label) {
+  const sensitiveBytes = Buffer.from(value)
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name)
     if (entry.isDirectory()) {
-      await assertCanaryAbsentFromEvidence(path, canary)
+      await assertSensitiveValueAbsentFromEvidence(path, value, code, label)
       continue
     }
-    if ((await readFile(path)).includes(canaryBytes)) {
-      throw new AcceptanceFailure('STORE-UI-SECRET-EVIDENCE', `secret canary reached persisted evidence file ${entry.name}`)
+    if ((await readFile(path)).includes(sensitiveBytes)) {
+      throw new AcceptanceFailure(code, `${label} reached persisted evidence file ${entry.name}`)
     }
   }
 }

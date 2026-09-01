@@ -20,7 +20,7 @@ vi.mock('../src/recovery/install.ts', () => ({
     officialDsh: {
       schemaVersion: 2,
       packageName: '@deepseek-ai/dsh',
-      packageVersion: '0.1.2-alpha.1',
+      packageVersion: '0.1.2-alpha.3',
       packageRoot: root,
       packageTreeSha256: `sha256:${'2'.repeat(64)}`,
       productionDependencies: [],

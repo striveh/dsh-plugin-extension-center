@@ -1,5 +1,7 @@
 # Alpha 产品 P0 复合门禁
 
+> 这是保留供审计的历史 npm 时代复合设计，不属于当前兼容或完成门禁。当前目标是让独立 packed 插件在最新版已审查、未经修改的官方 DSH 上运行。
+
 这个 verifier 是最终 fail-closed 产品绑定器。普通用户 receipt 通过，只能证明官方 DSH registry 安装与 Skill UI 全生命周期；它的 `laneStatus: "proven"` 会刻意保持 `p0Status: "red"`。只有下表每一行都通过且所有不可变产品身份一致，产品 P0 才能变为 proven。
 
 该门禁属于仓库验收工具，不是 runtime 功能或 catalog 候选，也不会进入发布插件的 payload。

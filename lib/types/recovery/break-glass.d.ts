@@ -17,7 +17,7 @@ interface OfficialDshDependencyBinding {
 interface OfficialDshRecoveryBinding {
     readonly schemaVersion: 2;
     readonly packageName: '@deepseek-ai/dsh';
-    readonly packageVersion: '0.1.2-alpha.1';
+    readonly packageVersion: '0.1.2-alpha.3';
     readonly packageRoot: string;
     readonly packageTreeSha256: string;
     readonly productionDependencies: readonly OfficialDshDependencyBinding[];

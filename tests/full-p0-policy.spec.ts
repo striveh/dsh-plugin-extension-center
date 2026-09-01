@@ -23,7 +23,7 @@ const host = {
 
 function policyInput(): CandidatePolicyInput {
   const entry = structuredClone(BOOTSTRAP_CATALOG_ENVELOPE.entries.find(item => item.kind === 'skill')!)
-  entry.compatibility.dsh = '0.1.2-alpha.1'
+  entry.compatibility.dsh = '0.1.2-alpha.3'
   for (const action of Object.values(entry.lifecycle)) {
     action.status = 'available'
     delete action.reason

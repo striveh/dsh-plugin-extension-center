@@ -18,6 +18,6 @@ export interface Config {
     readonly dshCliEntrypoint?: string;
     readonly dshCliTimeoutMs?: number;
 }
-/** Assemble every managed lifecycle inside one independent plugin on official DSH 0.1.2-alpha.1. */
+/** Assemble every managed lifecycle inside one independent plugin on official DSH 0.1.2-alpha.3. */
 export declare function apply(ctx: Context, config?: Config): Promise<void>;
 //# sourceMappingURL=host-plugin.d.ts.map

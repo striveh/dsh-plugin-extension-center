@@ -15,16 +15,16 @@ const clientPackages = [
 ]
 
 function manifest() {
-  const peers = Object.fromEntries(clientPackages.map(name => [name, '0.1.2-alpha.1']))
+  const peers = Object.fromEntries(clientPackages.map(name => [name, '0.1.2-alpha.3']))
   return {
     name: 'dsh-plugin-extension-center',
     version: '0.2.0-alpha.1',
     publishConfig: { access: 'public', tag: 'next' },
-    engines: { dsh: '0.1.2-alpha.1' },
-    dependencies: { '@deepseek-ai/dsh-mcp-client': '0.1.2-alpha.1' },
+    engines: { dsh: '0.1.2-alpha.3' },
+    dependencies: { '@deepseek-ai/dsh-mcp-client': '0.1.2-alpha.3' },
     peerDependencies: peers,
     devDependencies: {
-      '@deepseek-ai/dsh': '0.1.2-alpha.1',
+      '@deepseek-ai/dsh': '0.1.2-alpha.3',
       ...peers,
     },
   }
@@ -33,19 +33,19 @@ function manifest() {
 function lockfile() {
   const lines = ["lockfileVersion: '9.0'", 'importers:', '  .:', '    dependencies:']
   for (const name of ['@deepseek-ai/dsh-mcp-client']) {
-    lines.push(`      '${name}':`, '        specifier: 0.1.2-alpha.1', '        version: 0.1.2-alpha.1')
+    lines.push(`      '${name}':`, '        specifier: 0.1.2-alpha.3', '        version: 0.1.2-alpha.3')
   }
   lines.push('    devDependencies:')
   for (const name of ['@deepseek-ai/dsh', ...clientPackages]) {
-    lines.push(`      '${name}':`, '        specifier: 0.1.2-alpha.1', '        version: 0.1.2-alpha.1')
+    lines.push(`      '${name}':`, '        specifier: 0.1.2-alpha.3', '        version: 0.1.2-alpha.3')
   }
   lines.push('packages:')
   for (const name of ['@deepseek-ai/dsh', '@deepseek-ai/dsh-mcp-client', ...clientPackages]) {
-    lines.push(`  '${name}@0.1.2-alpha.1': {}`)
+    lines.push(`  '${name}@0.1.2-alpha.3': {}`)
   }
   lines.push('snapshots:')
   for (const name of ['@deepseek-ai/dsh', '@deepseek-ai/dsh-mcp-client', ...clientPackages]) {
-    lines.push(`  '${name}@0.1.2-alpha.1': {}`)
+    lines.push(`  '${name}@0.1.2-alpha.3': {}`)
   }
   return `${lines.join('\n')}\n`
 }
@@ -53,7 +53,7 @@ function lockfile() {
 test('accepts only one fully aligned alpha publication input', () => {
   assert.deepEqual(assertAlphaPublicationLock(lockfile(), manifest()), {
     centerVersion: '0.2.0-alpha.1',
-    dshVersion: '0.1.2-alpha.1',
+    dshVersion: '0.1.2-alpha.3',
   })
 })
 
@@ -69,7 +69,7 @@ test('rejects a mixed rc.2 runtime or development tree', () => {
 
 test('rejects a stale lock even when the manifest is aligned', () => {
   assert.throws(
-    () => assertAlphaPublicationLock(lockfile().replace('specifier: 0.1.2-alpha.1', 'specifier: 0.1.1-rc.2'), manifest()),
+    () => assertAlphaPublicationLock(lockfile().replace('specifier: 0.1.2-alpha.3', 'specifier: 0.1.1-rc.2'), manifest()),
     /lockfile does not bind/u,
   )
 })
@@ -77,7 +77,7 @@ test('rejects a stale lock even when the manifest is aligned', () => {
 test('rejects a longer prerelease prefix and any mixed transitive DSH release', () => {
   assert.throws(
     () => assertAlphaPublicationLock(
-      lockfile().replace('version: 0.1.2-alpha.1', 'version: 0.1.2-alpha.10'),
+      lockfile().replace('version: 0.1.2-alpha.3', 'version: 0.1.2-alpha.30'),
       manifest(),
     ),
     /lockfile does not bind/u,
@@ -100,7 +100,7 @@ test('rejects unenumerated manifest DSH dependencies and incomplete lock trees',
   )
 
   const extraManifest = manifest()
-  extraManifest.dependencies['@deepseek-ai/dsh-extra'] = '0.1.2-alpha.1'
+  extraManifest.dependencies['@deepseek-ai/dsh-extra'] = '0.1.2-alpha.3'
   assert.throws(
     () => assertAlphaPublicationLock(lockfile(), extraManifest),
     /lockfile does not bind @deepseek-ai\/dsh-extra/u,
@@ -114,8 +114,8 @@ test('rejects unenumerated manifest DSH dependencies and incomplete lock trees',
 
 test('rejects mixed DSH references inside an otherwise alpha-keyed lock tree', () => {
   const mixed = lockfile().replace(
-    "  '@deepseek-ai/dsh@0.1.2-alpha.1': {}",
-    "  '@deepseek-ai/dsh@0.1.2-alpha.1':\n    dependencies:\n      '@deepseek-ai/dsh-agent': 0.1.1-rc.2",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3': {}",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':\n    dependencies:\n      '@deepseek-ai/dsh-agent': 0.1.1-rc.2",
   )
   assert.throws(
     () => assertAlphaPublicationLock(mixed, manifest()),

@@ -8,7 +8,7 @@ export declare const en: {
     readonly close: "Close Extension Store";
     readonly description: "Discover Plugin, MCP server, and Skill candidates from one verified local catalog.";
     readonly preview: "Trusted extension catalog";
-    readonly host: "DSH 0.1.2-alpha.1";
+    readonly host: "DSH 0.1.2-alpha.3";
     readonly views: "Extension Center views";
     readonly 'tab.store': "Store";
     readonly 'tab.installed': "Installed";

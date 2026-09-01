@@ -54,7 +54,6 @@ const RELEASE_CATALOG_NOT_PROVEN = Object.freeze([
   'catalog-future-source-availability-or-status',
 ])
 const EXPECTED_FULL_NOT_PROVEN = Object.freeze([
-  'published-extension-center-release-installation',
   'center-update-with-distinct-artifact-version-and-digest',
   'update-with-distinct-signed-catalog-revision',
   'cross-platform-matrix',
@@ -198,9 +197,9 @@ function passedReceipt(receipt, schemaVersion, acceptanceId, label) {
 }
 
 function faultMatrixEvidence(value, expectedArtifactDigest, targetValue) {
-  const matrix = record(value, 'full official rc.2 faultMatrix')
+  const matrix = record(value, 'full latest official DSH faultMatrix')
   exactKeys(matrix, ['schemaVersion', 'proofScope', 'artifactDigest', 'platform', 'arch', 'cases'], 'faultMatrix')
-  const target = record(targetValue, 'full official rc.2 target')
+  const target = record(targetValue, 'full latest official DSH target')
   if (matrix.schemaVersion !== 1
     || matrix.proofScope !== 'packed-center-owned-skill-journal-faults'
     || matrix.artifactDigest !== expectedArtifactDigest
@@ -241,7 +240,7 @@ function officialTarget(targetValue, label, options = {}) {
     || target.registry !== OFFICIAL_NPM_REGISTRY
     || target.registryIntegrity !== TARGET_DSH_REGISTRY_INTEGRITY
     || (options.version === true && target.version !== TARGET_DSH_VERSION)) {
-    fail('P0-RELEASE-READY-OFFICIAL-DSH', `${label} does not bind the exact official DSH rc.2 artifact`)
+    fail('P0-RELEASE-READY-OFFICIAL-DSH', `${label} does not bind the exact latest official DSH artifact`)
   }
   if (options.after === true && target.packageTreeDigestBefore !== packageTreeDigest) {
     fail('P0-RELEASE-READY-OFFICIAL-DSH', `${label} changed the official DSH package tree`)
@@ -256,19 +255,19 @@ function officialTarget(targetValue, label, options = {}) {
 }
 
 function fullP0Evidence(value) {
-  const receipt = record(value, 'full official rc.2 receipt')
-  passedReceipt(receipt, 1, 'P0-RC2-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES', 'full official rc.2 receipt')
-  if (receipt.proofScope !== 'packed-extension-unmodified-official-rc2-host-rpc-plugin-mcp-skill-lifecycles'
-    || receipt.p0Status !== 'official-rc2-lifecycle-proven'
-    || receipt.releaseClaim !== 'official-dsh-rc2-compatible') {
-    fail('P0-RELEASE-READY-CLAIM', 'full official rc.2 receipt overstates or changes its proof scope')
+  const receipt = record(value, 'full latest official DSH receipt')
+  passedReceipt(receipt, 1, 'P0-LATEST-DSH-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES', 'full latest official DSH receipt')
+  if (receipt.proofScope !== 'packed-extension-unmodified-latest-dsh-host-rpc-plugin-mcp-skill-lifecycles'
+    || receipt.p0Status !== 'latest-dsh-lifecycle-proven'
+    || receipt.releaseClaim !== 'latest-official-dsh-compatible') {
+    fail('P0-RELEASE-READY-CLAIM', 'full latest official DSH receipt overstates or changes its proof scope')
   }
-  exactArray(receipt.notProven, EXPECTED_FULL_NOT_PROVEN, 'full official rc.2 notProven')
+  exactArray(receipt.notProven, EXPECTED_FULL_NOT_PROVEN, 'full latest official DSH notProven')
   const smoke = record(record(receipt.compatibilitySmokes, 'compatibility smokes').liveProvider, 'live provider smoke')
   if (smoke.status !== 'not-run' || smoke.blocking !== false) {
     fail('P0-RELEASE-READY-CLAIM', 'live-provider compatibility smoke must remain advisory and non-blocking')
   }
-  const inputs = record(receipt.inputs, 'full official rc.2 inputs')
+  const inputs = record(receipt.inputs, 'full latest official DSH inputs')
   if (inputs.isolatedHomesCreatedEmpty !== true || inputs.credentialVariablesPassed !== false
     || inputs.providerEndpointOverridePassed !== false || inputs.telemetryModeRequested !== 'DISABLED'
     || inputs.packedArtifactInstalledByOfficialPluginCli !== true
@@ -276,9 +275,9 @@ function fullP0Evidence(value) {
     || inputs.keylessOfficialReplayBundleInstalled !== true
     || inputs.keylessOfficialReplayBundleRemoved !== true
     || inputs.officialCliRemovalProven !== true || inputs.breakGlassRecoveryProven !== true) {
-    fail('P0-RELEASE-READY-CLAIM', 'full official rc.2 receipt omits a required keyless lifecycle observation')
+    fail('P0-RELEASE-READY-CLAIM', 'full latest official DSH receipt omits a required keyless lifecycle observation')
   }
-  const observations = record(receipt.observations, 'full official rc.2 observations')
+  const observations = record(receipt.observations, 'full latest official DSH observations')
   const agentBrowserWrites = Array.isArray(observations.browserLifecycleRpcMethods)
     ? observations.browserLifecycleRpcMethods.filter(value => ['plan/decide', 'lifecycle/request'].includes(value))
     : []
@@ -299,13 +298,13 @@ function fullP0Evidence(value) {
     || !Array.isArray(observations.terminalJournalHeadDigests) || observations.terminalJournalHeadDigests.length < 1
     || observations.terminalJournalHeadDigests.some(value => !SHA256.test(value))
     || observations.controlledAba === null || observations.breakGlassRecovery === null) {
-    fail('P0-RELEASE-READY-CLAIM', 'full official rc.2 receipt omits immutable Host, approval, recovery, or terminal evidence')
+    fail('P0-RELEASE-READY-CLAIM', 'full latest official DSH receipt omits immutable Host, approval, recovery, or terminal evidence')
   }
-  const artifact = record(receipt.artifact, 'full official rc.2 artifact')
+  const artifact = record(receipt.artifact, 'full latest official DSH artifact')
   const artifactDigest = digest(artifact.digest, 'full artifact digest')
   const faultMatrix = faultMatrixEvidence(observations.faultMatrix, artifactDigest, receipt.target)
   return Object.freeze({
-    target: officialTarget(receipt.target, 'full official rc.2', { version: true }),
+    target: officialTarget(receipt.target, 'full latest official DSH', { version: true }),
     artifact: Object.freeze({
       version: bounded(artifact.version, 'full artifact version', 128),
       sha256: artifactDigest,
@@ -864,7 +863,7 @@ function previousReleaseReadyBindings(value, bootstrap, releaseStage, schemaVers
   const fullP0 = releaseReadyEvidenceFile(
     evidence.fullP0,
     'previous release-ready full P0 evidence',
-    'P0-RC2-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
+    'P0-LATEST-DSH-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
     ['faultMatrix'],
   )
   digest(fullP0.sha256, 'previous release-ready full P0 evidence SHA-256')
@@ -1478,7 +1477,7 @@ export function assertReleaseReady(inputValue) {
 
   for (const field of ['dshPackage', 'auditedSourceCommit', 'registry', 'registryIntegrity']) {
     if (full.target[field] !== runtime.target[field] || full.target[field] !== published.target[field]) {
-      fail('P0-RELEASE-READY-BINDING', 'receipts do not share one exact published official DSH rc.2 identity')
+      fail('P0-RELEASE-READY-BINDING', 'receipts do not share one exact published latest official DSH identity')
     }
   }
   sameArtifact(runtime.current, published.current, 'current runtime and public artifacts')

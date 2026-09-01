@@ -1753,7 +1753,7 @@ function printHelp() {
   process.stdout.write(`Usage: node acceptance/ordinary-user/run.mjs [options]\n\n`
     + `Production defaults:\n`
     + `  --mode registry\n`
-    + `  --dsh-version 0.1.2-alpha.1\n`
+    + `  --dsh-version 0.1.2-alpha.3\n`
     + `  --center-initial-spec dsh-plugin-extension-center@0.2.0-alpha.0\n`
     + `  --center-target-spec dsh-plugin-extension-center@next\n\n`
     + `Options:\n`

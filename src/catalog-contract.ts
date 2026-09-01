@@ -37,7 +37,7 @@ export interface CatalogSource {
 /** Compatibility evidence for the exact supported Host. */
 export interface CatalogCompatibility {
   readonly status: 'compatible' | 'review-required'
-  readonly dsh: '0.1.1-rc.2' | '0.1.2-alpha.1'
+  readonly dsh: '0.1.1-rc.2' | '0.1.2-alpha.3'
   readonly platforms: readonly ('darwin' | 'linux' | 'windows')[]
   readonly detail: LocalizedText
 }

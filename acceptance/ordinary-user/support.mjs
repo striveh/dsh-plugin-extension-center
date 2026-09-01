@@ -6,7 +6,7 @@ import { dirname, isAbsolute, resolve } from 'node:path'
 export const NPM_REGISTRY = 'https://registry.npmjs.org/'
 
 /** Newest official DSH source release targeted while its npm publication is pending. */
-export const DEFAULT_DSH_VERSION = '0.1.2-alpha.1'
+export const DEFAULT_DSH_VERSION = '0.1.2-alpha.3'
 
 /** Package manager version required by the official DSH Plugin CLI. */
 export const PNPM_VERSION = '11.21.0'

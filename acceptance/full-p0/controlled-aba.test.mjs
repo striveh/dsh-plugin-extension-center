@@ -38,7 +38,7 @@ test('binds the official restart-required B→A setup to the exact operation and
     operationId: 'operation-install-1',
     profileId: 'web',
     packageName: 'dsh-plugin-managed-fixture',
-    officialCliPackage: '@deepseek-ai/dsh@0.1.1-rc.2',
+    officialCliPackage: '@deepseek-ai/dsh@0.1.2-alpha.3',
     action: 'official-cli-remove',
     transition: 'B-to-A',
     stateAfterRestartRequired: installed,
@@ -308,7 +308,7 @@ test('lease-first and failed launch outcomes retain their exact semantics', asyn
 })
 
 test('the official runner obtains restart-required, stops the old Host, then launches the controlled restart', async () => {
-  const source = await readFile(fileURLToPath(new URL('./verify-official-rc2.mjs', import.meta.url)), 'utf8')
+  const source = await readFile(fileURLToPath(new URL('./verify-latest-dsh.mjs', import.meta.url)), 'utf8')
   const lifecycle = source.indexOf("const abaLifecycle = await rpc.call('lifecycle/request'")
   const restartRequired = source.indexOf('assertRestartRequiredLifecycle(rpc, abaLifecycle, abaPlan)', lifecycle)
   const stopped = source.indexOf('await stopChild(oldAbaHost)', restartRequired)

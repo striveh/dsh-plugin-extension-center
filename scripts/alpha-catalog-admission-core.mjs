@@ -17,9 +17,9 @@ const OPERATION_ID = /^operation:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9
 const MANAGED_REVISION = /^center:[1-9][0-9]*$/u
 const CONFIGURATION_INITIAL_DIGEST = canonicalSha256({ modelInvocable: true, userInvocable: true, projectRoot: null })
 const CONFIGURATION_CONFIGURED_DIGEST = canonicalSha256({ modelInvocable: true, userInvocable: false, projectRoot: null })
-const TARGET_DSH_VERSION = '0.1.2-alpha.1'
-const TARGET_DSH_TAG = 'dsh-v0.1.2-alpha.1'
-const TARGET_DSH_COMMIT = 'cd5ef8148158c3a752a658978873241fdf8e2bbc'
+const TARGET_DSH_VERSION = '0.1.2-alpha.3'
+const TARGET_DSH_TAG = 'dsh-v0.1.2-alpha.3'
+const TARGET_DSH_COMMIT = 'dd6322d604e00eec1ba5e0c8541159906a21094a'
 const REPOSITORY = 'microsoft/skills'
 const REPOSITORY_URL = 'https://github.com/microsoft/skills'
 const SKILL_DIRECTORY = '.github/plugins/deep-wiki/skills/wiki-page-writer'
@@ -28,7 +28,7 @@ const SEARCH_SOURCE_ID = 'github-alpha-wiki-skill-search'
 const SEARCH_URL = 'https://api.github.com/search/repositories?q=repo%3Amicrosoft%2Fskills+topic%3Aagent-skills&per_page=1&page=1'
 const LIFECYCLE_WORKFLOW = '.github/workflows/official-alpha-wiki-lifecycle.yml'
 const NOT_PROVEN = Object.freeze([
-  'ordinary-user-registry-installation',
+  'public-github-artifact-installation',
   'public-catalog-deployment',
 ])
 
@@ -448,7 +448,7 @@ export function prepareAlphaLifecycleCatalog(input, policy = PRODUCTION_ALPHA_AD
     status: 'development-only',
     notProven: Object.freeze([
       'catalog-admission',
-      'ordinary-user-registry-installation',
+      'public-github-artifact-installation',
       'public-catalog-deployment',
     ]),
     targetDsh: Object.freeze({

@@ -1,4 +1,4 @@
-/** Verified private execution of the official DSH 0.1.2-alpha.1 Plugin CLI. */
+/** Verified private execution of the official DSH 0.1.2-alpha.3 Plugin CLI. */
 import type { OfficialDshRecoveryBinding } from '../plans/types.ts';
 import { type ProfileMetadataCacheBinding } from './profile-metadata-cache.ts';
 /** Verify every executable and package identity in one official execution binding. */

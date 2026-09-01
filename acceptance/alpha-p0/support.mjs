@@ -18,7 +18,7 @@ import { verifyCatalog } from '../../lib/catalog.js'
 import { BOOTSTRAP_CATALOG_ROOT } from '../../lib/catalog-data.js'
 
 export const ALPHA_P0_ACCEPTANCE_ID = 'P0-ALPHA-EXTENSION-CENTER-COMPOSITE'
-export const ALPHA_P0_DSH_COMMIT = 'cd5ef8148158c3a752a658978873241fdf8e2bbc'
+export const ALPHA_P0_DSH_COMMIT = 'dd6322d604e00eec1ba5e0c8541159906a21094a'
 export const ALPHA_P0_CENTER_VERSION = '0.2.0-alpha.1'
 export const ALPHA_P0_CATALOG_ID = 'dsh-extension-center-public'
 

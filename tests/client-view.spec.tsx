@@ -312,7 +312,7 @@ describe('signed read-only Extension Store', () => {
       compatibility: {
         ...sourceEntry.compatibility,
         status: 'compatible' as const,
-        dsh: '0.1.2-alpha.1' as const,
+        dsh: '0.1.2-alpha.3' as const,
         detail: {
           en: 'Verified against the exact official alpha target.',
           zh: '已针对准确官方 alpha 目标完成验证。',
@@ -332,7 +332,7 @@ describe('signed read-only Extension Store', () => {
     expect(within(card).queryByText('Compatible with rc.2')).toBeNull()
     fireEvent.click(within(card).getByRole('button', { name: 'View details' }))
     let details = within(store).getByRole('heading', { level: 3, name: alphaEntry.displayName.en }).closest('section')!
-    expect(within(details).getByText(/Compatible · DSH 0\.1\.2-alpha\.1/u)).toBeVisible()
+    expect(within(details).getByText(/Compatible · DSH 0\.1\.2-alpha\.3/u)).toBeVisible()
     english.unmount()
 
     renderCenter(zh, catalog)
@@ -344,7 +344,7 @@ describe('signed read-only Extension Store', () => {
     expect(within(card).queryByText('兼容 rc.2')).toBeNull()
     fireEvent.click(within(card).getByRole('button', { name: '查看详情' }))
     details = within(store).getByRole('heading', { level: 3, name: alphaEntry.displayName.zh }).closest('section')!
-    expect(within(details).getByText(/兼容 · DSH 0\.1\.2-alpha\.1/u)).toBeVisible()
+    expect(within(details).getByText(/兼容 · DSH 0\.1\.2-alpha\.3/u)).toBeVisible()
   })
 
   it('shows typed resolver details for the exact 0.1.1 candidate', async () => {

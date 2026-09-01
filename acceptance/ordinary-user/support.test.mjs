@@ -275,7 +275,7 @@ function completedReceipt(config) {
 test('defaults to the unpublished alpha registry lane without a local artifact escape', () => {
   const parsed = parseNeutralArguments([], '/acceptance')
   assert.equal(parsed.mode, 'registry')
-  assert.equal(parsed.dshVersion, '0.1.2-alpha.1')
+  assert.equal(parsed.dshVersion, '0.1.2-alpha.3')
   assert.deepEqual(parsed.center, {
     initial: {
       kind: 'registry',
@@ -335,7 +335,7 @@ test('admits only the exact signed Skill successor coordinates with alpha compat
     name: 'wiki-page-writer',
     artifact: { version, integrity, sizeBytes },
     source: { revision: version },
-    compatibility: { status: 'compatible', dsh: '0.1.2-alpha.1', platforms: [platform] },
+    compatibility: { status: 'compatible', dsh: '0.1.2-alpha.3', platforms: [platform] },
     scopes: ['user'],
     configuration: { credentials: 'none' },
     lifecycle,
@@ -354,18 +354,18 @@ test('admits only the exact signed Skill successor coordinates with alpha compat
       5_869,
     ),
   ]
-  assert.deepEqual(selectAlphaWikiPair(entries, '0.1.2-alpha.1'), {
+  assert.deepEqual(selectAlphaWikiPair(entries, '0.1.2-alpha.3'), {
     initial: entries[0],
     update: entries[1],
   })
   entries[1].compatibility.dsh = '0.1.1-rc.2'
-  assert.equal(selectAlphaWikiPair(entries, '0.1.2-alpha.1'), null)
+  assert.equal(selectAlphaWikiPair(entries, '0.1.2-alpha.3'), null)
 })
 
 test('development mode admits only an immutable github shorthand and explicit package identity', () => {
   const parsed = parseNeutralArguments([
     '--mode', 'development',
-    '--dsh-version', '0.1.2-alpha.1',
+    '--dsh-version', '0.1.2-alpha.3',
     '--dsh-source-root', '/official/deepseek-harness',
     '--dsh-commit', alphaCommit,
     '--center-initial-spec', `github:striveh/dsh-plugin-extension-center#${initialCenterCommit}`,
@@ -467,8 +467,8 @@ test('admits only complete protected-main Actions provenance', () => {
 
 test('compares exact release and prerelease update targets by semantic precedence', () => {
   assert.equal(compareExactVersions('0.1.1', '0.1.0'), 1)
-  assert.equal(compareExactVersions('0.1.2-alpha.1', '0.1.2-alpha.0'), 1)
-  assert.equal(compareExactVersions('0.1.2', '0.1.2-alpha.1'), 1)
+  assert.equal(compareExactVersions('0.1.2-alpha.3', '0.1.2-alpha.0'), 1)
+  assert.equal(compareExactVersions('0.1.2', '0.1.2-alpha.3'), 1)
   assert.equal(compareExactVersions('0.1.0+target', '0.1.0+initial'), 0)
   assert.equal(compareExactVersions('0.1.0-alpha.1', '0.1.0-alpha.beta'), -1)
 })

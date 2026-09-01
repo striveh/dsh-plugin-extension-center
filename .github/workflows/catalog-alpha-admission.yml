@@ -103,10 +103,10 @@ jobs:
           test "$(jq -er '.envelope.revision' .artifacts/catalog-alpha-admission/plugins.json)" = 12
           test "$(jq -er '.envelope.previousRevisionDigest' .artifacts/catalog-alpha-admission/plugins.json)" = sha256:0ef63a409773a3604b80f04bdf8b577b7706306e0e77c954719620b4b71e2466
           test "$(jq -er '.envelope.entries | length' .artifacts/catalog-alpha-admission/plugins.json)" = 2
-          test "$(jq -er '[.envelope.entries[].compatibility.dsh] | unique == ["0.1.2-alpha.1"]' .artifacts/catalog-alpha-admission/plugins.json)" = true
+          test "$(jq -er '[.envelope.entries[].compatibility.dsh] | unique == ["0.1.2-alpha.3"]' .artifacts/catalog-alpha-admission/plugins.json)" = true
           test "$(jq -er '.kind' .artifacts/catalog-alpha-admission/evidence.json)" = official-dsh-alpha-entry-changing-catalog-admission
           test "$(jq -er '.status' .artifacts/catalog-alpha-admission/evidence.json)" = prepared-for-review
-          test "$(jq -er '.notProven == ["ordinary-user-registry-installation", "public-catalog-deployment"]' .artifacts/catalog-alpha-admission/evidence.json)" = true
+          test "$(jq -er '.notProven == ["public-github-artifact-installation", "public-catalog-deployment"]' .artifacts/catalog-alpha-admission/evidence.json)" = true
           sha256sum \
             .artifacts/catalog-alpha-admission/plugins.json \
             .artifacts/catalog-alpha-admission/evidence.json \

@@ -126,7 +126,7 @@ function protocolOwner(value: unknown, methods: readonly string[]): boolean {
   return functions(value, methods) && (value as Readonly<Record<string, unknown>>).protocolVersion === 1
 }
 
-/** Bind Center-owned lifecycles to the exact official rc.2 registries they use. */
+/** Bind Center-owned lifecycles to the exact official DSH registries they use. */
 export function bindHostOwners(
   lookup: ServiceLookup,
   internal: Readonly<{

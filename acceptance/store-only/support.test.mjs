@@ -15,12 +15,18 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  comboUrlContainsClientBundle,
+  describeUnadmittedConnectionFrame,
   describeNetworkDestination,
   immutablePackageTreeDigest,
   isAdmittedBrowserRequest,
   isAdmittedBrowserWebSocket,
+  parseAuthenticatedLaunchUrl,
+  parseAdmittedConnectionFrame,
   parsePnpmRegistryIntegrity,
   parseReadyUrl,
+  removedProfileEvidence,
+  removedProfileEvidenceError,
   runChecked,
   sanitizeDiagnostic,
   stopChild,
@@ -30,17 +36,17 @@ test('official Host identity binds one exact registry integrity and isolated roo
   const fixtureRoot = join(process.cwd(), '.official-host-fixture')
   const sourceRoot = join(process.cwd(), '.source-fixture')
   const lockfile = [
-    "  '@deepseek-ai/dsh@0.1.1-rc.2':",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
     `    resolution: {integrity: ${TARGET_DSH_REGISTRY_INTEGRITY}}`,
     '    hasBin: true',
     '',
   ].join('\n')
   assert.equal(
-    parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', '0.1.1-rc.2'),
+    parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', '0.1.2-alpha.3'),
     TARGET_DSH_REGISTRY_INTEGRITY,
   )
   assert.throws(
-    () => parsePnpmRegistryIntegrity(`${lockfile}${lockfile}`, '@deepseek-ai/dsh', '0.1.1-rc.2'),
+    () => parsePnpmRegistryIntegrity(`${lockfile}${lockfile}`, '@deepseek-ai/dsh', '0.1.2-alpha.3'),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-INTEGRITY',
   )
   assert.doesNotThrow(() => assertIsolatedOfficialHostPaths({
@@ -83,6 +89,29 @@ test('ready URL accepts only the canonical loopback Web origin', () => {
   )
 })
 
+test('authenticated launch URL accepts only one canonical in-memory token', () => {
+  const token = 'A'.repeat(43)
+  const launchUrl = `http://127.0.0.1:43127/?token=${token}`
+  assert.equal(parseAuthenticatedLaunchUrl(`booting\ndsh web: ${launchUrl}\n`), launchUrl)
+  for (const candidate of [
+    'http://127.0.0.1:43127/',
+    `http://127.0.0.1:43127/?token=${token}&token=${token}`,
+    `http://127.0.0.1:43127/?token=${token}&other=value`,
+    `http://localhost:43127/?token=${token}`,
+    `http://0.0.0.0:43127/?token=${token}`,
+    `http://127.0.0.1:43127/index.html?token=${token}`,
+    `http://user@127.0.0.1:43127/?token=${token}`,
+    `http://127.0.0.1:43127/?token=${token}#fragment`,
+    `http://127.0.0.1:43127/?token=${'A'.repeat(42)}`,
+  ]) {
+    assert.throws(
+      () => parseAuthenticatedLaunchUrl(`dsh web: ${candidate}`),
+      error => error instanceof AcceptanceFailure && error.code === 'STORE-UI-HOST-AUTH-URL',
+      candidate,
+    )
+  }
+})
+
 test('persisted network evidence drops URL values and credential assignments', () => {
   assert.equal(
     describeNetworkDestination('https://user:token@example.com:8443/private/canary?secret=value#fragment'),
@@ -102,6 +131,100 @@ test('browser network admission is exact-origin only', () => {
   assert.equal(isAdmittedBrowserWebSocket('ws://127.0.0.1:43127/rpc', origin), true)
   assert.equal(isAdmittedBrowserWebSocket('wss://example.com/rpc', origin), false)
   assert.equal(isAdmittedBrowserWebSocket('ws://127.0.0.1:43128/rpc', origin), false)
+})
+
+test('client combo request binds the exact package entry', () => {
+  const origin = 'http://127.0.0.1:43127'
+  assert.equal(
+    comboUrlContainsClientBundle(
+      `${origin}/plugins/??a/client.js,dsh-plugin-extension-center/client.js,b/client.js&rev=nonce`,
+      'dsh-plugin-extension-center',
+    ),
+    true,
+  )
+  assert.equal(
+    comboUrlContainsClientBundle(
+      `${origin}/plugins/??a/client.js,dsh-plugin-extension-center-other/client.js&rev=nonce`,
+      'dsh-plugin-extension-center',
+    ),
+    false,
+  )
+  assert.equal(
+    comboUrlContainsClientBundle(`${origin}/plugins/dsh-plugin-extension-center/client.js`, 'dsh-plugin-extension-center'),
+    false,
+  )
+})
+
+test('Connection frame parser admits only the official event stream', () => {
+  assert.deepEqual(
+    parseAdmittedConnectionFrame(JSON.stringify({
+      type: 'open',
+      streamId: 'stream-1',
+      endpoint: '$events',
+      payload: { args: {} },
+    })),
+    { type: 'open', streamId: 'stream-1', endpoint: '$events' },
+  )
+  assert.deepEqual(
+    parseAdmittedConnectionFrame(JSON.stringify({ type: 'cancel', streamId: 'stream-1' })),
+    { type: 'cancel', streamId: 'stream-1' },
+  )
+  for (const payload of [
+    Buffer.from('{}'),
+    'not-json',
+    JSON.stringify({ type: 'open', streamId: 'stream-1', endpoint: 'lifecycle/request', payload: { args: {} } }),
+    JSON.stringify({ type: 'open', streamId: 'stream-1', endpoint: '$events', payload: { args: { extra: true } } }),
+    JSON.stringify({ type: 'cancel', streamId: 'stream-1', extra: true }),
+  ]) {
+    assert.equal(parseAdmittedConnectionFrame(payload), null)
+  }
+  for (const endpoint of ['workspace/follow', 'session/control']) {
+    assert.deepEqual(
+      parseAdmittedConnectionFrame(JSON.stringify({
+        type: 'open', streamId: `stream-${endpoint}`, endpoint, payload: { args: {} },
+      })),
+      { type: 'open', streamId: `stream-${endpoint}`, endpoint },
+    )
+  }
+  assert.equal(describeUnadmittedConnectionFrame(Buffer.from('{}')), 'binary-frame')
+  assert.equal(
+    describeUnadmittedConnectionFrame(JSON.stringify({
+      type: 'open', streamId: 'stream-1', endpoint: 'lifecycle/request', payload: { args: {} },
+    })),
+    'other-stream-open-frame',
+  )
+})
+
+test('post-remove evidence rejects retained Profile, package, list, dump, or patch state', () => {
+  const packageName = 'dsh-plugin-extension-center'
+  const clean = removedProfileEvidence({
+    manifest: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+    packageName,
+    packagePresent: false,
+    listStdout: 'dsh-profile-web@0.0.0',
+    dumpStdout: '# == @deepseek-ai/dsh-web-app',
+    dumpStderr: '',
+  })
+  assert.equal(removedProfileEvidenceError(clean), null)
+  for (const input of [
+    { manifest: { dependencies: { [packageName]: 'file:artifact.tgz' }, dsh: { profile: { bundles: [] } } } },
+    { manifest: { dependencies: {}, dsh: { profile: { bundles: [packageName] } } } },
+    { packagePresent: true },
+    { listStdout: `dsh-profile-web@0.0.0\n${packageName}@0.2.0-alpha.1` },
+    { dumpStdout: `# == ${packageName}\n- id: center\n  name: ${packageName}` },
+    { dumpStderr: `patch: entry "${packageName}" not found` },
+  ]) {
+    const retained = removedProfileEvidence({
+      manifest: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+      packageName,
+      packagePresent: false,
+      listStdout: '',
+      dumpStdout: '',
+      dumpStderr: '',
+      ...input,
+    })
+    assert.match(removedProfileEvidenceError(retained) ?? '', /did not prove/u)
+  }
 })
 
 test('Store journey evidence classifies Center RPC from navigation start through context close', () => {
@@ -165,4 +288,25 @@ test('subprocess timeouts and child teardown are bounded', async () => {
   await once(exited, 'close')
   await stopChild(exited)
   assert.notEqual(exited.signalCode ?? exited.exitCode, null)
+
+  const graceful = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => process.exit(0)); process.stdout.write("ready"); setInterval(() => {}, 1000)'], {
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  await once(graceful, 'spawn')
+  await once(graceful.stdout, 'data')
+  const gracefulResult = await stopChild(graceful, { requireRunning: true, requireGraceful: true })
+  assert.deepEqual(gracefulResult, {
+    wasRunning: true,
+    forced: false,
+    exitCode: 0,
+    signalCode: null,
+  })
+
+  const crashed = spawn(process.execPath, ['-e', 'process.exit(7)'], { stdio: 'ignore' })
+  await once(crashed, 'close')
+  await assert.rejects(
+    stopChild(crashed, { requireRunning: true, requireGraceful: true }),
+    /exited before runner-owned shutdown/u,
+  )
 })

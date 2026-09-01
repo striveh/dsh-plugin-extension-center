@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 
 const CENTER_PACKAGE = 'dsh-plugin-extension-center'
-const ALPHA_DSH_VERSION = '0.1.2-alpha.1'
+const ALPHA_DSH_VERSION = '0.1.2-alpha.3'
 const ALPHA_CENTER_VERSION = /^0\.2\.0-alpha\.[1-9][0-9]*$/u
 const DSH_CLIENT_PACKAGES = Object.freeze([
   '@deepseek-ai/dsh-client-connection',

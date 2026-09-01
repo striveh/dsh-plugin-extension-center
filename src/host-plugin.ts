@@ -3,7 +3,9 @@
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-session'
 import { EXTENSION_CENTER_RPC_CHANNEL } from './catalog-contract.ts'
 import { catalogListResponse } from './catalog.ts'
 import { CatalogSnapshotManager, canonicalCatalogUrl } from './catalog-refresh.ts'
@@ -342,7 +344,7 @@ function rpcServices(
   })
 }
 
-/** Assemble every managed lifecycle inside one independent plugin on official DSH 0.1.2-alpha.1. */
+/** Assemble every managed lifecycle inside one independent plugin on official DSH 0.1.2-alpha.3. */
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const host = ctx as unknown as ConnectionContext
   const resolved = resolvedConfig(config)
@@ -445,7 +447,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         taskContinuations: continuations,
       })
       if (!hostCapabilities(owners).acquisition) {
-        throw new Error('official DSH 0.1.2-alpha.1 does not expose every Extension Center service dependency')
+        throw new Error('official DSH 0.1.2-alpha.3 does not expose every Extension Center service dependency')
       }
       let generation!: WritableOwnerGeneration
       generation = new WritableOwnerGeneration(

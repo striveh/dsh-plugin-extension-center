@@ -1,10 +1,10 @@
-import type { ClientConnectionRpc, RpcError } from '@deepseek-ai/dsh-client-connection/client';
+import type { ClientConnectionRpc, ConnectionRpcFailure } from '@deepseek-ai/dsh-client-connection/client';
 import { type CatalogListResponse } from '../catalog-contract.ts';
 /** Error returned through a valid Connection RPC business-failure envelope. */
 export declare class ExtensionCenterRpcError extends Error {
-    readonly code: RpcError['code'];
+    readonly code: ConnectionRpcFailure['code'];
     /** @param error - Connection RPC error already validated by the carrier. */
-    constructor(error: RpcError);
+    constructor(error: ConnectionRpcFailure);
 }
 /** Browser client for the verified Store catalog projection. */
 export interface ExtensionCatalogClient {

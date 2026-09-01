@@ -33,7 +33,7 @@ function binding() {
     officialDsh: {
       schemaVersion: 2,
       packageName: '@deepseek-ai/dsh',
-      packageVersion: '0.1.1-rc.2',
+      packageVersion: '0.1.2-alpha.3',
       packageRoot: resolve('/tmp', 'official-host', 'node_modules', '@deepseek-ai', 'dsh'),
       packageTreeSha256: digest,
       productionDependencies: [],
@@ -145,7 +145,7 @@ test('accepts only a stopped Host and an exact schema 5 managed-Plugin recovery 
   assert.equal(value.operationId, operationId)
   assert.equal(value.packageName, packageName)
   assert.equal(value.binding.schemaVersion, 5)
-  assert.equal(value.official.packageVersion, '0.1.1-rc.2')
+  assert.equal(value.official.packageVersion, '0.1.2-alpha.3')
   assert.equal(value.pnpm.packageVersion, '11.21.0')
   assert.deepEqual(value.command, [recoveryPath, centerRoot, operationId])
 })

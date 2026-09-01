@@ -754,7 +754,7 @@ function planEvidence(value, label) {
     'timeoutMs', 'node',
   ], `${label}.recoveryExecutable.officialDsh`)
   if (officialDsh.schemaVersion !== 2 || officialDsh.packageName !== '@deepseek-ai/dsh'
-    || officialDsh.packageVersion !== '0.1.1-rc.2') {
+    || officialDsh.packageVersion !== '0.1.2-alpha.3') {
     fail(`${label}.recoveryExecutable.officialDsh identity is invalid`)
   }
   for (const field of ['entrypointPath', 'hostHome', 'packageRoot', 'supervisorPath']) {

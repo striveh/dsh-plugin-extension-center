@@ -1,8 +1,10 @@
 # 普通用户注册表验收
 
+> 这是保留供审计的历史 npm 时代验收 lane，不属于当前兼容或完成门禁。当前验收使用确定性 packed artifact，并通过 `pnpm run test:compat:latest` 对最新版已审查官方 DSH 运行。
+
 这条 fail-closed lane 验证普通用户通过官方 DSH Plugin CLI 获得的交付路径，以及一个从真实 Extension Center UI 完成的 alpha Skill 生命周期。生产证据不接受源码 checkout、本地 archive、文件系统依赖或下载的 GitHub Release tarball。这条 lane 本身不能证明统一产品 P0：Plugin、MCP 与 Agent 获取/续行仍是独立必需证据，所以即使受保护运行的 Skill `laneStatus` 为 `proven`，产品级 `p0Status` 仍保持 `red`。
 
-生产默认目标是官方 DSH `0.1.2-alpha.1`：先安装不可变 bootstrap 版本 `dsh-plugin-extension-center@0.2.0-alpha.0`，再把公开 `@next` tag 解析成准确且更高的新版本后更新：
+生产默认目标是官方 DSH `0.1.2-alpha.3`：先安装不可变 bootstrap 版本 `dsh-plugin-extension-center@0.2.0-alpha.0`，再把公开 `@next` tag 解析成准确且更高的新版本后更新：
 
 ```sh
 node acceptance/ordinary-user/run.mjs
@@ -25,9 +27,9 @@ dsh plugin --profile web remove dsh-plugin-extension-center
 
 浏览器检查只在更新后运行。它要求一个 Extension Center Client entry 与 bundle request 已加载，一级 `Extensions` 按钮、`Extension Store` 对话框、Store、Installed、Updates、Activity & Recovery 四个 tab、Configuration filter 和准确 alpha 候选都可见。同一个 Playwright page 随后会选择 user scope，点击 Review install，编辑强类型 Skill 表单，审查并批准每个准确 plan，再从可见生命周期控件执行 Configure、Update、两次 Uninstall、Restore 与 Purge。卸载必须清除 dependency、Bundle list entry、installed package、plugin list entry 与 composed-config layer。独立安装的官方 DSH package tree 必须保持不变。
 
-Receipt schema 3 要求固定、签名且兼容 alpha 的 `wiki-page-writer` 前后版本在同一个真实 Host 中经过认证的管理 surface：catalog 与 inventory 发现；UI 驱动的 Install；Configure 并观察 `userInvocable` 与 configuration revision 改变；使用不同 artifact coordinates 和 bytes 的准确版本 Update；每次写入后的 inventory 验证；Uninstall；已提交 Restore；最终 Uninstall 与 Purge；以及一次最终 inventory 读取。Runner 会打开官方 DSH 输出的准确含 token URL，保留由此生成的 HttpOnly browser session，并要求缺少 session 和错误 session 返回 401、错误 Origin 返回 403。Runner 观察认证 UI 发出的 `intent/preview`、准确 `plan/decide` 与 `lifecycle/request`，不会通过验证 helper 直接发起这些 mutation；该 helper 只准入 catalog、inventory、configuration、operation 与 receipt verification 读取。Purge 必须删除 managed bytes 与 rollback state，并重新暴露 Install。它会保留一条不可恢复的历史记录，其中 `candidateRef: null`、`desired: removed`、`materialized: absent`、`effective: inactive`、`agentVisibility: not-visible`；清理物料不等于擦除生命周期历史。若已验证 catalog 缺少任一准确 artifact，或其兼容性证据未声明 DSH `0.1.2-alpha.1`，lane 会记录 `ORDINARY-USER-MANAGEMENT-CANDIDATE-PENDING`，保持 RED，并以状态 `2` 退出。直接认证 RPC mutation 会立即以 `ORDINARY-USER-MANAGEMENT-DIRECT-MUTATION` 失败；不完整的可访问 UI 序列会以 `ORDINARY-USER-MANAGEMENT-LIFECYCLE-MISSING` 失败。`support.test.mjs` 中的 synthetic complete receipt 只测试 receipt schema，不是 runtime 或 release 证据。
+Receipt schema 3 要求固定、签名且兼容 alpha 的 `wiki-page-writer` 前后版本在同一个真实 Host 中经过认证的管理 surface：catalog 与 inventory 发现；UI 驱动的 Install；Configure 并观察 `userInvocable` 与 configuration revision 改变；使用不同 artifact coordinates 和 bytes 的准确版本 Update；每次写入后的 inventory 验证；Uninstall；已提交 Restore；最终 Uninstall 与 Purge；以及一次最终 inventory 读取。Runner 会打开官方 DSH 输出的准确含 token URL，保留由此生成的 HttpOnly browser session，并要求缺少 session 和错误 session 返回 401、错误 Origin 返回 403。Runner 观察认证 UI 发出的 `intent/preview`、准确 `plan/decide` 与 `lifecycle/request`，不会通过验证 helper 直接发起这些 mutation；该 helper 只准入 catalog、inventory、configuration、operation 与 receipt verification 读取。Purge 必须删除 managed bytes 与 rollback state，并重新暴露 Install。它会保留一条不可恢复的历史记录，其中 `candidateRef: null`、`desired: removed`、`materialized: absent`、`effective: inactive`、`agentVisibility: not-visible`；清理物料不等于擦除生命周期历史。若已验证 catalog 缺少任一准确 artifact，或其兼容性证据未声明 DSH `0.1.2-alpha.3`，lane 会记录 `ORDINARY-USER-MANAGEMENT-CANDIDATE-PENDING`，保持 RED，并以状态 `2` 退出。直接认证 RPC mutation 会立即以 `ORDINARY-USER-MANAGEMENT-DIRECT-MUTATION` 失败；不完整的可访问 UI 序列会以 `ORDINARY-USER-MANAGEMENT-LIFECYCLE-MISSING` 失败。`support.test.mjs` 中的 synthetic complete receipt 只测试 receipt schema，不是 runtime 或 release 证据。
 
-在官方 DSH `0.1.2-alpha.1`、Center `0.2.0-alpha.0` 和 `@next` 下严格更高的 Center target 全部发布前，默认命令以状态 `2` 退出，并写入 `status: "pending"`、`laneStatus: "red"`、`p0Status: "red"` 的 receipt。仅发布 package 仍不充分：已验证 catalog 还必须包含准确的 alpha-compatible Skill 前后版本。Runner 要求准确的 `pnpm@11.21.0`，因为官方 DSH Plugin CLI 会把 package mutation 委托给 `PATH` 上的 pnpm。缺少前序版本、目标仍解析到前序版本或缺少签名 alpha 候选都不能证明该 lane。发布或准入缺失绝不会被本地 rehearsal 变成通过。生命周期或证据无效以状态 `1` 退出；完整本地 registry run 以状态 `0` 和 `laneStatus: "not-proven-local"` 结束，`laneStatus: "proven"` 还必须具备下述受保护 Actions provenance 与 artifact binding。只有再交叉绑定 Plugin、MCP 与 Agent 获取/续行证据，产品 P0 才能离开 RED。
+在官方 DSH `0.1.2-alpha.3`、Center `0.2.0-alpha.0` 和 `@next` 下严格更高的 Center target 全部发布前，默认命令以状态 `2` 退出，并写入 `status: "pending"`、`laneStatus: "red"`、`p0Status: "red"` 的 receipt。仅发布 package 仍不充分：已验证 catalog 还必须包含准确的 alpha-compatible Skill 前后版本。Runner 要求准确的 `pnpm@11.21.0`，因为官方 DSH Plugin CLI 会把 package mutation 委托给 `PATH` 上的 pnpm。缺少前序版本、目标仍解析到前序版本或缺少签名 alpha 候选都不能证明该 lane。发布或准入缺失绝不会被本地 rehearsal 变成通过。生命周期或证据无效以状态 `1` 退出；完整本地 registry run 以状态 `0` 和 `laneStatus: "not-proven-local"` 结束，`laneStatus: "proven"` 还必须具备下述受保护 Actions provenance 与 artifact binding。只有再交叉绑定 Plugin、MCP 与 Agent 获取/续行证据，产品 P0 才能离开 RED。
 
 受保护的发布 workflow 还会传入 `--expected-center-target-version` 与 `--expected-center-target-integrity`。Runner 要求两者同时出现；只有安装前和安装后两次解析 `@next` 都与已验证发布 bytes 相同时，才会继续生命周期。
 
@@ -38,9 +40,9 @@ Development mode 可以在一个准确官方 DSH source commit 上运行同一�
 ```sh
 node acceptance/ordinary-user/run.mjs \
   --mode development \
-  --dsh-version 0.1.2-alpha.1 \
+  --dsh-version 0.1.2-alpha.3 \
   --dsh-source-root /absolute/path/to/deepseek-harness \
-  --dsh-commit cd5ef8148158c3a752a658978873241fdf8e2bbc \
+  --dsh-commit dd6322d604e00eec1ba5e0c8541159906a21094a \
   --center-initial-spec github:striveh/dsh-plugin-extension-center#0123456789abcdef0123456789abcdef01234567 \
   --center-target-spec github:striveh/dsh-plugin-extension-center#89abcdef0123456789abcdef0123456789abcdef
 ```

@@ -98,8 +98,8 @@ describe('catalog Client wire validation', () => {
 
   it('accepts the exact alpha Host coordinate without admitting an unknown DSH version', () => {
     const alpha = structuredClone(response)
-    alpha.entries[0]!.compatibility.dsh = '0.1.2-alpha.1'
-    expect(parseCatalogListResponse(alpha).entries[0]!.compatibility.dsh).toBe('0.1.2-alpha.1')
+    alpha.entries[0]!.compatibility.dsh = '0.1.2-alpha.3'
+    expect(parseCatalogListResponse(alpha).entries[0]!.compatibility.dsh).toBe('0.1.2-alpha.3')
 
     const unknown = structuredClone(alpha)
     unknown.entries[0]!.compatibility.dsh = '0.1.2-alpha.2' as never

@@ -111,7 +111,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function officialCli(version = '0.1.2-alpha.1'): Promise<Readonly<{
+async function officialCli(version = '0.1.2-alpha.3'): Promise<Readonly<{
   entrypoint: string
   sourceEntrypoint: string
   hostHome: string
@@ -314,7 +314,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const fixture = await officialCli()
     const profile = await prepareProfile(fixture.hostHome, 'web')
     const packageName = '@deepseek-ai/dsh-llm-replay'
-    const version = '0.1.2-alpha.1'
+    const version = '0.1.2-alpha.3'
     const integrity = `sha512-${Buffer.alloc(64, 1).toString('base64')}`
     const packagePath = join(profile, 'node_modules', ...packageName.split('/'))
     const storeDir = join(dirname(fixture.hostHome), 'profile-store', 'v11')
@@ -401,7 +401,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const localVersion = 'file:../../artifacts/keyless-agent-proof.tgz'
     const localKey = `${localName}@${localVersion}`
     const packageName = '@deepseek-ai/dsh-llm-replay'
-    const version = '0.1.2-alpha.1'
+    const version = '0.1.2-alpha.3'
     const packageKey = `${packageName}@${version}`
     const integrity = `sha512-${Buffer.alloc(64, 2).toString('base64')}`
     const packagePath = join(profile, 'node_modules', ...packageName.split('/'))
@@ -459,7 +459,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const fixture = await officialCli()
     const profile = await prepareProfile(fixture.hostHome, 'web')
     const parentName = '@deepseek-ai/dsh-llm-replay'
-    const parentVersion = '0.1.2-alpha.1'
+    const parentVersion = '0.1.2-alpha.3'
     const parentKey = `${parentName}@${parentVersion}`
     const childName = '@hono/node-server'
     const childVersion = '2.1.1'
@@ -648,7 +648,7 @@ describe('official DSH Plugin CLI adapter', () => {
     const packageRoot = dirname(dirname(fixture.entrypoint))
     await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh',
-      version: '0.1.2-alpha.1',
+      version: '0.1.2-alpha.3',
       type: 'module',
       bin: { dsh: 'src/bin.ts' },
     }))
@@ -656,12 +656,12 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(bindFixture({
       entrypoint: fixture.sourceEntrypoint,
       hostHome: fixture.hostHome,
-    })).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.1')
+    })).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.3')
   })
 
-  it('fails closed when the configured entrypoint is not the supported official alpha.1 package', async () => {
+  it('fails closed when the configured entrypoint is not the supported latest official package', async () => {
     const fixture = await officialCli('0.1.1-rc.1')
-    await expect(bindFixture(fixture)).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.1')
+    await expect(bindFixture(fixture)).rejects.toThrow('@deepseek-ai/dsh@0.1.2-alpha.3')
     await expect(readFile(fixture.log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
@@ -975,8 +975,8 @@ describe('official DSH Plugin CLI adapter', () => {
     await expect(readFile(dispatchPath, 'utf8')).resolves.toContain('watchdog-parent')
   }, 30_000)
 
-  it.skipIf(INSTALLED_DSH_VERSION !== '0.1.2-alpha.1')(
-    'runs add and remove through the published official alpha.1 CLI and pnpm', async () => {
+  it.skipIf(INSTALLED_DSH_VERSION !== '0.1.2-alpha.3')(
+    'runs add and remove through the latest official CLI and pnpm', async () => {
     const root = await mkdtemp(join(tmpdir(), 'extension-official-dsh-smoke-'))
     roots.push(root)
     const dshHome = join(root, 'dsh-home')

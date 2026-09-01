@@ -262,14 +262,14 @@ test('Profile removal rejects direct packages and indirect links into Center mat
     await symlink(material, direct, 'junction')
     await assert.rejects(
       assertNoManagedResolutionLinks(profileRoot, centerRoot, ['dsh-plugin-extension-center', 'fixture-plugin']),
-      error => error instanceof AcceptanceFailure && error.code === 'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+      error => error instanceof AcceptanceFailure && error.code === 'P0-LATEST-DSH-PROFILE-RESOLUTION-RESIDUE',
     )
     await rm(direct, { force: true })
     const indirect = join(profileRoot, 'node_modules', 'indirect')
     await symlink(material, indirect, 'junction')
     await assert.rejects(
       assertNoManagedResolutionLinks(profileRoot, centerRoot, ['dsh-plugin-extension-center', 'fixture-plugin']),
-      error => error instanceof AcceptanceFailure && error.code === 'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+      error => error instanceof AcceptanceFailure && error.code === 'P0-LATEST-DSH-PROFILE-RESOLUTION-RESIDUE',
     )
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -86,7 +86,7 @@ function recoveryBinding() {
     officialDsh: Object.freeze({
       schemaVersion: 2,
       packageName: '@deepseek-ai/dsh',
-      packageVersion: '0.1.2-alpha.1',
+      packageVersion: '0.1.2-alpha.3',
       packageRoot: caseRoot,
       packageTreeSha256: digest,
       productionDependencies: Object.freeze([]),

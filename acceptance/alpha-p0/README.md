@@ -1,5 +1,7 @@
 # Alpha product P0 composite gate
 
+> Historical npm-era composite design, retained for audit only. It is not the current compatibility or completion gate. The current target is the independent packed plugin running on the latest reviewed unmodified official DSH.
+
 This verifier is the final fail-closed product binder. A successful ordinary-user receipt proves the official DSH registry installation and the Skill UI lifecycle only; its `laneStatus: "proven"` deliberately retains `p0Status: "red"`. Product P0 becomes proven only when every row below passes and every immutable product identity matches.
 
 The gate is repository acceptance tooling, not a runtime feature or a catalog candidate, and it is not included in the published plugin payload.

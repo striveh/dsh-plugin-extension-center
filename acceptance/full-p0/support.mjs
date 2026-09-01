@@ -315,7 +315,7 @@ export async function profileRemovalSurfaceDigest(profileRoot) {
   const root = resolve(profileRoot)
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   if (!isRecord(manifest) || typeof manifest.name !== 'string' || manifest.name.length === 0) {
-    throw new AcceptanceFailure('P0-RC2-PROFILE-MANIFEST', 'Profile package.json must name the Profile package')
+    throw new AcceptanceFailure('P0-LATEST-DSH-PROFILE-MANIFEST', 'Profile package.json must name the Profile package')
   }
   const hash = createHash('sha256')
   await hashProfileRemovalSurface(root, root, hash, manifest.name)
@@ -342,7 +342,7 @@ export async function assertNoManagedResolutionLinks(profileRoot, centerRoot, pa
     const info = await optionalLstat(direct)
     if (info !== null) {
       throw new AcceptanceFailure(
-        'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+        'P0-LATEST-DSH-PROFILE-RESOLUTION-RESIDUE',
         `removed package retained a direct Profile resolution entry: ${packageName}`,
       )
     }
@@ -354,7 +354,7 @@ export async function assertNoManagedResolutionLinks(profileRoot, centerRoot, pa
       const child = join(path, entry.name)
       if (entry.name.startsWith('.dsh-center-link-') || entry.name.startsWith('.dsh-center-unlink-')) {
         throw new AcceptanceFailure(
-          'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+          'P0-LATEST-DSH-PROFILE-RESOLUTION-RESIDUE',
           'removed Plugin retained a Center resolution transaction entry',
         )
       }
@@ -362,7 +362,7 @@ export async function assertNoManagedResolutionLinks(profileRoot, centerRoot, pa
         const target = resolve(dirname(child), await readlink(child))
         if (isInside(ownedRoot, target)) {
           throw new AcceptanceFailure(
-            'P0-RC2-PROFILE-RESOLUTION-RESIDUE',
+            'P0-LATEST-DSH-PROFILE-RESOLUTION-RESIDUE',
             'removed Plugin retained a Profile link into Center-owned material',
           )
         }
@@ -502,7 +502,7 @@ function isInside(root, path) {
 
 function normalizedProfileManifest(manifest) {
   if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
-    throw new AcceptanceFailure('P0-RC2-PROFILE-MANIFEST', 'Profile package.json must be an object')
+    throw new AcceptanceFailure('P0-LATEST-DSH-PROFILE-MANIFEST', 'Profile package.json must be an object')
   }
   return { ...manifest, dependencies: manifest.dependencies ?? {} }
 }

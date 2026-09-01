@@ -1,3 +1,4 @@
+/** Full lifecycle compatibility receipt for the latest pinned official DSH release. */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -56,7 +57,7 @@ import {
 } from './support.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
-const evidenceRoot = join(projectRoot, '.artifacts', 'acceptance', 'full-p0-official-rc2')
+const evidenceRoot = join(projectRoot, '.artifacts', 'acceptance', 'full-p0-latest-dsh')
 const skillConfiguration = Object.freeze({
   modelInvocable: true,
   userInvocable: true,
@@ -67,11 +68,11 @@ let requiredOwnerAssertionsPassed = 0
 
 const receipt = {
   schemaVersion: 1,
-  acceptanceId: 'P0-RC2-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
-  proofScope: 'packed-extension-unmodified-official-rc2-host-rpc-plugin-mcp-skill-lifecycles',
+  acceptanceId: 'P0-LATEST-DSH-001-OFFICIAL-HOST-EXTENSION-LIFECYCLES',
+  proofScope: 'packed-extension-unmodified-latest-dsh-host-rpc-plugin-mcp-skill-lifecycles',
   status: 'running',
   p0Status: 'not-proven',
-  releaseClaim: 'official-dsh-rc2-compatible',
+  releaseClaim: 'latest-official-dsh-compatible',
   target: {
     dshPackage: `@deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
     auditedSourceCommit: TARGET_DSH_COMMIT,
@@ -131,7 +132,6 @@ const receipt = {
     terminalJournalHeadDigests: [],
   },
   notProven: [
-    'published-extension-center-release-installation',
     'center-update-with-distinct-artifact-version-and-digest',
     'update-with-distinct-signed-catalog-revision',
     'cross-platform-matrix',
@@ -153,7 +153,7 @@ const webOutput = { value: '' }
 try {
   await rm(evidenceRoot, { recursive: true, force: true })
   await mkdir(evidenceRoot, { recursive: true })
-  tempRoot = await realpath(await mkdtemp(join(tmpdir(), 'dsh-extension-center-official-rc2-')))
+  tempRoot = await realpath(await mkdtemp(join(tmpdir(), 'dsh-extension-center-latest-dsh-')))
   const packRoot = join(evidenceRoot, 'packed')
   const workspace = join(tempRoot, 'workspace')
   const hostRoot = join(tempRoot, 'official-host')
@@ -187,8 +187,8 @@ try {
       && !receipt.inputs.credentialVariablesPassed
       && !receipt.inputs.providerEndpointOverridePassed
       && receipt.inputs.telemetryModeRequested === 'DISABLED',
-    'P0-RC2-ISOLATION',
-    'isolated keyless official rc.2 preconditions were not enforced',
+    'P0-LATEST-DSH-ISOLATION',
+    'isolated keyless latest official DSH preconditions were not enforced',
   )
 
   const officialHost = await installOfficialDshHost({
@@ -208,7 +208,7 @@ try {
     await mkdir(root, { recursive: true })
     await writeFile(join(root, 'package.json'), `${JSON.stringify({ private: true }, null, 2)}\n`)
     await checkedStep(
-      'P0-RC2-MCP-RUNTIME-PROVISION',
+      'P0-LATEST-DSH-MCP-RUNTIME-PROVISION',
       'pnpm',
       ['--dir', root, 'add', `filesystem-mcp@${version}`, '--ignore-scripts', '--save-exact'],
       { cwd: workspace, env: runtimeEnv, timeoutMs: 120_000 },
@@ -217,7 +217,7 @@ try {
     const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'))
     requireCondition(
       manifest.name === 'filesystem-mcp' && manifest.version === version && manifest.bin === 'dist/main.js',
-      'P0-RC2-MCP-RUNTIME-PROVISION',
+      'P0-LATEST-DSH-MCP-RUNTIME-PROVISION',
       `preprovisioned MCP package did not expose the admitted ${version} executable`,
     )
     const executablePath = await realpath(join(packageRoot, manifest.bin))
@@ -225,7 +225,7 @@ try {
     requireCondition(
       executableInfo.isFile() && !executableInfo.isSymbolicLink()
         && (process.platform === 'win32' || (executableInfo.mode & 0o111) !== 0),
-      'P0-RC2-MCP-RUNTIME-PROVISION',
+      'P0-LATEST-DSH-MCP-RUNTIME-PROVISION',
       `preprovisioned MCP ${version} executable is not a real executable file`,
     )
     return Object.freeze({
@@ -250,7 +250,7 @@ try {
   const sourceManifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8'))
   assertNoPackageLifecycleScripts(sourceManifest, 'source')
   const version = await checkedStep(
-    'P0-RC2-HOST-BUILD',
+    'P0-LATEST-DSH-HOST-BUILD',
     dshBin,
     ['--version'],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 30_000 },
@@ -258,12 +258,12 @@ try {
   receipt.target.version = version.stdout.trim()
   requireCondition(
     receipt.target.version === TARGET_DSH_VERSION,
-    'P0-RC2-HOST-BUILD',
+    'P0-LATEST-DSH-HOST-BUILD',
     `official CLI version ${JSON.stringify(receipt.target.version)} does not match ${JSON.stringify(TARGET_DSH_VERSION)}`,
   )
 
   await checkedStep(
-    'P0-RC2-PROFILE-BASELINE',
+    'P0-LATEST-DSH-PROFILE-BASELINE',
     dshBin,
     ['plugin', '--profile', 'web', 'install', '--offline', '--ignore-scripts'],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 120_000 },
@@ -272,18 +272,18 @@ try {
   receipt.observations.profileRemovalBaselineDigest = await profileRemovalSurfaceDigest(profileRoot)
 
   await checkedStep(
-    'P0-RC2-PACK',
+    'P0-LATEST-DSH-PACK',
     'pnpm',
     ['pack', '--pack-destination', packRoot],
     { cwd: projectRoot, env: runtimeEnv, timeoutMs: 60_000 },
   )
   const archives = (await readdir(packRoot)).filter(file => file.endsWith('.tgz'))
-  requireCondition(archives.length === 1, 'P0-RC2-ARTIFACT', `expected one packed artifact, observed ${String(archives.length)}`)
+  requireCondition(archives.length === 1, 'P0-LATEST-DSH-ARTIFACT', `expected one packed artifact, observed ${String(archives.length)}`)
   const artifact = join(packRoot, archives[0])
   const artifactBytes = await readFile(artifact)
   const artifactDigest = `sha256:${sha256(artifactBytes)}`
   const packedManifestOutput = await checkedStep(
-    'P0-RC2-ARTIFACT',
+    'P0-LATEST-DSH-ARTIFACT',
     'tar',
     ['-xOf', artifact, 'package/package.json'],
     { cwd: projectRoot, env: runtimeEnv, timeoutMs: 30_000 },
@@ -298,7 +298,7 @@ try {
       && packedManifest.exports?.['./client'] !== undefined
       && packedManifest.dsh?.bundle?.patch === './cordis.patch.yml'
       && packedManifest.dsh?.client?.platform === 'web',
-    'P0-RC2-ARTIFACT-ROLES',
+    'P0-LATEST-DSH-ARTIFACT-ROLES',
     'packed artifact omitted its exact package identity, declared a forbidden package bin, or omitted its Host role, Web Client role, or Bundle patch',
   )
   receipt.artifact = {
@@ -313,7 +313,7 @@ try {
   const faultPackageRoot = join(tempRoot, 'fault-package')
   await mkdir(faultPackageRoot, { recursive: true, mode: 0o700 })
   await checkedStep(
-    'P0-RC2-FAULT-MATRIX-ARTIFACT',
+    'P0-LATEST-DSH-FAULT-MATRIX-ARTIFACT',
     'tar',
     ['-xzf', artifact, '-C', faultPackageRoot],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 30_000 },
@@ -325,12 +325,12 @@ try {
   })
   requireCondition(
     assertExactFaultMatrix(receipt.observations.faultMatrix, artifactDigest) === receipt.observations.faultMatrix,
-    'P0-RC2-FAULT-MATRIX',
+    'P0-LATEST-DSH-FAULT-MATRIX',
     'packed Extension Center did not pass the exact fixed Center-owned journal fault matrix',
   )
 
   const installed = await checkedStep(
-    'P0-RC2-PROFILE-INSTALL',
+    'P0-LATEST-DSH-PROFILE-INSTALL',
     dshBin,
     [
       'plugin', '--profile', 'web', 'add', artifact,
@@ -380,7 +380,7 @@ try {
     replayVersion: replayInstallation.replayVersion,
   }
   const dump = await checkedStep(
-    'P0-RC2-PROFILE-DUMP',
+    'P0-LATEST-DSH-PROFILE-DUMP',
     dshBin,
     ['--profile', 'web', '--dump-config'],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 60_000 },
@@ -390,7 +390,7 @@ try {
     && dump.stdout.includes('name: dsh-plugin-extension-center')
   requireCondition(
     receipt.observations.bundleLayerObserved,
-    'P0-RC2-BUNDLE-LAYER',
+    'P0-LATEST-DSH-BUNDLE-LAYER',
     'packed Extension Center was absent from the composed official Web Profile',
   )
 
@@ -400,7 +400,7 @@ try {
   let catalogAttempt = 0
   const parsedCatalog = await waitForAcquisitionAdmission(async () => {
     catalogAttempt += 1
-    const catalogRpcId = `official-rc2-catalog-list-${String(catalogAttempt)}`
+    const catalogRpcId = `latest-dsh-catalog-list-${String(catalogAttempt)}`
     const catalogBody = await rpc.raw('catalog/list', { protocolVersion: 1 }, catalogRpcId)
     return parseCatalogListEnvelope(catalogBody, catalogRpcId)
   })
@@ -411,7 +411,7 @@ try {
   requireCondition(
     parsedCatalog.value.hostCapabilities.acquisition === true
       && parsedCatalog.value.hostCapabilities.reason === null,
-    'P0-RC2-HOST-ACQUISITION',
+    'P0-LATEST-DSH-HOST-ACQUISITION',
     'all Center-owned lifecycle services were present but acquisition was not admitted',
   )
   const skill = parsedCatalog.value.entries.find(entry => entry?.candidateRef === DOCUMENTATION_SKILL_CANDIDATE)
@@ -422,7 +422,7 @@ try {
       && isRecord(skill.artifact)
       && typeof skill.artifact.integrity === 'string'
       && typeof skill.artifact.sizeBytes === 'number',
-    'P0-RC2-SKILL-CANDIDATE',
+    'P0-LATEST-DSH-SKILL-CANDIDATE',
     'verified catalog omitted the exact Skill artifact coordinates',
   )
   const candidateRef = skill.candidateRef
@@ -437,7 +437,7 @@ try {
   requireCondition(
     initialInventory.inventory.complete === true
       && !initialInventory.inventory.rows.some(row => row?.targetKey === targetKey),
-    'P0-RC2-SKILL-TARGET-NOT-EMPTY',
+    'P0-LATEST-DSH-SKILL-TARGET-NOT-EMPTY',
     'isolated user scope already contains the catalog Skill target',
   )
 
@@ -454,7 +454,7 @@ try {
       requireCondition(
         authorization.acquisition.candidateRef === candidateRef
           && authorization.approval.state?.plan?.hash === authorization.acquisition.planHash,
-        'P0-RC2-AGENT-AUTHORIZATION-BINDING',
+        'P0-LATEST-DSH-AGENT-AUTHORIZATION-BINDING',
         'Agent acquisition callback did not bind the exact pending catalog candidate and immutable plan',
       )
       browserApproval = await approveTaskPlanThroughBrowser({
@@ -473,7 +473,7 @@ try {
   requireCondition(
     isRecord(browserApproval)
       && browserApproval.lifecycle?.operationId === agentAcquisition.operationId,
-    'P0-RC2-AGENT-BROWSER-LIFECYCLE',
+    'P0-LATEST-DSH-AGENT-BROWSER-LIFECYCLE',
     'Activity approval did not execute the Agent-created acquisition operation',
   )
   receipt.observations.browserLifecycleRpcMethods = browserApproval.methods
@@ -482,7 +482,7 @@ try {
     && materialAfterPlan === materialAfterApproval
   requireCondition(
     receipt.observations.materialUnchangedBeforeApproval,
-    'P0-RC2-PREAPPROVAL-MUTATION',
+    'P0-LATEST-DSH-PREAPPROVAL-MUTATION',
     'plan creation or approval materialized Skill bytes before lifecycle execution',
   )
   const installedInventory = await rpc.call('inventory/list', {
@@ -503,7 +503,7 @@ try {
       && installedRow.evidence.winningProvider === 'extension-center'
       && installedRow.evidence.definitionLoaded === true
       && typeof winningPath === 'string',
-    'P0-RC2-SKILL-WINNER',
+    'P0-LATEST-DSH-SKILL-WINNER',
     'installed Skill was not the exact merged-registry winner',
   )
   await assertManagedArtifact(winningPath, materialRoot, skill.artifact.integrity, skill.artifact.sizeBytes)
@@ -522,7 +522,7 @@ try {
       && agentPlan.hash === agentAcquisition.planHash
       && agentOperationProjection.phase === 'committed'
       && agentReceipt.digest === agentAcquisition.receiptDigest,
-    'P0-RC2-AGENT-COMMITTED-BINDING',
+    'P0-LATEST-DSH-AGENT-COMMITTED-BINDING',
     'Agent acquisition proof did not bind the consumed task plan to its committed receipt',
   )
   const terminalReceipts = [agentReceipt]
@@ -546,7 +546,7 @@ try {
       && configured.row.evidence?.kind === 'skill'
       && configured.row.evidence.invocation?.modelInvocable === true
       && configured.row.evidence.invocation?.userInvocable === false,
-    'P0-RC2-SKILL-CONFIGURE',
+    'P0-LATEST-DSH-SKILL-CONFIGURE',
     'configured Skill did not publish the exact changed invocation flags',
   )
   receipt.observations.lifecycle.push(configured.evidence)
@@ -564,7 +564,7 @@ try {
       && disabled.row.evidence.winningProvider !== 'extension-center'
       && disabled.row.evidence.definitionLoaded === false
       && disabled.row.actions?.enable?.status === 'available',
-    'P0-RC2-SKILL-DISABLE',
+    'P0-LATEST-DSH-SKILL-DISABLE',
     'disabled Skill still contributes or cannot be enabled',
   )
   receipt.observations.lifecycle.push(disabled.evidence)
@@ -579,7 +579,7 @@ try {
       && enabled.row.evidence.winningProvider === 'extension-center'
       && enabled.row.evidence.definitionLoaded === true
       && enabled.row.evidence.invocation?.userInvocable === false,
-    'P0-RC2-SKILL-ENABLE',
+    'P0-LATEST-DSH-SKILL-ENABLE',
     'enabled Skill did not restore the configured merged-registry contribution',
   )
   receipt.observations.lifecycle.push(enabled.evidence)
@@ -594,7 +594,7 @@ try {
       && uninstalled.row.evidence.winningProvider !== 'extension-center'
       && uninstalled.row.evidence.definitionLoaded === false
       && uninstalled.row.actions?.restore?.status === 'available',
-    'P0-RC2-SKILL-UNINSTALL',
+    'P0-LATEST-DSH-SKILL-UNINSTALL',
     'uninstalled Skill still contributes or has no exact restore path',
   )
   receipt.observations.lifecycle.push(uninstalled.evidence)
@@ -609,7 +609,7 @@ try {
       && restored.row.evidence.winningProvider === 'extension-center'
       && restored.row.evidence.definitionLoaded === true
       && restored.row.evidence.invocation?.userInvocable === false,
-    'P0-RC2-SKILL-RESTORE',
+    'P0-LATEST-DSH-SKILL-RESTORE',
     'restored Skill did not recover the exact configured merged-registry winner',
   )
   receipt.observations.lifecycle.push(restored.evidence)
@@ -632,7 +632,7 @@ try {
       && purged.row.evidence.contentRevision === null
       && purged.row.actions?.install?.status === 'available'
       && await pathIsAbsent(winningPath),
-    'P0-RC2-SKILL-PURGE',
+    'P0-LATEST-DSH-SKILL-PURGE',
     'purged Skill retained managed material, rollback state, or blocked its future install action',
   )
   receipt.observations.lifecycle.push(purged.evidence)
@@ -653,7 +653,7 @@ try {
       && isRecord(wikiSkillV1.displayName) && typeof wikiSkillV1.displayName.en === 'string'
       && typeof wikiSkillV1.candidateRef === 'string'
       && typeof wikiSkillV2.candidateRef === 'string',
-    'P0-RC2-SKILL-UPDATE-CANDIDATES',
+    'P0-LATEST-DSH-SKILL-UPDATE-CANDIDATES',
     'verified catalog omitted the two exact wiki-page-writer revisions',
   )
   const wikiTargetKey = 'skill:web:user:wiki-page-writer'
@@ -674,7 +674,7 @@ try {
     && materialAfterStorePlan === materialAfterStoreApproval
   requireCondition(
     receipt.observations.storeMaterialUnchangedBeforeApproval,
-    'P0-RC2-STORE-PREAPPROVAL-MUTATION',
+    'P0-LATEST-DSH-STORE-PREAPPROVAL-MUTATION',
     'Store plan creation or approval materialized Skill bytes before lifecycle execution',
   )
   const wikiInstallPlan = assertPlan(browserStoreInstall.preview, {
@@ -690,7 +690,7 @@ try {
   requireCondition(
     browserStoreInstall.decision.state?.status === 'approved'
       && browserStoreInstall.decision.state?.plan?.hash === wikiInstallPlan.hash,
-    'P0-RC2-STORE-APPROVAL',
+    'P0-LATEST-DSH-STORE-APPROVAL',
     'Store approval did not bind the exact immutable Skill plan',
   )
   const wikiInstallReceipt = assertCommittedLifecycle(
@@ -722,7 +722,7 @@ try {
       && wikiInstalled.row.updateObservation?.status === 'available'
       && wikiInstalled.row.updateObservation.candidateRef === wikiSkillV2.candidateRef
       && wikiInstalled.row.updateObservation.integrity === wikiSkillV2.artifact.integrity,
-    'P0-RC2-SKILL-UPDATE-DISCOVERY',
+    'P0-LATEST-DSH-SKILL-UPDATE-DISCOVERY',
     'installed Skill did not expose the exact newer signed revision',
   )
   await assertManagedArtifact(
@@ -794,7 +794,7 @@ try {
   requireCondition(
     isRecord(mcpV122) && typeof mcpV122.candidateRef === 'string' && typeof mcpV122.name === 'string'
       && isRecord(mcpV130) && typeof mcpV130.candidateRef === 'string' && mcpV130.name === mcpV122.name,
-    'P0-RC2-MCP-CANDIDATE',
+    'P0-LATEST-DSH-MCP-CANDIDATE',
     'verified catalog omitted the two exact MCP update candidates',
   )
   const mcpScopeKey = 'profile:web'
@@ -815,7 +815,7 @@ try {
         && value.options[0]?.version === runtime.version
         && value.options[0]?.transport === 'stdio'
         && value.options[0]?.executablePath === runtime.executablePath,
-      'P0-RC2-MCP-RUNTIME-OPTION',
+      'P0-LATEST-DSH-MCP-RUNTIME-OPTION',
       `typed MCP configuration did not expose the exact ${runtime.version} runtime selector`,
     )
   }
@@ -848,7 +848,7 @@ try {
       && mcpInstalled.row.evidence.descriptorMatches === true
       && mcpInstalled.row.evidence.observedLifecycle === 'disabled'
       && mcpInstalled.row.evidence.qualifiedTools.length === 0,
-    'P0-RC2-MCP-INSTALL',
+    'P0-LATEST-DSH-MCP-INSTALL',
     'installed MCP connection was not durably configured and disabled',
   )
   receipt.observations.lifecycle.push(mcpInstalled.evidence)
@@ -875,7 +875,7 @@ try {
       && mcpEnabled.row.evidence.liveDetailAvailable === true
       && mcpEnabled.row.evidence.qualifiedTools.length > 0
       && mcpEnabled.row.evidence.qualifiedTools.every(name => name.startsWith('mcp__filesystem_e2e__')),
-    'P0-RC2-MCP-HANDSHAKE',
+    'P0-LATEST-DSH-MCP-HANDSHAKE',
     'enabled MCP runtime did not complete the official client handshake and publish qualified tools',
   )
   receipt.observations.lifecycle.push(mcpEnabled.evidence)
@@ -884,7 +884,7 @@ try {
     mcpEnabled.row.updateObservation?.status === 'available'
       && mcpEnabled.row.updateObservation.candidateRef === mcpV130.candidateRef
       && mcpEnabled.row.updateObservation.integrity === mcpV130.artifact.integrity,
-    'P0-RC2-MCP-UPDATE-DISCOVERY',
+    'P0-LATEST-DSH-MCP-UPDATE-DISCOVERY',
     'active MCP connection did not expose the exact newer signed runtime revision',
   )
   await assertMcpOption(mcpV130, mcpRuntimeV130, 'update', mcpTargetKey)
@@ -899,7 +899,7 @@ try {
       && mcpUpdated.row.evidence.descriptorMatches === true
       && mcpUpdated.row.evidence.observedLifecycle === 'ready'
       && mcpUpdated.row.evidence.qualifiedTools.every(name => name.startsWith('mcp__filesystem_e2e__')),
-    'P0-RC2-MCP-UPDATE',
+    'P0-LATEST-DSH-MCP-UPDATE',
     'MCP update did not switch to and verify the exact 1.3.0 runtime descriptor',
   )
   receipt.observations.lifecycle.push(mcpUpdated.evidence)
@@ -972,7 +972,7 @@ try {
       && mcpPurged.row.evidence?.kind === 'mcp'
       && mcpPurged.row.evidence.observedLifecycle === 'absent'
       && mcpPurged.row.actions?.install?.status === 'available',
-    'P0-RC2-MCP-PURGE',
+    'P0-LATEST-DSH-MCP-PURGE',
     'purged MCP connection retained runtime state, rollback material, or blocked reinstall',
   )
   receipt.observations.lifecycle.push(mcpPurged.evidence)
@@ -986,7 +986,7 @@ try {
   requireCondition(
     isRecord(pluginV010) && typeof pluginV010.candidateRef === 'string' && typeof pluginV010.name === 'string'
       && isRecord(pluginV011) && typeof pluginV011.candidateRef === 'string' && pluginV011.name === pluginV010.name,
-    'P0-RC2-PLUGIN-CANDIDATE',
+    'P0-LATEST-DSH-PLUGIN-CANDIDATE',
     'verified catalog omitted the two exact Plugin update candidates',
   )
   const pluginScopeKey = 'profile:web'
@@ -1032,7 +1032,7 @@ try {
     const approval = await approvePlan(rpc, plan)
     requireCondition(
       approval.state.status === 'approved',
-      'P0-RC2-PLUGIN-APPROVAL',
+      'P0-LATEST-DSH-PLUGIN-APPROVAL',
       `${operationKind} Plugin plan was not approved exactly once`,
     )
     const lifecycle = await rpc.call('lifecycle/request', {
@@ -1043,7 +1043,7 @@ try {
       const terminalReceipt = assertCommittedLifecycle(lifecycle, plan, externalRuntimeAction)
       requireCondition(
         webChild.pid === originalHostPid && webChild.exitCode === null,
-        'P0-RC2-PLUGIN-CONFIGURE-LIVE-HOST',
+        'P0-LATEST-DSH-PLUGIN-CONFIGURE-LIVE-HOST',
         'Plugin configuration did not commit on the same official Host process',
       )
       const operation = await rpc.call('operation/get', {
@@ -1054,11 +1054,11 @@ try {
         verifyOperationReceiptJournal(operation.operation, terminalReceipt)
       } catch (error) {
         throw new AcceptanceFailure(
-          'P0-RC2-PLUGIN-CONFIGURE-JOURNAL',
+          'P0-LATEST-DSH-PLUGIN-CONFIGURE-JOURNAL',
           error instanceof Error ? error.message : String(error),
         )
       }
-      const liveCatalogId = 'official-rc2-plugin-configure-live-catalog'
+      const liveCatalogId = 'latest-dsh-plugin-configure-live-catalog'
       const liveCatalog = parseCatalogListEnvelope(
         await rpc.raw('catalog/list', { protocolVersion: 1 }, liveCatalogId),
         liveCatalogId,
@@ -1094,7 +1094,7 @@ try {
     let restartCatalogAttempt = 0
     const restartedCatalog = await waitForAcquisitionAdmission(async () => {
       restartCatalogAttempt += 1
-      const rpcId = `official-rc2-plugin-${operationKind}-catalog-${String(restartCatalogAttempt)}`
+      const rpcId = `latest-dsh-plugin-${operationKind}-catalog-${String(restartCatalogAttempt)}`
       const catalogBody = await rpc.raw('catalog/list', { protocolVersion: 1 }, rpcId)
       return parseCatalogListEnvelope(catalogBody, rpcId)
     })
@@ -1210,7 +1210,7 @@ try {
   let recoveryCatalogAttempt = 0
   const recoveredCatalog = await waitForAcquisitionAdmission(async () => {
     recoveryCatalogAttempt += 1
-    const rpcId = `official-rc2-break-glass-catalog-${String(recoveryCatalogAttempt)}`
+    const rpcId = `latest-dsh-break-glass-catalog-${String(recoveryCatalogAttempt)}`
     const catalogBody = await rpc.raw('catalog/list', { protocolVersion: 1 }, rpcId)
     return parseCatalogListEnvelope(catalogBody, rpcId)
   })
@@ -1225,7 +1225,7 @@ try {
   assertInventoryEnvelope(inventoryAfterBreakGlass, 'break-glass-reconciled', pluginScopeKey)
   requireCondition(
     !inventoryAfterBreakGlass.inventory.rows.some(row => row?.targetKey === pluginTargetKey),
-    'P0-RC2-BREAK-GLASS-BEFORE-STATE',
+    'P0-LATEST-DSH-BREAK-GLASS-BEFORE-STATE',
     'break-glass recovery did not restore the exact absent pre-install Plugin state',
   )
   receipt.observations.lifecycle.push({
@@ -1255,7 +1255,7 @@ try {
       && pluginInstalled.row.evidence.loaderPhase === 'active'
       && pluginInstalled.row.evidence.consumerObserved === true
       && pluginInstalled.row.evidence.restartObserved === true,
-    'P0-RC2-PLUGIN-INSTALL',
+    'P0-LATEST-DSH-PLUGIN-INSTALL',
     'managed Host+Client Plugin was not active after the exact official Host restart',
   )
   receipt.observations.lifecycle.push(pluginInstalled.evidence)
@@ -1264,7 +1264,7 @@ try {
     pluginInstalled.row.updateObservation?.status === 'available'
       && pluginInstalled.row.updateObservation.candidateRef === pluginV011.candidateRef
       && pluginInstalled.row.updateObservation.integrity === pluginV011.artifact.integrity,
-    'P0-RC2-PLUGIN-UPDATE-DISCOVERY',
+    'P0-LATEST-DSH-PLUGIN-UPDATE-DISCOVERY',
     'installed Plugin did not expose the exact newer signed release',
   )
   const pluginConfigured = await runPluginLifecycle(
@@ -1288,7 +1288,7 @@ try {
       && pluginUpdated.row.evidence.loaderPhase === 'active'
       && pluginUpdated.row.evidence.consumerObserved === true
       && pluginUpdated.row.evidence.restartObserved === true,
-    'P0-RC2-PLUGIN-UPDATE',
+    'P0-LATEST-DSH-PLUGIN-UPDATE',
     'managed Plugin update did not activate and verify the exact public 0.1.1 release',
   )
   receipt.observations.lifecycle.push(pluginUpdated.evidence)
@@ -1322,7 +1322,7 @@ try {
     pluginUninstalled.row.evidence?.kind === 'plugin'
       && pluginUninstalled.row.evidence.loaderPhase === 'absent'
       && pluginUninstalled.row.actions?.restore?.status === 'available',
-    'P0-RC2-PLUGIN-UNINSTALL',
+    'P0-LATEST-DSH-PLUGIN-UNINSTALL',
     'uninstalled Plugin retained an active Loader row or lost its restore path',
   )
   receipt.observations.lifecycle.push(pluginUninstalled.evidence)
@@ -1346,16 +1346,16 @@ try {
   receipt.observations.lifecycle.push({ ...pluginRemovedAgain.evidence, stage: 'uninstall-after-restore' })
 
   const receipts = await rpc.call('operation/receipts', { protocolVersion: 1 })
-  requireCondition(Array.isArray(receipts.receipts), 'P0-RC2-RECEIPTS', 'operation/receipts omitted its receipt list')
+  requireCondition(Array.isArray(receipts.receipts), 'P0-LATEST-DSH-RECEIPTS', 'operation/receipts omitted its receipt list')
   try {
     verifyReceiptInventory(receipts.receipts, terminalReceipts)
   } catch (error) {
     throw new AcceptanceFailure(
-      'P0-RC2-RECEIPTS',
+      'P0-LATEST-DSH-RECEIPTS',
       error instanceof Error ? error.message : String(error),
     )
   }
-  requireCondition(true, 'P0-RC2-RECEIPTS', 'durable receipt inventory was not independently verified')
+  requireCondition(true, 'P0-LATEST-DSH-RECEIPTS', 'durable receipt inventory was not independently verified')
   for (const expected of terminalReceipts) {
     const operation = await rpc.call('operation/get', {
       protocolVersion: 1,
@@ -1365,11 +1365,11 @@ try {
       verifyOperationReceiptJournal(operation.operation, expected)
     } catch (error) {
       throw new AcceptanceFailure(
-        'P0-RC2-JOURNAL-RECEIPT-BINDING',
+        'P0-LATEST-DSH-JOURNAL-RECEIPT-BINDING',
         error instanceof Error ? error.message : String(error),
       )
     }
-    requireCondition(true, 'P0-RC2-JOURNAL-RECEIPT-BINDING', `operation ${expected.body.operationId} journal was not independently verified`)
+    requireCondition(true, 'P0-LATEST-DSH-JOURNAL-RECEIPT-BINDING', `operation ${expected.body.operationId} journal was not independently verified`)
   }
   receipt.observations.terminalReceiptDigests = terminalReceipts.map(item => item.digest)
   receipt.observations.terminalJournalHeadDigests = terminalReceipts.map(item => item.body.journalHeadDigest)
@@ -1378,20 +1378,20 @@ try {
   await stopChild(webChild)
   webChild = undefined
   await checkedStep(
-    'P0-RC2-AGENT-REPLAY-REMOVE',
+    'P0-LATEST-DSH-AGENT-REPLAY-REMOVE',
     dshBin,
     ['plugin', '--profile', 'web', 'remove', replayInstallation.packageName],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 120_000 },
   )
   receipt.inputs.keylessOfficialReplayBundleRemoved = true
   await checkedStep(
-    'P0-RC2-CENTER-SELF-REMOVE',
+    'P0-LATEST-DSH-CENTER-SELF-REMOVE',
     dshBin,
     ['plugin', '--profile', 'web', 'remove', 'dsh-plugin-extension-center'],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 120_000 },
   )
   const removedDump = await checkedStep(
-    'P0-RC2-CENTER-SELF-REMOVE',
+    'P0-LATEST-DSH-CENTER-SELF-REMOVE',
     dshBin,
     ['--profile', 'web', '--dump-config'],
     { cwd: workspace, env: runtimeEnv, timeoutMs: 60_000 },
@@ -1399,13 +1399,13 @@ try {
   requireCondition(
     !removedDump.stdout.includes('# == dsh-plugin-extension-center')
       && !removedDump.stdout.includes('name: dsh-plugin-extension-center'),
-    'P0-RC2-CENTER-SELF-REMOVE',
+    'P0-LATEST-DSH-CENTER-SELF-REMOVE',
     'official CLI remove retained the Center bundle layer',
   )
   receipt.observations.profileRemovalFinalDigest = await profileRemovalSurfaceDigest(profileRoot)
   requireCondition(
     receipt.observations.profileRemovalFinalDigest === receipt.observations.profileRemovalBaselineDigest,
-    'P0-RC2-PROFILE-REMOVAL-RESIDUE',
+    'P0-LATEST-DSH-PROFILE-REMOVAL-RESIDUE',
     'official CLI remove changed a Profile path outside the declared fixture and package-manager whitelist',
   )
   await assertNoManagedResolutionLinks(
@@ -1418,14 +1418,14 @@ try {
     === officialHost.packageTreeDigest
   requireCondition(
     receipt.observations.officialDshPackageTreeUnchanged,
-    'P0-RC2-OFFICIAL-HOST-MODIFIED',
+    'P0-LATEST-DSH-OFFICIAL-HOST-MODIFIED',
     'packed lifecycle or removal changed the official DSH package tree',
   )
   receipt.inputs.officialCliRemovalProven = true
   receipt.status = 'passed'
-  receipt.p0Status = 'official-rc2-lifecycle-proven'
+  receipt.p0Status = 'latest-dsh-lifecycle-proven'
 } catch (error) {
-  const code = error instanceof AcceptanceFailure ? error.code : 'P0-RC2-HARNESS-FAILURE'
+  const code = error instanceof AcceptanceFailure ? error.code : 'P0-LATEST-DSH-HARNESS-FAILURE'
   receipt.status = OWNER_MISSING_FAILURE_CODES.has(code) ? 'failed' : 'invalid'
   receipt.failure = {
     code,
@@ -1449,7 +1449,7 @@ try {
       await finalize()
     } catch (finalizationError) {
       finalizationFailures.push({
-        code: finalizationError instanceof AcceptanceFailure ? finalizationError.code : 'P0-RC2-TEARDOWN',
+        code: finalizationError instanceof AcceptanceFailure ? finalizationError.code : 'P0-LATEST-DSH-TEARDOWN',
         message: `${label}: ${sanitizeDiagnostic(finalizationError instanceof Error ? finalizationError.message : String(finalizationError))}`,
       })
     }
@@ -1468,9 +1468,9 @@ try {
 }
 
 if (receipt.status === 'passed') {
-  process.stdout.write(`Unmodified official DSH rc.2 lifecycle lane passed; release and matrix evidence remain separate gates: ${evidenceRoot}\n`)
+  process.stdout.write(`Unmodified latest official DSH lifecycle lane passed; release and matrix evidence remain separate gates: ${evidenceRoot}\n`)
 } else {
-  process.stderr.write(`${receipt.failure?.message ?? 'official DSH rc.2 acceptance failed'}\n`)
+  process.stderr.write(`${receipt.failure?.message ?? 'latest official DSH acceptance failed'}\n`)
   process.stderr.write(`status=${receipt.status}; evidence=${evidenceRoot}\n`)
 }
 
@@ -1519,7 +1519,7 @@ async function startOfficialWeb(command, cwd, env, output) {
 function createRpcClient(webOrigin, ledger) {
   let sequence = 0
   const raw = async (method, payload, suppliedRpcId, timeoutMs = 30_000) => {
-    const rpcId = suppliedRpcId ?? `official-rc2-${String(++sequence).padStart(2, '0')}-${method.replaceAll('/', '-')}`
+    const rpcId = suppliedRpcId ?? `latest-dsh-${String(++sequence).padStart(2, '0')}-${method.replaceAll('/', '-')}`
     ledger.push(method)
     const response = await fetch(new URL(`/dsh-extension-center/${method}`, webOrigin), {
       method: 'POST',
@@ -1527,17 +1527,17 @@ function createRpcClient(webOrigin, ledger) {
       body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
       signal: AbortSignal.timeout(timeoutMs),
     })
-    if (!response.ok) throw new AcceptanceFailure('P0-RC2-RPC-HTTP', `${method} failed over HTTP ${String(response.status)}`)
+    if (!response.ok) throw new AcceptanceFailure('P0-LATEST-DSH-RPC-HTTP', `${method} failed over HTTP ${String(response.status)}`)
     let body
     try {
       body = await response.json()
     } catch {
-      throw new AcceptanceFailure('P0-RC2-RPC-ENVELOPE', `${method} did not return JSON`)
+      throw new AcceptanceFailure('P0-LATEST-DSH-RPC-ENVELOPE', `${method} did not return JSON`)
     }
     const envelope = expectRecord(body, `${method} envelope`)
     requireCondition(
       envelope.type === 'server-response' && envelope.rpcId === rpcId,
-      'P0-RC2-RPC-ENVELOPE',
+      'P0-LATEST-DSH-RPC-ENVELOPE',
       `${method} response did not correlate to its request`,
     )
     return envelope
@@ -1549,17 +1549,17 @@ function createRpcClient(webOrigin, ledger) {
       const error = isRecord(result.error) && typeof result.error.message === 'string'
         ? result.error.message
         : 'business failure without a safe message'
-      throw new AcceptanceFailure('P0-RC2-RPC-REFUSED', `${method} was refused: ${error}`)
+      throw new AcceptanceFailure('P0-LATEST-DSH-RPC-REFUSED', `${method} was refused: ${error}`)
     }
     const value = expectRecord(result.value, `${method} value`)
-    requireCondition(value.protocolVersion === 1, 'P0-RC2-RPC-VERSION', `${method} returned a different protocol version`)
+    requireCondition(value.protocolVersion === 1, 'P0-LATEST-DSH-RPC-VERSION', `${method} returned a different protocol version`)
     return value
   }
   return Object.freeze({ raw, call })
 }
 
 function assertPlan(response, expected) {
-  requireCondition(response.policy?.status === 'eligible', 'P0-RC2-PLAN-POLICY', `${expected.operationKind} policy was not eligible`)
+  requireCondition(response.policy?.status === 'eligible', 'P0-LATEST-DSH-PLAN-POLICY', `${expected.operationKind} policy was not eligible`)
   const plan = expectRecord(response.plan, `${expected.operationKind} plan`)
   const content = expectRecord(plan.content, `${expected.operationKind} plan content`)
   let planIntegrityFailure = null
@@ -1592,7 +1592,7 @@ function assertPlan(response, expected) {
   ].filter(([, matches]) => !matches)
   requireCondition(
     mismatches.length === 0,
-    'P0-RC2-PLAN-BINDING',
+    'P0-LATEST-DSH-PLAN-BINDING',
     `${expected.operationKind} plan did not bind its exact candidate, target, scope, operation, and runtime action; mismatches: ${mismatches.map(([field, , observed]) => `${field}=${JSON.stringify(observed)}`).join(', ')}`,
   )
   return plan
@@ -1615,7 +1615,7 @@ async function approvePlan(rpc, plan) {
       && state.decision?.planHash === plan.hash
       && state.decision?.operationKind === content.operationKind
       && state.decision?.decision === 'approve',
-    'P0-RC2-APPROVAL-BINDING',
+    'P0-LATEST-DSH-APPROVAL-BINDING',
     `${content.operationKind} approval did not bind the exact immutable plan`,
   )
   return response
@@ -1640,7 +1640,7 @@ async function assertRestartRequiredLifecycle(rpc, response, plan) {
     response.status === 'restart-required'
       && typeof response.operationId === 'string'
       && response.receipt === null,
-    'P0-RC2-PLUGIN-RESTART-REQUIRED',
+    'P0-LATEST-DSH-PLUGIN-RESTART-REQUIRED',
     `${plan.content.operationKind} did not stop at an exact restart-required checkpoint `
       + `(status=${JSON.stringify(response?.status)}, receipt=${response?.receipt === null ? 'null' : 'present'}, operationId=${typeof response?.operationId}, `
       + `journalReasons=${JSON.stringify(journalReasons)})`,
@@ -1663,7 +1663,7 @@ async function waitForCommittedOperation(rpc, operationId, plan, externalRuntime
         verifyOperationReceiptJournal(loaded, terminalReceipt)
       } catch (error) {
         throw new AcceptanceFailure(
-          'P0-RC2-PLUGIN-RESTART-JOURNAL',
+          'P0-LATEST-DSH-PLUGIN-RESTART-JOURNAL',
           error instanceof Error ? error.message : String(error),
         )
       }
@@ -1672,12 +1672,12 @@ async function waitForCommittedOperation(rpc, operationId, plan, externalRuntime
     if (isRecord(loaded) && isRecord(loaded.projection)
       && ['failed', 'rolled-back', 'recovery-required'].includes(loaded.projection.phase)) {
       throw new AcceptanceFailure(
-        'P0-RC2-PLUGIN-RESTART-TERMINAL',
+        'P0-LATEST-DSH-PLUGIN-RESTART-TERMINAL',
         `managed Plugin operation stopped in ${String(loaded.projection.phase)}`,
       )
     }
     if (Date.now() >= deadline) {
-      throw new AcceptanceFailure('P0-RC2-PLUGIN-RESTART-TIMEOUT', 'managed Plugin operation did not settle after Host restart')
+      throw new AcceptanceFailure('P0-LATEST-DSH-PLUGIN-RESTART-TIMEOUT', 'managed Plugin operation did not settle after Host restart')
     }
     await delay(250)
   }
@@ -1698,7 +1698,7 @@ async function waitForRolledBackOperation(rpc, operationId, plan, externalRuntim
         verifyOperationReceiptJournal(loaded, terminalReceipt)
       } catch (error) {
         throw new AcceptanceFailure(
-          'P0-RC2-BREAK-GLASS-JOURNAL',
+          'P0-LATEST-DSH-BREAK-GLASS-JOURNAL',
           error instanceof Error ? error.message : String(error),
         )
       }
@@ -1707,12 +1707,12 @@ async function waitForRolledBackOperation(rpc, operationId, plan, externalRuntim
     if (isRecord(loaded) && isRecord(loaded.projection)
       && ['committed', 'failed'].includes(loaded.projection.phase)) {
       throw new AcceptanceFailure(
-        'P0-RC2-BREAK-GLASS-TERMINAL',
+        'P0-LATEST-DSH-BREAK-GLASS-TERMINAL',
         `break-glass reconciliation stopped in ${String(loaded.projection.phase)}`,
       )
     }
     if (Date.now() >= deadline) {
-      throw new AcceptanceFailure('P0-RC2-BREAK-GLASS-TIMEOUT', 'break-glass operation did not reach rolled-back after Host restart')
+      throw new AcceptanceFailure('P0-LATEST-DSH-BREAK-GLASS-TIMEOUT', 'break-glass operation did not reach rolled-back after Host restart')
     }
     await delay(250)
   }
@@ -1749,7 +1749,7 @@ async function runStoreLifecycle(rpc, input) {
     ...(input.runtimeRef === undefined ? {} : { runtimeRef: input.runtimeRef }),
   })
   const approval = await approvePlan(rpc, plan)
-  requireCondition(approval.state.status === 'approved', 'P0-RC2-APPROVAL', `${input.operationKind} plan was not approved exactly once`)
+  requireCondition(approval.state.status === 'approved', 'P0-LATEST-DSH-APPROVAL', `${input.operationKind} plan was not approved exactly once`)
   const lifecycle = await rpc.call('lifecycle/request', {
     protocolVersion: 1,
     planHash: plan.hash,
@@ -1873,7 +1873,7 @@ function assertTerminalLifecycle(response, plan, externalRuntimeAction, outcome)
   }
   requireCondition(
     mismatches.length === 0,
-    'P0-RC2-LIFECYCLE-RECEIPT',
+    'P0-LATEST-DSH-LIFECYCLE-RECEIPT',
     `${plan.content.operationKind} did not return the exact ${outcome} terminal receipt; mismatches: ${mismatches.map(([field, , observed]) => `${field}=${JSON.stringify(observed)}`).join(', ')}`,
   )
   return receiptValue
@@ -1887,7 +1887,7 @@ function assertInventoryEnvelope(response, phase, scopeKey = 'user') {
       && response.inventory.profileId === 'web'
       && Array.isArray(response.inventory.rows)
       && typeof response.inventory.revision === 'string',
-    'P0-RC2-INVENTORY',
+    'P0-LATEST-DSH-INVENTORY',
     `${phase} inventory omitted its exact scope, rows, revision, or Host capability`,
   )
 }
@@ -1897,7 +1897,7 @@ function assertInventoryRow(response, targetKey, expected) {
   const scopeKey = expected.scopeKey ?? 'user'
   assertInventoryEnvelope(response, expected.desired, scopeKey)
   const rows = response.inventory.rows.filter(row => row?.targetKey === targetKey)
-  requireCondition(rows.length === 1, 'P0-RC2-INVENTORY-TARGET', `expected one exact ${targetKey} row, observed ${String(rows.length)}`)
+  requireCondition(rows.length === 1, 'P0-LATEST-DSH-INVENTORY-TARGET', `expected one exact ${targetKey} row, observed ${String(rows.length)}`)
   const row = rows[0]
   const candidateMatches = expected.candidateRef === null
     ? row.candidateRef === null
@@ -1915,7 +1915,7 @@ function assertInventoryRow(response, targetKey, expected) {
       && row.effective === expected.effective
       && row.agentVisibility === expected.visibility
       && row.verification === expected.verification,
-    'P0-RC2-INVENTORY-STATE',
+    'P0-LATEST-DSH-INVENTORY-STATE',
     `inventory row ${targetKey} did not expose the expected independent lifecycle dimensions`,
   )
   return row
@@ -1927,17 +1927,17 @@ async function assertManagedArtifact(path, materialRoot, expectedIntegrity, expe
   const rel = relative(canonicalRoot, canonicalPath)
   requireCondition(
     rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`),
-    'P0-RC2-SKILL-MATERIAL',
+    'P0-LATEST-DSH-SKILL-MATERIAL',
     'winning Skill path escaped the isolated Extension Center material root',
   )
   const info = await lstat(canonicalPath)
-  requireCondition(info.isFile() && !info.isSymbolicLink() && info.size === expectedSize, 'P0-RC2-SKILL-MATERIAL', 'winning Skill material is not the exact regular file')
+  requireCondition(info.isFile() && !info.isSymbolicLink() && info.size === expectedSize, 'P0-LATEST-DSH-SKILL-MATERIAL', 'winning Skill material is not the exact regular file')
   const bytes = await readFile(canonicalPath)
   const separator = expectedIntegrity.indexOf(':')
   const algorithm = expectedIntegrity.slice(0, separator)
   const encoded = expectedIntegrity.slice(separator + 1)
   const actual = `${algorithm}:${createHash(algorithm).update(bytes).digest(/^[a-f0-9]+$/.test(encoded) ? 'hex' : 'base64')}`
-  requireCondition(actual === expectedIntegrity, 'P0-RC2-SKILL-MATERIAL', 'winning Skill material digest differs from the signed catalog')
+  requireCondition(actual === expectedIntegrity, 'P0-LATEST-DSH-SKILL-MATERIAL', 'winning Skill material digest differs from the signed catalog')
 }
 
 async function pathIsAbsent(path) {
@@ -2005,7 +2005,7 @@ async function hashTree(root, path, hash) {
     hash.update(await readFile(path))
     return
   }
-  requireCondition(info.isDirectory(), 'P0-RC2-MATERIAL-TREE', `unsupported material node ${name}`)
+  requireCondition(info.isDirectory(), 'P0-LATEST-DSH-MATERIAL-TREE', `unsupported material node ${name}`)
   hash.update(`dir:${name}:${String(info.mode)}\0`)
   const entries = (await readdir(path, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))
   for (const entry of entries) await hashTree(root, join(path, entry.name), hash)
@@ -2080,7 +2080,7 @@ function signalObservedTree(child, signal) {
 }
 
 function expectRecord(value, subject) {
-  if (!isRecord(value)) throw new AcceptanceFailure('P0-RC2-RPC-PROTOCOL', `${subject} must be a JSON object`)
+  if (!isRecord(value)) throw new AcceptanceFailure('P0-LATEST-DSH-RPC-PROTOCOL', `${subject} must be a JSON object`)
   return value
 }
 

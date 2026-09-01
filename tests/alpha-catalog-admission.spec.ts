@@ -200,7 +200,7 @@ async function fixture() {
     run,
     sequence,
     activeCandidateAbsent: true,
-    notProven: ['ordinary-user-registry-installation', 'public-catalog-deployment'],
+    notProven: ['public-github-artifact-installation', 'public-catalog-deployment'],
   }
   const lifecycleReceipt = { ...lifecycleBody, receiptDigest: canonicalSha256(lifecycleBody) }
   return {
@@ -236,11 +236,11 @@ describe('official alpha catalog admission proposal', () => {
     expect(result.document.envelope.entries.map(entry => entry.candidateRef)).toEqual(
       ALPHA_WIKI_CANDIDATES.map(candidate => candidate.candidateRef),
     )
-    expect(result.document.envelope.entries.every(entry => entry.compatibility.dsh === '0.1.2-alpha.1')).toBe(true)
+    expect(result.document.envelope.entries.every(entry => entry.compatibility.dsh === '0.1.2-alpha.3')).toBe(true)
     expect(result.document.envelope.entries.every(entry => entry.configuration.required === false)).toBe(true)
     expect(result.evidence).toMatchObject({
       status: 'prepared-for-review',
-      notProven: ['ordinary-user-registry-installation', 'public-catalog-deployment'],
+      notProven: ['public-github-artifact-installation', 'public-catalog-deployment'],
       previousRevision: 11,
       revision: 12,
     })

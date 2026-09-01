@@ -174,7 +174,7 @@ async function readLifecycleCatalog(catalogPath, evidencePath) {
     && evidence.status === 'development-only'
     && sameList(evidence.notProven, [
       'catalog-admission',
-      'ordinary-user-registry-installation',
+      'public-github-artifact-installation',
       'public-catalog-deployment',
     ])
     && evidence.targetDsh?.version === DSH_VERSION
