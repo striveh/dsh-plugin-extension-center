@@ -29,7 +29,7 @@ const GITHUB_SKILL_SEARCHES = Object.freeze([
     url: 'https://api.github.com/search/repositories?q=topic%3Aagent-skills&sort=updated&order=desc&per_page=100&page=1',
   }),
 ])
-const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 const MAX_INPUT_BYTES = 16 * 1024 * 1024
 const PACKAGE_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
 if (typeof PACKAGE_VERSION !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(PACKAGE_VERSION)) {
