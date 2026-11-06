@@ -80,16 +80,39 @@ jobs:
           cache: pnpm
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+      - name: Warm the offline pnpm cache for the packed plugin graph
+        # STORE-UI-01 installs the packed tarball with `dsh plugin add --offline`.
+        # pnpm resolves the tarball's runtime dependencies from its metadata mirror
+        # and content-addressable store even though the tarball itself is local,
+        # so a cold mirror/store makes the offline install fail with
+        # ERR_PNPM_NO_OFFLINE_META / ERR_PNPM_NO_OFFLINE_TARBALL before the Host Web
+        # process ever starts. Resolve the exact packed runtime dependencies online
+        # once here, outside the checkout so the lane's clean-worktree check holds;
+        # the acceptance lane itself remains strictly offline.
+        run: |
+          # Exact runtime dependencies declared by the packed artifact (package.json).
+          # Fail closed if they change, so the warm-up never silently goes stale.
+          expected="@deepseek-ai/dsh-mcp-client@0.1.2-alpha.3 pnpm@11.21.0 yaml@2.9.0"
+          actual="$(node -e "const d=require('./package.json').dependencies||{};process.stdout.write(Object.entries(d).map(([n,v])=>n+'@'+v).join(' '))")"
+          test "$actual" = "$expected" || {
+            echo "::error::packed runtime dependencies changed; update the CI warm-up step and the offline acceptance lane"
+            exit 1
+          }
+          warm_root="$RUNNER_TEMP/dsh-extension-center-cache-warm"
+          mkdir -p "$warm_root"
+          printf '{\n  "private": true\n}\n' > "$warm_root/package.json"
+          (cd "$warm_root" && pnpm add $expected --save-exact --ignore-scripts)
       - name: Install isolated Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
       - name: Prove standard packed-plugin install and Host plus Client boot
         run: pnpm run test:compat:latest
       - name: Upload exact compatibility evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
         with:
           name: latest-dsh-compatibility-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: .artifacts/acceptance/store-only
-          if-no-files-found: error
+          if-no-files-found: warn
           include-hidden-files: true
           compression-level: 0
 

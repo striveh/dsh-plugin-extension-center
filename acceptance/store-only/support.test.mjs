@@ -15,6 +15,7 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  assertOfficialHostGraph,
   assertSourceBindingClosed,
   comboUrlContainsClientBundle,
   describeUnadmittedConnectionFrame,
@@ -66,6 +67,44 @@ test('official Host identity binds one exact registry integrity and isolated roo
     }),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-NOT-ISOLATED',
   )
+})
+
+test('official Host graph pins the exact alpha.3 sibling and framework versions', () => {
+  const exactGraph = [
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-alpha.3':",
+    "  '@deepseek-ai/dsh-web@0.1.2-alpha.3(peer):",
+    "  '@deepseek-ai/cordis@4.0.2':",
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17':",
+    "  '@deepseek-ai/cordis-plugin-group@1.0.2':",
+    "  '@deepseek-ai/cosmokit@1.8.3':",
+    "  '@deepseek-ai/schemastery@3.18.2':",
+    "  '@deepseek-ai/cordis-plugin-loader@1.0.3':",
+    "  '@deepseek-ai/cordis-plugin-include@1.0.7':",
+    "  '@deepseek-ai/cordis-plugin-timer@1.1.4':",
+    '',
+  ].join('\n')
+  assert.doesNotThrow(() => assertOfficialHostGraph(exactGraph))
+  assert.throws(
+    () => assertOfficialHostGraph('lockfileVersion: 9.0\n'),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT',
+  )
+  assert.throws(
+    () => assertOfficialHostGraph(''),
+    TypeError,
+  )
+  for (const drifted of [
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-rc.1':",
+    "  '@deepseek-ai/cordis@4.1.0':",
+    "  '@deepseek-ai/cordis-plugin-hmr@1.1.0':",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.4':",
+  ]) {
+    assert.throws(
+      () => assertOfficialHostGraph(`${exactGraph}${drifted}\n`),
+      error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT',
+      drifted,
+    )
+  }
 })
 
 test('official package tree digest is deterministic and detects byte changes', async () => {
@@ -267,6 +306,20 @@ test('MCP fail-closed evidence binds each button to its exact candidate card', (
   const evidence = collectFailClosedMcpCardEvidence(failClosed, refs)
   assert.equal(failClosedMcpCardEvidenceError(evidence), null)
   assert.deepEqual(evidence.map(entry => entry.observedCandidateRef), refs)
+})
+
+test('failed subprocess errors retain the captured stdout and stderr', async () => {
+  await assert.rejects(
+    runChecked(process.execPath, ['-e', 'process.stdout.write("out-marker"); process.stderr.write("err-marker"); process.exit(3)'], {
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: 10_000,
+    }),
+    error => error instanceof Error
+      && /exited with 3/u.test(error.message)
+      && error.message.includes('out-marker')
+      && error.message.includes('err-marker'),
+  )
 })
 
 test('subprocess timeouts and child teardown are bounded', async () => {

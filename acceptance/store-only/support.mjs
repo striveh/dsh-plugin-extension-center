@@ -62,6 +62,58 @@ export function parsePnpmRegistryIntegrity(lockfile, packageName, version) {
   return matches[0][1]
 }
 
+/** Exact framework versions published with official DSH 0.1.2-alpha.3. */
+const OFFICIAL_HOST_FRAMEWORK_VERSIONS = Object.freeze({
+  '@deepseek-ai/cordis': '4.0.2',
+  '@deepseek-ai/cordis-plugin-group': '1.0.2',
+  '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+  '@deepseek-ai/cordis-plugin-include': '1.0.7',
+  '@deepseek-ai/cordis-plugin-loader': '1.0.3',
+  '@deepseek-ai/cordis-plugin-timer': '1.1.4',
+  '@deepseek-ai/cosmokit': '1.8.3',
+  '@deepseek-ai/schemastery': '3.18.2',
+})
+
+/**
+ * Require the isolated Host lockfile to resolve the exact reviewed alpha.3 graph.
+ *
+ * The published `@deepseek-ai/dsh` manifest pins its own version but declares caret
+ * ranges for its 60+ workspace siblings. A fresh install therefore resolves whatever
+ * is newest on the registry; after rc.1 and cordis 4.1.0 were published this produced
+ * a mixed graph where `dsh web` announces its loopback URL and then aborts with
+ * "user patch-layer watching requires the Cordis HMR service", surfacing only as a
+ * browser `ERR_CONNECTION_REFUSED`. Time-based resolution plus this fail-closed check
+ * keep the isolated Host on the audited release and report drift directly.
+ *
+ * @param {string} lockfile Generated pnpm lockfile text.
+ */
+export function assertOfficialHostGraph(lockfile) {
+  if (typeof lockfile !== 'string' || lockfile.length === 0) {
+    throw new TypeError('official Host graph check requires a non-empty lockfile')
+  }
+  const observed = new Map()
+  for (const [, name, version] of lockfile.matchAll(/^  '?(@deepseek-ai\/[^@']+)@([^'":\s()]+)/gmu)) {
+    if (!name.startsWith('@deepseek-ai/dsh') && !(name in OFFICIAL_HOST_FRAMEWORK_VERSIONS)) continue
+    if (!observed.has(name)) observed.set(name, new Set())
+    observed.get(name).add(version)
+  }
+  if (observed.size === 0) {
+    throw new AcceptanceFailure('OFFICIAL-HOST-GRAPH-DRIFT', 'isolated Host lockfile exposed no reviewed DSH graph')
+  }
+  for (const [name, versions] of observed) {
+    const expected = name.startsWith('@deepseek-ai/dsh')
+      ? TARGET_DSH_VERSION
+      : OFFICIAL_HOST_FRAMEWORK_VERSIONS[name]
+    const drifted = [...versions].filter(version => version !== expected)
+    if (drifted.length > 0) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-GRAPH-DRIFT',
+        `isolated Host resolved ${name}@${drifted.join(',')} instead of the exact ${expected} alpha.3 graph`,
+      )
+    }
+  }
+}
+
 /**
  * Require the Host executable and package to resolve inside the isolated root and outside the source project.
  * @param {{hostRoot: string, projectRoot: string, dshBin: string, packageRoot: string}} paths Candidate paths.
@@ -96,6 +148,10 @@ export async function installOfficialDshHost(options) {
     'add', `@deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
     '--save-exact', '--ignore-scripts',
     '--config.enable-global-virtual-store=false',
+    // The published manifest uses caret ranges for its sibling packages. Resolve them
+    // as of the top-level package publish time so the isolated Host keeps the exact
+    // audited alpha.3 graph even after newer rc/GA versions reach the registry.
+    '--config.resolution-mode=time-based',
     `--registry=${OFFICIAL_NPM_REGISTRY}`,
   ], {
     cwd: options.cwd,
@@ -103,6 +159,7 @@ export async function installOfficialDshHost(options) {
     timeoutMs: options.timeoutMs ?? 240_000,
   })
   const lockfile = await readFile(join(options.hostRoot, 'pnpm-lock.yaml'), 'utf8')
+  assertOfficialHostGraph(lockfile)
   const registryIntegrity = parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', TARGET_DSH_VERSION)
   if (registryIntegrity !== TARGET_DSH_REGISTRY_INTEGRITY) {
     throw new AcceptanceFailure(
@@ -406,7 +463,13 @@ export function runChecked(command, args, options) {
         return
       }
       if (code !== 0) {
-        settle(() => rejectRun(new Error(`${command} exited with ${signal ?? String(code)} (stdoutBytes=${String(Buffer.byteLength(stdout))}, stderrBytes=${String(Buffer.byteLength(stderr))})`)))
+        // Include the captured output in the thrown message. The runner persists
+        // secret-scrubbed evidence, but CI logs otherwise show only byte counts,
+        // hiding the real failure (e.g. pnpm's ERR_PNPM_NO_OFFLINE_META).
+        settle(() => rejectRun(new Error(
+          `${command} exited with ${signal ?? String(code)} (stdoutBytes=${String(Buffer.byteLength(stdout))}, stderrBytes=${String(Buffer.byteLength(stderr))})`
+          + `\nstdout:\n${sanitizeDiagnostic(stdout)}\nstderr:\n${sanitizeDiagnostic(stderr)}`,
+        )))
         return
       }
       settle(() => resolveRun({ stdout, stderr }))
