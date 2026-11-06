@@ -15,6 +15,7 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  assertOfficialHostGraph,
   assertSourceBindingClosed,
   comboUrlContainsClientBundle,
   describeUnadmittedConnectionFrame,
@@ -66,6 +67,44 @@ test('official Host identity binds one exact registry integrity and isolated roo
     }),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-NOT-ISOLATED',
   )
+})
+
+test('official Host graph pins the exact alpha.3 sibling and framework versions', () => {
+  const exactGraph = [
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-alpha.3':",
+    "  '@deepseek-ai/dsh-web@0.1.2-alpha.3(peer):",
+    "  '@deepseek-ai/cordis@4.0.2':",
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17':",
+    "  '@deepseek-ai/cordis-plugin-group@1.0.2':",
+    "  '@deepseek-ai/cosmokit@1.8.3':",
+    "  '@deepseek-ai/schemastery@3.18.2':",
+    "  '@deepseek-ai/cordis-plugin-loader@1.0.3':",
+    "  '@deepseek-ai/cordis-plugin-include@1.0.7':",
+    "  '@deepseek-ai/cordis-plugin-timer@1.1.4':",
+    '',
+  ].join('\n')
+  assert.doesNotThrow(() => assertOfficialHostGraph(exactGraph))
+  assert.throws(
+    () => assertOfficialHostGraph('lockfileVersion: 9.0\n'),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT',
+  )
+  assert.throws(
+    () => assertOfficialHostGraph(''),
+    TypeError,
+  )
+  for (const drifted of [
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-rc.1':",
+    "  '@deepseek-ai/cordis@4.1.0':",
+    "  '@deepseek-ai/cordis-plugin-hmr@1.1.0':",
+    "  '@deepseek-ai/dsh@0.1.2-alpha.4':",
+  ]) {
+    assert.throws(
+      () => assertOfficialHostGraph(`${exactGraph}${drifted}\n`),
+      error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT',
+      drifted,
+    )
+  }
 })
 
 test('official package tree digest is deterministic and detects byte changes', async () => {
