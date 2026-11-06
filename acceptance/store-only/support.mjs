@@ -81,6 +81,51 @@ export function assertIsolatedOfficialHostPaths(paths) {
 }
 
 /**
+ * Derive the exact audited @deepseek-ai dependency graph from a pnpm lockfile.
+ *
+ * The published `@deepseek-ai/dsh@0.1.2-alpha.3` manifest declares its sibling
+ * packages with caret ranges (`^0.1.2-alpha.3`, `^4.0.2`, ...). A fresh
+ * `pnpm add` now resolves those ranges to the later-published `0.1.2-rc.1` and
+ * `cordis@4.1.0` graph, whose `--patch` boot requires a Cordis HMR service that
+ * is never registered: the Web process prints its ready URL, then exits with
+ * `user patch-layer watching requires the Cordis HMR service`, and the browser
+ * sees `ERR_CONNECTION_REFUSED`. The committed `pnpm-lock.yaml` is the exact
+ * graph whose bytes the acceptance receipt already binds, so extract one
+ * per-package version from it and use those versions as install overrides.
+ *
+ * @param {string} lockfile pnpm lockfile text.
+ * @returns {Readonly<Record<string, string>>} Audited package name to exact version.
+ */
+export function auditedOfficialHostOverrides(lockfile) {
+  if (typeof lockfile !== 'string' || lockfile.length === 0) {
+    throw new TypeError('audited official Host overrides require a non-empty pnpm lockfile')
+  }
+  const versions = new Map()
+  // pnpm v9 package keys are two-space indented; peer suffixes such as
+  // `1.0.17(@deepseek-ai/cordis@4.0.2)` stop at the first `(`, and the rest of
+  // the key (including its closing quote) is ignored up to the trailing colon.
+  for (const match of lockfile.matchAll(/^ {2}'?(@deepseek-ai\/[^@'\s]+)@([^\s(']+)[^\n]*:/gmu)) {
+    const [, name, version] = match
+    if (name === undefined || version === undefined) continue
+    const prior = versions.get(name)
+    if (prior !== undefined && prior !== version) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-LOCK-AMBIGUOUS',
+        `pnpm lockfile binds ${name} to more than one version`,
+      )
+    }
+    versions.set(name, version)
+  }
+  if (!versions.has('@deepseek-ai/dsh')) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-LOCK-INCOMPLETE',
+      'pnpm lockfile did not bind the audited official DSH dependency graph',
+    )
+  }
+  return Object.freeze(Object.fromEntries([...versions].sort(([left], [right]) => left.localeCompare(right))))
+}
+
+/**
  * Install and identify the exact official DSH package in an independent temporary project.
  * @param {{hostRoot: string, projectRoot: string, cwd: string, env: NodeJS.ProcessEnv, timeoutMs?: number}} options Installation options.
  * @returns {Promise<{dshBin: string, packageRoot: string, registry: string, registryIntegrity: string, packageTreeDigest: string, version: string}>} Bound Host identity.
@@ -88,6 +133,16 @@ export function assertIsolatedOfficialHostPaths(paths) {
 export async function installOfficialDshHost(options) {
   await mkdir(options.hostRoot, { recursive: false, mode: 0o700 })
   await writeFile(join(options.hostRoot, 'package.json'), `${JSON.stringify({ private: true }, null, 2)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  })
+  const auditedLockfile = await readFile(join(options.projectRoot, 'pnpm-lock.yaml'), 'utf8')
+  const overrides = auditedOfficialHostOverrides(auditedLockfile)
+  await writeFile(join(options.hostRoot, 'pnpm-workspace.yaml'), [
+    'overrides:',
+    ...Object.entries(overrides).map(([name, version]) => `  '${name}': '${version}'`),
+    '',
+  ].join('\n'), {
     flag: 'wx',
     mode: 0o600,
   })
@@ -108,6 +163,26 @@ export async function installOfficialDshHost(options) {
     throw new AcceptanceFailure(
       'OFFICIAL-HOST-REGISTRY-INTEGRITY',
       `official DSH registry integrity changed: ${registryIntegrity}`,
+    )
+  }
+  // The overrides pin version strings, but a registry republish under the same
+  // version could still change the resolved bytes. Fail closed if the isolated
+  // install resolved any audited @deepseek-ai package to a different version.
+  // Dev-only lockfile entries need not be present in the production Host graph.
+  const installedGraph = auditedOfficialHostOverrides(lockfile)
+  for (const [name, version] of Object.entries(installedGraph)) {
+    const audited = overrides[name]
+    if (audited !== undefined && audited !== version) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-GRAPH-DRIFT',
+        `isolated official Host resolved ${name} to ${version} instead of audited ${audited}`,
+      )
+    }
+  }
+  if (installedGraph['@deepseek-ai/dsh'] !== TARGET_DSH_VERSION) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-GRAPH-DRIFT',
+      'isolated official Host did not resolve the exact audited DSH version',
     )
   }
   const packageRoot = await realpath(join(options.hostRoot, 'node_modules', '@deepseek-ai', 'dsh'))

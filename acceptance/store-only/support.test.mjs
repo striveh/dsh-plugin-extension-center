@@ -16,6 +16,7 @@ import {
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
   assertSourceBindingClosed,
+  auditedOfficialHostOverrides,
   comboUrlContainsClientBundle,
   describeUnadmittedConnectionFrame,
   describeNetworkDestination,
@@ -65,6 +66,46 @@ test('official Host identity binds one exact registry integrity and isolated roo
       packageRoot: join(fixtureRoot, 'node_modules', '@deepseek-ai', 'dsh'),
     }),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-NOT-ISOLATED',
+  )
+})
+
+test('audited official Host overrides bind every @deepseek-ai lockfile version', () => {
+  const lockfile = [
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+    `    resolution: {integrity: ${TARGET_DSH_REGISTRY_INTEGRITY}}`,
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-alpha.3':",
+    '    resolution: {integrity: sha512-AAAA}',
+    "  '@deepseek-ai/cordis@4.0.2':",
+    '    resolution: {integrity: sha512-BBBB}',
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17(@deepseek-ai/cordis@4.0.2)':",
+    '    resolution: {integrity: sha512-CCCC}',
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17(@deepseek-ai/cordis-plugin-timer@1.1.4)(@deepseek-ai/cordis@4.0.2)':",
+    '    resolution: {integrity: sha512-CCCC}',
+    '  react@18.3.1:',
+    '    resolution: {integrity: sha512-DDDD}',
+    '',
+  ].join('\n')
+  assert.deepEqual(auditedOfficialHostOverrides(lockfile), {
+    '@deepseek-ai/cordis': '4.0.2',
+    '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+    '@deepseek-ai/dsh': '0.1.2-alpha.3',
+    '@deepseek-ai/dsh-app-boot': '0.1.2-alpha.3',
+  })
+  assert.throws(
+    () => auditedOfficialHostOverrides(''),
+    error => error instanceof TypeError,
+  )
+  assert.throws(
+    () => auditedOfficialHostOverrides('  react@18.3.1:\n'),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-INCOMPLETE',
+  )
+  assert.throws(
+    () => auditedOfficialHostOverrides([
+      "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+      "  '@deepseek-ai/dsh@0.1.2-rc.1':",
+      '',
+    ].join('\n')),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-AMBIGUOUS',
   )
 })
 
