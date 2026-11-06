@@ -463,7 +463,13 @@ export function runChecked(command, args, options) {
         return
       }
       if (code !== 0) {
-        settle(() => rejectRun(new Error(`${command} exited with ${signal ?? String(code)} (stdoutBytes=${String(Buffer.byteLength(stdout))}, stderrBytes=${String(Buffer.byteLength(stderr))})`)))
+        // Include the captured output in the thrown message. The runner persists
+        // secret-scrubbed evidence, but CI logs otherwise show only byte counts,
+        // hiding the real failure (e.g. pnpm's ERR_PNPM_NO_OFFLINE_META).
+        settle(() => rejectRun(new Error(
+          `${command} exited with ${signal ?? String(code)} (stdoutBytes=${String(Buffer.byteLength(stdout))}, stderrBytes=${String(Buffer.byteLength(stderr))})`
+          + `\nstdout:\n${sanitizeDiagnostic(stdout)}\nstderr:\n${sanitizeDiagnostic(stderr)}`,
+        )))
         return
       }
       settle(() => resolveRun({ stdout, stderr }))

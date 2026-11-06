@@ -308,6 +308,20 @@ test('MCP fail-closed evidence binds each button to its exact candidate card', (
   assert.deepEqual(evidence.map(entry => entry.observedCandidateRef), refs)
 })
 
+test('failed subprocess errors retain the captured stdout and stderr', async () => {
+  await assert.rejects(
+    runChecked(process.execPath, ['-e', 'process.stdout.write("out-marker"); process.stderr.write("err-marker"); process.exit(3)'], {
+      cwd: process.cwd(),
+      env: process.env,
+      timeoutMs: 10_000,
+    }),
+    error => error instanceof Error
+      && /exited with 3/u.test(error.message)
+      && error.message.includes('out-marker')
+      && error.message.includes('err-marker'),
+  )
+})
+
 test('subprocess timeouts and child teardown are bounded', async () => {
   await assert.rejects(
     runChecked(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
