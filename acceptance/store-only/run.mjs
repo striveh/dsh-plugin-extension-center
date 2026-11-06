@@ -24,6 +24,7 @@ import {
   isAdmittedBrowserWebSocket,
   parseAuthenticatedLaunchUrl,
   parseAdmittedConnectionFrame,
+  pinOfficialProfileResolution,
   readSourceBinding,
   removedProfileEvidence,
   removedProfileEvidenceError,
@@ -100,6 +101,7 @@ const receipt = {
     catalogModeRequested: 'packaged-bootstrap-offline',
     packageManagerOfflineRemovalRequested: false,
     profileCatalogOverrideWritten: false,
+    officialProfileResolutionPinned: false,
     acceptanceOverlayWritten: false,
   },
   observations: {
@@ -292,6 +294,13 @@ try {
   if (version.stdout.trim() !== TARGET_DSH_VERSION) {
     throw new AcceptanceFailure('STORE-UI-HOST-VERSION', `expected ${TARGET_DSH_VERSION}, got ${JSON.stringify(version.stdout.trim())}`)
   }
+
+  receipt.phase = 'pinning-official-profile-resolution'
+  await pinOfficialProfileResolution({
+    profileRoot: join(dshHome, 'profiles', 'web'),
+    projectRoot,
+  })
+  receipt.inputs.officialProfileResolutionPinned = true
 
   receipt.phase = 'installing-extension-center'
   await runChecked(dshBin, ['plugin', '--profile', 'web', 'add', artifact, '--offline', '--ignore-scripts', '--save-exact'], {

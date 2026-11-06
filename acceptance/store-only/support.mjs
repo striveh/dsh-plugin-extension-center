@@ -63,6 +63,93 @@ export function parsePnpmRegistryIntegrity(lockfile, packageName, version) {
 }
 
 /**
+ * Derive the exact audited @deepseek-ai dependency graph from a pnpm lockfile.
+ *
+ * The published `@deepseek-ai/dsh@0.1.2-alpha.3` manifest declares its sibling
+ * packages with caret ranges (`^0.1.2-alpha.3`, `^4.0.2`, ...). Any fresh
+ * `pnpm add` — both the isolated Host install and the official `dsh plugin add`
+ * inside the Web profile — resolves those ranges against the live registry. Once
+ * newer `0.1.2-rc.1` / `cordis@4.1.0` / `schemastery@3.19.0` releases were
+ * published, those installs picked a mixed graph that no longer matches the
+ * committed lockfile, which the acceptance receipt binds byte-for-byte. The
+ * Host then fails to boot, and the offline Profile install cannot find the
+ * drifted tarballs in the runner's pnpm store (`ERR_PNPM_NO_OFFLINE_TARBALL`).
+ *
+ * Extract one exact version per package from the committed lockfile and use the
+ * resulting map as pnpm `overrides`, so both installs resolve the same audited
+ * alpha.3 graph regardless of registry drift.
+ *
+ * @param {string} lockfile pnpm lockfile text.
+ * @returns {Readonly<Record<string, string>>} Audited package name to exact version.
+ */
+export function auditedOfficialHostOverrides(lockfile) {
+  if (typeof lockfile !== 'string' || lockfile.length === 0) {
+    throw new TypeError('audited official Host overrides require a non-empty pnpm lockfile')
+  }
+  const versions = new Map()
+  // pnpm v9 package keys are two-space indented; peer suffixes such as
+  // `1.0.17(@deepseek-ai/cordis@4.0.2)` stop at the first `(`, and the rest of
+  // the key (including its closing quote) is ignored up to the trailing colon.
+  for (const match of lockfile.matchAll(/^ {2}'?(@deepseek-ai\/[^@'\s]+)@([^\s(']+)[^\n]*:/gmu)) {
+    const [, name, version] = match
+    if (name === undefined || version === undefined) continue
+    const prior = versions.get(name)
+    if (prior !== undefined && prior !== version) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-LOCK-AMBIGUOUS',
+        `pnpm lockfile binds ${name} to more than one version`,
+      )
+    }
+    versions.set(name, version)
+  }
+  if (!versions.has('@deepseek-ai/dsh')) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-LOCK-INCOMPLETE',
+      'pnpm lockfile did not bind the audited official DSH dependency graph',
+    )
+  }
+  return Object.freeze(Object.fromEntries([...versions].sort(([left], [right]) => left.localeCompare(right))))
+}
+
+/**
+ * Render one pnpm `overrides:` block for the exact audited graph.
+ * @param {Readonly<Record<string, string>>} overrides Audited name to version map.
+ * @returns {string} YAML block, including the `overrides:` key and a trailing newline.
+ */
+export function renderOfficialHostOverrides(overrides) {
+  return [
+    'overrides:',
+    ...Object.entries(overrides).map(([name, version]) => `  '${name}': '${version}'`),
+    '',
+  ].join('\n')
+}
+
+/**
+ * Require a generated lockfile to resolve the exact audited @deepseek-ai graph.
+ * Dev-only entries need not reappear in a production install; every shared name
+ * must resolve to the same version, and the top-level Host must be exact.
+ * @param {{lockfile: string, overrides: Readonly<Record<string, string>>, label: string}} input Installed lockfile and audited overrides.
+ */
+export function assertOfficialHostGraph({ lockfile, overrides, label }) {
+  const installed = auditedOfficialHostOverrides(lockfile)
+  for (const [name, version] of Object.entries(installed)) {
+    const audited = overrides[name]
+    if (audited !== undefined && audited !== version) {
+      throw new AcceptanceFailure(
+        'OFFICIAL-HOST-GRAPH-DRIFT',
+        `${label} resolved ${name} to ${version} instead of audited ${audited}`,
+      )
+    }
+  }
+  if (installed['@deepseek-ai/dsh'] !== TARGET_DSH_VERSION) {
+    throw new AcceptanceFailure(
+      'OFFICIAL-HOST-GRAPH-DRIFT',
+      `${label} did not resolve the exact audited DSH version`,
+    )
+  }
+}
+
+/**
  * Require the Host executable and package to resolve inside the isolated root and outside the source project.
  * @param {{hostRoot: string, projectRoot: string, dshBin: string, packageRoot: string}} paths Candidate paths.
  */
@@ -91,6 +178,12 @@ export async function installOfficialDshHost(options) {
     flag: 'wx',
     mode: 0o600,
   })
+  const auditedLockfile = await readFile(join(options.projectRoot, 'pnpm-lock.yaml'), 'utf8')
+  const overrides = auditedOfficialHostOverrides(auditedLockfile)
+  await writeFile(join(options.hostRoot, 'pnpm-workspace.yaml'), renderOfficialHostOverrides(overrides), {
+    flag: 'wx',
+    mode: 0o600,
+  })
   await runChecked('pnpm', [
     '--dir', options.hostRoot,
     'add', `@deepseek-ai/dsh@${TARGET_DSH_VERSION}`,
@@ -103,6 +196,7 @@ export async function installOfficialDshHost(options) {
     timeoutMs: options.timeoutMs ?? 240_000,
   })
   const lockfile = await readFile(join(options.hostRoot, 'pnpm-lock.yaml'), 'utf8')
+  assertOfficialHostGraph({ lockfile, overrides, label: 'isolated official Host' })
   const registryIntegrity = parsePnpmRegistryIntegrity(lockfile, '@deepseek-ai/dsh', TARGET_DSH_VERSION)
   if (registryIntegrity !== TARGET_DSH_REGISTRY_INTEGRITY) {
     throw new AcceptanceFailure(
@@ -133,6 +227,45 @@ export async function installOfficialDshHost(options) {
     registryIntegrity,
     packageTreeDigest: await immutablePackageTreeDigest(packageRoot),
     version: manifest.version,
+  })
+}
+
+/**
+ * Pin the official Web Profile's pnpm resolution to the exact audited graph
+ * before the offline `dsh plugin add` runs.
+ *
+ * The official CLI initializes `DSH_HOME/profiles/web` on first use with its own
+ * `pnpm-workspace.yaml` (`packages: [.], nodeLinker: hoisted,
+ * autoInstallPeers: false`). The subsequent `dsh plugin add ... --offline`
+ * forwards to `pnpm` in that directory, which resolves the packed plugin's
+ * caret-ranged dependencies against the live registry. Those versions are not
+ * in the store populated by the repository's locked install, so offline mode
+ * aborts with `ERR_PNPM_NO_OFFLINE_TARBALL` and the CLI exits 1. Pre-creating
+ * the profile with the same overrides makes the offline install resolve only
+ * the audited versions whose tarballs the locked install already stored.
+ *
+ * The official CLI intentionally leaves an existing `pnpm-workspace.yaml`
+ * untouched, so this write is stable across the add, boot, and removal phases.
+ *
+ * @param {{profileRoot: string, projectRoot: string}} options Profile and source roots.
+ * @returns {Promise<void>}
+ */
+export async function pinOfficialProfileResolution({ profileRoot, projectRoot }) {
+  const lockfile = await readFile(join(projectRoot, 'pnpm-lock.yaml'), 'utf8')
+  const overrides = auditedOfficialHostOverrides(lockfile)
+  await mkdir(profileRoot, { recursive: true, mode: 0o700 })
+  await writeFile(join(profileRoot, 'pnpm-workspace.yaml'), [
+    'packages:',
+    '  - .',
+    '',
+    'nodeLinker: hoisted',
+    'autoInstallPeers: false',
+    '',
+    renderOfficialHostOverrides(overrides).trimEnd(),
+    '',
+  ].join('\n'), {
+    flag: 'wx',
+    mode: 0o600,
   })
 }
 
