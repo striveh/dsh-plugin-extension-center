@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -15,7 +15,9 @@ import {
   AcceptanceFailure,
   TARGET_DSH_REGISTRY_INTEGRITY,
   assertIsolatedOfficialHostPaths,
+  assertOfficialHostGraph,
   assertSourceBindingClosed,
+  auditedOfficialHostOverrides,
   comboUrlContainsClientBundle,
   describeUnadmittedConnectionFrame,
   describeNetworkDestination,
@@ -26,7 +28,9 @@ import {
   parseAdmittedConnectionFrame,
   parsePnpmRegistryIntegrity,
   parseReadyUrl,
+  pinOfficialProfileResolution,
   readSourceBinding,
+  renderOfficialHostOverrides,
   removedProfileEvidence,
   removedProfileEvidenceError,
   runChecked,
@@ -66,6 +70,114 @@ test('official Host identity binds one exact registry integrity and isolated roo
     }),
     error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-NOT-ISOLATED',
   )
+})
+
+test('audited official Host overrides bind every @deepseek-ai lockfile version', () => {
+  const lockfile = [
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+    `    resolution: {integrity: ${TARGET_DSH_REGISTRY_INTEGRITY}}`,
+    "  '@deepseek-ai/dsh-app-boot@0.1.2-alpha.3':",
+    '    resolution: {integrity: sha512-AAAA}',
+    "  '@deepseek-ai/cordis@4.0.2':",
+    '    resolution: {integrity: sha512-BBBB}',
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17(@deepseek-ai/cordis@4.0.2)':",
+    '    resolution: {integrity: sha512-CCCC}',
+    "  '@deepseek-ai/cordis-plugin-hmr@1.0.17(@deepseek-ai/cordis-plugin-timer@1.1.4)(@deepseek-ai/cordis@4.0.2)':",
+    '    resolution: {integrity: sha512-CCCC}',
+    '  react@18.3.1:',
+    '    resolution: {integrity: sha512-DDDD}',
+    '',
+  ].join('\n')
+  const overrides = auditedOfficialHostOverrides(lockfile)
+  assert.deepEqual(overrides, {
+    '@deepseek-ai/cordis': '4.0.2',
+    '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+    '@deepseek-ai/dsh': '0.1.2-alpha.3',
+    '@deepseek-ai/dsh-app-boot': '0.1.2-alpha.3',
+  })
+  assert.equal(renderOfficialHostOverrides(overrides), [
+    'overrides:',
+    "  '@deepseek-ai/cordis': '4.0.2'",
+    "  '@deepseek-ai/cordis-plugin-hmr': '1.0.17'",
+    "  '@deepseek-ai/dsh': '0.1.2-alpha.3'",
+    "  '@deepseek-ai/dsh-app-boot': '0.1.2-alpha.3'",
+    '',
+  ].join('\n'))
+  assert.throws(
+    () => auditedOfficialHostOverrides(''),
+    error => error instanceof TypeError,
+  )
+  assert.throws(
+    () => auditedOfficialHostOverrides('  react@18.3.1:\n'),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-INCOMPLETE',
+  )
+  assert.throws(
+    () => auditedOfficialHostOverrides([
+      "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+      "  '@deepseek-ai/dsh@0.1.2-rc.1':",
+      '',
+    ].join('\n')),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-LOCK-AMBIGUOUS',
+  )
+})
+
+test('official Host graph assertion rejects registry drift', () => {
+  const overrides = Object.freeze({
+    '@deepseek-ai/dsh': '0.1.2-alpha.3',
+    '@deepseek-ai/schemastery': '3.18.2',
+  })
+  const exact = [
+    "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+    "  '@deepseek-ai/schemastery@3.18.2':",
+    '',
+  ].join('\n')
+  assert.doesNotThrow(() => assertOfficialHostGraph({ lockfile: exact, overrides, label: 'profile' }))
+  assert.throws(
+    () => assertOfficialHostGraph({
+      lockfile: exact.replace('schemastery@3.18.2', 'schemastery@3.19.0'),
+      overrides,
+      label: 'profile',
+    }),
+    error => error instanceof AcceptanceFailure
+      && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT'
+      && error.message.includes('@deepseek-ai/schemastery'),
+  )
+  assert.throws(
+    () => assertOfficialHostGraph({
+      lockfile: exact.replace('dsh@0.1.2-alpha.3', 'dsh@0.1.2-rc.1'),
+      overrides,
+      label: 'profile',
+    }),
+    error => error instanceof AcceptanceFailure && error.code === 'OFFICIAL-HOST-GRAPH-DRIFT',
+  )
+})
+
+test('official Profile resolution is pinned to the audited graph before offline install', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'extension-center-profile-pin-'))
+  try {
+    const projectRoot = join(root, 'project')
+    const profileRoot = join(root, 'dsh-home', 'profiles', 'web')
+    await mkdir(projectRoot, { recursive: true })
+    await writeFile(join(projectRoot, 'pnpm-lock.yaml'), [
+      "  '@deepseek-ai/dsh@0.1.2-alpha.3':",
+      "  '@deepseek-ai/cordis@4.0.2':",
+      "  '@deepseek-ai/schemastery@3.18.2':",
+      '  react@18.3.1:',
+      '',
+    ].join('\n'))
+    await pinOfficialProfileResolution({ profileRoot, projectRoot })
+    const workspace = await readFile(join(profileRoot, 'pnpm-workspace.yaml'), 'utf8')
+    assert.match(workspace, /^packages:\n  - \.\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\noverrides:/u)
+    assert.match(workspace, /'@deepseek-ai\/dsh': '0\.1\.2-alpha\.3'/u)
+    assert.match(workspace, /'@deepseek-ai\/schemastery': '3\.18\.2'/u)
+    assert.doesNotMatch(workspace, /react/u)
+    await assert.rejects(
+      pinOfficialProfileResolution({ profileRoot, projectRoot }),
+      error => error?.code === 'EEXIST',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('official package tree digest is deterministic and detects byte changes', async () => {
