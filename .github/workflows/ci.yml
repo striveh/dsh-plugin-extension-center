@@ -90,9 +90,6 @@ jobs:
         # once here, outside the checkout so the lane's clean-worktree check holds;
         # the acceptance lane itself remains strictly offline.
         run: |
-          warm_root="$RUNNER_TEMP/dsh-extension-center-cache-warm"
-          mkdir -p "$warm_root"
-          printf '{\n  "private": true\n}\n' > "$warm_root/package.json"
           # Exact runtime dependencies declared by the packed artifact (package.json).
           # Fail closed if they change, so the warm-up never silently goes stale.
           expected="@deepseek-ai/dsh-mcp-client@0.1.2-alpha.3 pnpm@11.21.0 yaml@2.9.0"
@@ -101,7 +98,10 @@ jobs:
             echo "::error::packed runtime dependencies changed; update the CI warm-up step and the offline acceptance lane"
             exit 1
           }
-          pnpm --dir "$warm_root" add $expected --save-exact --ignore-scripts
+          warm_root="$RUNNER_TEMP/dsh-extension-center-cache-warm"
+          mkdir -p "$warm_root"
+          printf '{\n  "private": true\n}\n' > "$warm_root/package.json"
+          (cd "$warm_root" && pnpm add $expected --save-exact --ignore-scripts)
       - name: Install isolated Chromium runtime
         run: pnpm exec playwright install --with-deps chromium
       - name: Prove standard packed-plugin install and Host plus Client boot
